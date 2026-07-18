@@ -1,0 +1,776 @@
+@page "/"
+@using Microsoft.AspNetCore.SignalR.Client
+@using Microsoft.EntityFrameworkCore
+@using MudBlazor
+@using System.Globalization
+@using System.Text.Json
+@using NexusApp.Data
+@using NexusApp.Interfaces
+@using NexusApp.Models
+@using NexusApp.Services
+@inject TradingSignalService SignalService
+@inject IDbContextFactory<TradingDbContext> DbFactory
+@inject NavigationManager Nav
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+@inject ITradingEngine TradingEngine
+@inject ISettingsService SettingsService
+@implements IAsyncDisposable
+
+<PageTitle>Trading Dashboard</PageTitle>
+
+<MudText Typo="Typo.h4" Class="mb-4">Trading Dashboard</MudText>
+<style>
+    .cmp-blink-up {
+        animation: cmp-up 0.7s ease-in-out 1;
+    }
+    .cmp-blink-down {
+        animation: cmp-down 0.7s ease-in-out 1;
+    }
+    @@keyframes cmp-up {
+        0% { box-shadow: 0 0 0 0 rgba(47, 158, 68, 0.9); }
+        100% { box-shadow: 0 0 0 8px rgba(47, 158, 68, 0); }
+    }
+    @@keyframes cmp-down {
+        0% { box-shadow: 0 0 0 0 rgba(224, 49, 49, 0.9); }
+        100% { box-shadow: 0 0 0 8px rgba(224, 49, 49, 0); }
+    }
+</style>
+
+<MudGrid Spacing="3">
+    <MudItem xs="12" sm="6" md="3">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Today's Signals</MudText>
+            <MudText Typo="Typo.h4">@_todaySignals</MudText>
+        </MudPaper>
+    </MudItem>
+    <MudItem xs="12" sm="6" md="3">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Open Positions</MudText>
+            <MudText Typo="Typo.h4">@_openPositions</MudText>
+        </MudPaper>
+    </MudItem>
+    <MudItem xs="12" sm="6" md="3">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Executed Today</MudText>
+            <MudText Typo="Typo.h4">@_executedToday</MudText>
+        </MudPaper>
+    </MudItem>
+    <MudItem xs="12" sm="6" md="3">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Unrealised P&amp;L</MudText>
+            <MudText Typo="Typo.h4" Color="@(_totalPnL >= 0 ? Color.Success : Color.Error)">
+                @_totalPnL.ToString("N2")
+            </MudText>
+        </MudPaper>
+    </MudItem>
+
+    <MudItem xs="12">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+                    <MudText Typo="Typo.h6">Live Signals</MudText>
+                    <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Outlined">
+                        Crossed: @GetCrossedCount() / @_signals.Count
+                    </MudChip>
+                </MudStack>
+                <MudButton StartIcon="@Icons.Material.Filled.Refresh" OnClick="RefreshAsync" Size="Size.Small">Refresh</MudButton>
+            </MudStack>
+            @if (_signals.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info">No signals received yet. Configure Telegram in appsettings.json and enable it.</MudAlert>
+            }
+            else
+            {
+                <MudTable Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" RowStyleFunc="GetSignalRowStyle">
+                    <HeaderContent>
+                        <MudTh>Time</MudTh>
+                        <MudTh>Signal</MudTh>
+                        <MudTh>Signal Values</MudTh>
+                        <MudTh>Order Inputs</MudTh>
+                        <MudTh>CMP</MudTh>
+                        <MudTh>Delay</MudTh>
+                        <MudTh>Status</MudTh>
+                        <MudTh>Actions</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>@context.ReceivedTimestamp.ToLocalTime().ToString("HH:mm:ss")</MudTd>
+                        <MudTd>
+                            <MudChip T="string" Size="Size.Small" Color="@(context.Action == SignalAction.Buy ? Color.Success : Color.Error)">@context.Action</MudChip>
+                            @context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()
+                        </MudTd>
+                        <MudTd>
+                            <MudStack Row="true" Spacing="1">
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">Entry: @context.EntryPrice.ToString("0.##")</MudChip>
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">SL: @context.StopLoss.ToString("0.##")</MudChip>
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">T: @string.Join(" / ", context.Targets.Select(t => t.ToString("0.##")))</MudChip>
+                            </MudStack>
+                        </MudTd>
+                        <MudTd>
+                            @if (IsEditable(context))
+                            {
+                                <MudStack Row="true" Spacing="1" Style="min-width:300px" AlignItems="AlignItems.Center">
+                                    <MudNumericField T="decimal"
+                                                     Value="GetEdit(context).EntryPrice"
+                                                     ValueChanged="@((decimal v) => OnEntryChanged(context.Id, v))"
+                                                     Label="Entry"
+                                                     Variant="Variant.Outlined"
+                                                     HideSpinButtons="true"
+                                                     Style="max-width:90px" />
+                                    <MudNumericField T="decimal"
+                                                     Value="GetEdit(context).StopLoss"
+                                                     ValueChanged="@((decimal v) => OnStopLossChanged(context.Id, v))"
+                                                     Label="SL"
+                                                     Variant="Variant.Outlined"
+                                                     HideSpinButtons="true"
+                                                     Style="max-width:90px" />
+                                    <MudTextField T="string"
+                                                  Value="GetEdit(context).TargetsText"
+                                                  ValueChanged="@((string v) => OnTargetsChanged(context.Id, v))"
+                                                  Label="T1"
+                                                  Variant="Variant.Outlined"
+                                                  Style="max-width:100px"
+                                                  Placeholder="155" />
+                                    <MudNumericField T="decimal"
+                                                     Value="GetEdit(context).Lots"
+                                                     ValueChanged="@((decimal v) => OnLotsChanged(context.Id, v))"
+                                                     Label="Lots"
+                                                     Variant="Variant.Outlined"
+                                                     HideSpinButtons="true"
+                                                     Min="1"
+                                                     Style="max-width:72px" />
+                                </MudStack>
+                            }
+                            else
+                            {
+                                <MudText Typo="Typo.body2" Color="Color.Secondary">Locked after execution</MudText>
+                            }
+                        </MudTd>
+                        <MudTd>
+                            <MudChip T="string"
+                                     Color="@(HasCmpCrossedEntry(context) ? Color.Success : Color.Info)"
+                                     Variant="Variant.Filled"
+                                     Size="Size.Small"
+                                     Class="@GetCmpBlinkClass(context)">
+                                CMP: @GetCmpDisplay(context)
+                            </MudChip>
+                        </MudTd>
+                        <MudTd>@FormatDelay(context.SignalDelayMs)</MudTd>
+                        <MudTd>
+                            <MudStack Row="true" Spacing="1">
+                                <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
+                                @if (HasCmpCrossedEntry(context))
+                                {
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Success">Crossed</MudChip>
+                                }
+                            </MudStack>
+                        </MudTd>
+                        <MudTd>
+                            @if (IsEditable(context))
+                            {
+                                <MudStack Row="true" Spacing="1">
+                                    <MudButton Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined"
+                                               Style="min-width:56px" OnClick="@(() => SaveAsync(context))">Save</MudButton>
+                                    <MudButton Size="Size.Small" Color="Color.Success" Variant="Variant.Filled"
+                                               Style="min-width:52px" OnClick="@(() => BuyAsync(context))">BUY</MudButton>
+                                    <MudButton Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined"
+                                               Style="min-width:64px" OnClick="@(() => IgnoreAsync(context))">Ignore</MudButton>
+                                </MudStack>
+                            }
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
+            }
+        </MudPaper>
+    </MudItem>
+
+    <MudItem xs="12">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+                    <MudText Typo="Typo.h6">Watchlist (Active Traded Signals)</MudText>
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                        @_watchlist.Count active
+                    </MudChip>
+                </MudStack>
+            </MudStack>
+            @if (_watchlist.Count == 0)
+            {
+                <MudText Typo="Typo.body2" Color="Color.Secondary">No active traded signals in watchlist.</MudText>
+            }
+            else
+            {
+                <MudTable Items="_watchlist" Dense="true" Hover="true" Bordered="false">
+                    <HeaderContent>
+                        <MudTh>Time</MudTh>
+                        <MudTh>Signal</MudTh>
+                        <MudTh>Entry</MudTh>
+                        <MudTh>CMP</MudTh>
+                        <MudTh>Status</MudTh>
+                        <MudTh>Crossed</MudTh>
+                        <MudTh>Actions</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>@context.ReceivedTimestamp.ToLocalTime().ToString("HH:mm:ss")</MudTd>
+                        <MudTd>@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
+                        <MudTd>@GetEdit(context).EntryPrice.ToString("0.##")</MudTd>
+                        <MudTd>
+                            <MudChip T="string"
+                                     Color="@(HasCmpCrossedEntry(context) ? Color.Success : Color.Info)"
+                                     Variant="Variant.Filled"
+                                     Size="Size.Small"
+                                     Class="@GetCmpBlinkClass(context)">
+                                @GetCmpDisplay(context)
+                            </MudChip>
+                        </MudTd>
+                        <MudTd><MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip></MudTd>
+                        <MudTd>
+                            @if (HasCmpCrossedEntry(context))
+                            {
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Success">Yes</MudChip>
+                            }
+                            else
+                            {
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default">No</MudChip>
+                            }
+                        </MudTd>
+                        <MudTd>
+                            <MudButton Size="Size.Small"
+                                       Color="Color.Default"
+                                       Variant="Variant.Outlined"
+                                       OnClick="@(() => RemoveFromWatchlistAsync(context))">
+                                Remove
+                            </MudButton>
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
+            }
+        </MudPaper>
+    </MudItem>
+
+    <MudItem xs="12">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.h6" Class="mb-2">Open Positions</MudText>
+            @if (_positions.Count == 0)
+            {
+                <MudText Typo="Typo.body2" Color="Color.Secondary">No open positions.</MudText>
+            }
+            else
+            {
+                <MudTable Items="_positions" Dense="true" Hover="true">
+                    <HeaderContent>
+                        <MudTh>Symbol</MudTh>
+                        <MudTh>Qty</MudTh>
+                        <MudTh>Entry</MudTh>
+                        <MudTh>LTP</MudTh>
+                        <MudTh>P&amp;L</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>@context.Symbol</MudTd>
+                        <MudTd>@context.Quantity</MudTd>
+                        <MudTd>@context.EntryPrice</MudTd>
+                        <MudTd>@context.CurrentPrice</MudTd>
+                        <MudTd>
+                            <MudText Color="@(context.UnrealizedPnL >= 0 ? Color.Success : Color.Error)">
+                                @context.UnrealizedPnL.ToString("N2")
+                            </MudText>
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
+            }
+        </MudPaper>
+    </MudItem>
+</MudGrid>
+
+@code {
+    private HubConnection? _hub;
+    private List<TradingSignal> _signals = new();
+    private List<TradingSignal> _watchlist = new();
+    private List<NexusApp.Models.Position> _positions = new();
+    private readonly Dictionary<int, SignalEditModel> _edits = new();
+    private readonly Dictionary<int, decimal> _cmpBySignal = new();
+    private readonly Dictionary<int, int> _cmpTickDirBySignal = new();
+    private readonly Dictionary<int, DateTime> _cmpTickAtBySignal = new();
+    private readonly HashSet<int> _hiddenWatchlistSignalIds = new();
+    private int _todaySignals;
+    private int _openPositions;
+    private int _executedToday;
+    private decimal _totalPnL;
+    // Default lots loaded from global settings (Settings page → "Default Lots per Order")
+    private decimal _defaultLots = 1;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var saved = await SettingsService.GetSettingAsync<int?>("DefaultQuantity");
+        if (saved.HasValue && saved.Value > 0)
+            _defaultLots = saved.Value;
+        await LoadHiddenWatchlistIdsAsync();
+
+        await RefreshAsync();
+        await ConnectHubAsync();
+    }
+
+    private async Task ConnectHubAsync()
+    {
+        try
+        {
+            _hub = new HubConnectionBuilder()
+                .WithUrl(Nav.ToAbsoluteUri("/tradingHub"))
+                .WithAutomaticReconnect()
+                .Build();
+
+            _hub.On<JsonElement>("SignalReceived", async _ =>
+            {
+                await InvokeAsync(async () =>
+                {
+                    await RefreshAsync();
+                    Snackbar.Add("New signal received", Severity.Info);
+                    await JS.InvokeVoidAsync("NexusApp.notify", "Trading Signal", "A new signal was parsed");
+                    await JS.InvokeVoidAsync("NexusApp.beep");
+                });
+            });
+
+            _hub.On<JsonElement>("SignalStatusChanged", async _ =>
+            {
+                await InvokeAsync(RefreshAsync);
+            });
+
+            _hub.On<JsonElement>("CmpTick", payload =>
+            {
+                if (payload.ValueKind != JsonValueKind.Array)
+                    return;
+
+                var changed = false;
+                foreach (var item in payload.EnumerateArray())
+                {
+                    if (!TryGetProp(item, out var idProp, "SignalId", "signalId") ||
+                        !idProp.TryGetInt32(out var signalId) ||
+                        !TryGetProp(item, out var cmpProp, "Cmp", "cmp"))
+                    {
+                        continue;
+                    }
+
+                    if (!TryGetDecimal(cmpProp, out var cmp) || cmp <= 0)
+                        continue;
+
+                    if (_cmpBySignal.TryGetValue(signalId, out var previous) && previous > 0 && previous != cmp)
+                    {
+                        _cmpTickDirBySignal[signalId] = cmp > previous ? 1 : -1;
+                        _cmpTickAtBySignal[signalId] = DateTime.UtcNow;
+                    }
+
+                    _cmpBySignal[signalId] = cmp;
+                    changed = true;
+                }
+
+                if (changed)
+                    _ = InvokeAsync(StateHasChanged);
+            });
+
+            await _hub.StartAsync();
+        }
+        catch
+        {
+            // Hub connection is best-effort; UI still works without it.
+        }
+    }
+
+    // Live Signals grid should show only recent signals. Signals older than this
+    // are stale (older than the 10-min execution cutoff plus a small grace window),
+    // so they don't belong in the "Live" grid — historical rows live in Signals page.
+    private static readonly TimeSpan LiveSignalWindow = TimeSpan.FromMinutes(15);
+
+    private async Task RefreshAsync()
+    {
+        try
+        {
+            var allRecent = await SignalService.GetRecentSignalsAsync(50);
+            var cutoff = DateTime.UtcNow - LiveSignalWindow;
+            _signals = allRecent
+                .Where(s => s.ReceivedTimestamp >= cutoff)
+                .Take(30)
+                .ToList();
+
+            _todaySignals = allRecent.Count(s => s.ReceivedTimestamp.Date == DateTime.UtcNow.Date);
+            _executedToday = allRecent.Count(s => s.Status == SignalStatus.Executed &&
+                s.ReceivedTimestamp.Date == DateTime.UtcNow.Date);
+
+            using var db = await DbFactory.CreateDbContextAsync();
+            _positions = await db.Positions.AsNoTracking()
+                .Where(p => p.ClosedAt == null)
+                .OrderByDescending(p => p.OpenedAt)
+                .Take(20)
+                .ToListAsync();
+            var watch = await db.TradingSignals.AsNoTracking()
+                .Where(s => s.Status == SignalStatus.Pending || s.Status == SignalStatus.Executed)
+                .OrderByDescending(s => s.ProcessedTimestamp)
+                .Take(20)
+                .ToListAsync();
+            _watchlist = watch
+                .Where(s => !_hiddenWatchlistSignalIds.Contains(s.Id))
+                .ToList();
+            _openPositions = _positions.Count;
+            _totalPnL = _positions.Sum(p => p.UnrealizedPnL);
+            SyncEdits();
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Refresh failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private Color StatusColor(SignalStatus s) => s switch
+    {
+        SignalStatus.Executed => Color.Success,
+        SignalStatus.Failed => Color.Error,
+        SignalStatus.Ignored => Color.Default,
+        SignalStatus.Pending => Color.Warning,
+        _ => Color.Info
+    };
+
+    private async Task BuyAsync(TradingSignal signal)
+    {
+        // 1. Persist any edited values (entry/SL/targets) first
+        if (!await PersistEditedValuesAsync(signal, showSuccess: false))
+            return;
+
+        // 2. Re-fetch the signal with latest saved values
+        TradingSignal? refreshed;
+        using (var db = await DbFactory.CreateDbContextAsync())
+            refreshed = await db.TradingSignals.FindAsync(signal.Id);
+
+        if (refreshed is null)
+        {
+            Snackbar.Add("Signal not found.", Severity.Error);
+            return;
+        }
+
+        // 3. Build ParsedSignal from the TradingSignal entity for the engine
+        var edit   = GetEdit(signal);
+        var parsed = new ParsedSignal
+        {
+            Action          = refreshed.Action,
+            Index           = refreshed.Index,
+            Strike          = refreshed.Strike,
+            OptionType      = refreshed.OptionType,
+            EntryPrice      = refreshed.EntryPrice,
+            StopLoss        = refreshed.StopLoss,
+            Targets         = refreshed.Targets.ToList(),
+            ExpiryDate      = refreshed.ExpiryDate,
+            SignalTime      = refreshed.TelegramTimestamp,
+            OriginalMessage = refreshed.OriginalMessage,
+            Lots            = edit.Lots > 0 ? edit.Lots : 1
+        };
+
+        Snackbar.Add($"Manual BUY dispatched for {signal.Index} {FormatStrike(signal.Strike)}{signal.OptionType.ToString().ToUpper()}", Severity.Info);
+
+        // 4. Execute through the trading engine (paper or live based on settings)
+        try
+        {
+            var ok = await TradingEngine.ExecuteSignalAsync(parsed);
+            if (ok)
+                Snackbar.Add($"Order placed ✓ {signal.Index} {FormatStrike(signal.Strike)}{signal.OptionType.ToString().ToUpper()}", Severity.Success);
+            else
+            {
+                string reason = string.Empty;
+                using (var db = await DbFactory.CreateDbContextAsync())
+                {
+                    var latestOrder = await db.Orders.AsNoTracking()
+                        .Where(o => o.SignalId == signal.Id)
+                        .OrderByDescending(o => o.CreatedAt)
+                        .FirstOrDefaultAsync();
+                    reason = latestOrder?.ErrorMessage ?? string.Empty;
+                }
+
+                Snackbar.Add(
+                    string.IsNullOrWhiteSpace(reason)
+                        ? "Order failed — check logs for details (risk limits, duplicate check, or broker error)."
+                        : $"Order rejected: {reason}",
+                    Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Order error: {ex.Message}", Severity.Error);
+        }
+
+        await RefreshAsync();
+    }
+
+    private async Task SaveAsync(TradingSignal signal)
+    {
+        await PersistEditedValuesAsync(signal, showSuccess: true);
+    }
+
+    private async Task IgnoreAsync(TradingSignal signal)
+    {
+        await SignalService.UpdateSignalStatusAsync(signal.Id, SignalStatus.Ignored);
+        Snackbar.Add($"Signal ignored", Severity.Normal);
+        await RefreshAsync();
+    }
+
+    private async Task RemoveFromWatchlistAsync(TradingSignal signal)
+    {
+        _hiddenWatchlistSignalIds.Add(signal.Id);
+        await SaveHiddenWatchlistIdsAsync();
+        _watchlist = _watchlist.Where(s => s.Id != signal.Id).ToList();
+        SyncEdits();
+        StateHasChanged();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_hub is not null)
+        {
+            await _hub.DisposeAsync();
+        }
+    }
+
+    private bool IsEditable(TradingSignal signal) =>
+        signal.Status == SignalStatus.Parsed || signal.Status == SignalStatus.Pending;
+
+    private SignalEditModel GetEdit(TradingSignal signal)
+    {
+        if (!_edits.TryGetValue(signal.Id, out var edit))
+        {
+            edit = new SignalEditModel
+            {
+                EntryPrice  = Math.Max(0, signal.EntryPrice - 10),
+                StopLoss    = Math.Max(0, signal.StopLoss - 50),
+                TargetsText = BuildDefaultTargetText(signal),
+                Lots        = _defaultLots
+            };
+            _edits[signal.Id] = edit;
+        }
+
+        return edit;
+    }
+
+    private void OnEntryChanged(int signalId, decimal value)
+    {
+        if (_edits.TryGetValue(signalId, out var edit))
+            edit.EntryPrice = value;
+    }
+
+    private void OnStopLossChanged(int signalId, decimal value)
+    {
+        if (_edits.TryGetValue(signalId, out var edit))
+            edit.StopLoss = value;
+    }
+
+    private void OnTargetsChanged(int signalId, string value)
+    {
+        if (_edits.TryGetValue(signalId, out var edit))
+            edit.TargetsText = value;
+    }
+
+    private void OnLotsChanged(int signalId, decimal value)
+    {
+        if (_edits.TryGetValue(signalId, out var edit))
+            edit.Lots = Math.Max(1, value);
+    }
+
+    private void SyncEdits()
+    {
+        var activeIds = _signals.Select(s => s.Id)
+            .Concat(_watchlist.Select(s => s.Id))
+            .ToHashSet();
+        foreach (var id in _edits.Keys.Where(k => !activeIds.Contains(k)).ToList())
+            _edits.Remove(id);
+        foreach (var id in _cmpBySignal.Keys.Where(k => !activeIds.Contains(k)).ToList())
+            _cmpBySignal.Remove(id);
+        foreach (var id in _cmpTickDirBySignal.Keys.Where(k => !activeIds.Contains(k)).ToList())
+            _cmpTickDirBySignal.Remove(id);
+        foreach (var id in _cmpTickAtBySignal.Keys.Where(k => !activeIds.Contains(k)).ToList())
+            _cmpTickAtBySignal.Remove(id);
+
+        foreach (var signal in _signals)
+            _ = GetEdit(signal);
+    }
+
+    private async Task<bool> PersistEditedValuesAsync(TradingSignal signal, bool showSuccess)
+    {
+        if (!_edits.TryGetValue(signal.Id, out var edit))
+            return true;
+
+        if (!TryParseTargets(edit.TargetsText, out var targets, out var error))
+        {
+            Snackbar.Add(error, Severity.Warning);
+            return false;
+        }
+
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+            var entity = await db.TradingSignals.FindAsync(signal.Id);
+            if (entity is null)
+            {
+                Snackbar.Add("Signal not found while saving edits.", Severity.Error);
+                return false;
+            }
+
+            entity.EntryPrice = edit.EntryPrice;
+            entity.StopLoss = edit.StopLoss;
+            entity.Targets = targets;
+            entity.ProcessedTimestamp = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+
+            signal.EntryPrice = edit.EntryPrice;
+            signal.StopLoss = edit.StopLoss;
+            signal.Targets = targets;
+            edit.TargetsText = string.Join(" / ", targets);
+
+            if (showSuccess)
+                Snackbar.Add("Signal values updated.", Severity.Success);
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to save signal edits: {ex.Message}", Severity.Error);
+            return false;
+        }
+    }
+
+    private static bool TryParseTargets(string raw, out List<decimal> values, out string error)
+    {
+        values = new List<decimal>();
+        error = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            error = "Targets cannot be empty.";
+            return false;
+        }
+
+        var parts = raw.Split(new[] { '/', ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var part in parts)
+        {
+            if (!decimal.TryParse(part, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed) &&
+                !decimal.TryParse(part, NumberStyles.Number, CultureInfo.CurrentCulture, out parsed))
+            {
+                error = $"Invalid target value: {part}";
+                return false;
+            }
+
+            values.Add(parsed);
+        }
+
+        if (values.Count == 0)
+        {
+            error = "At least one target is required.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private sealed class SignalEditModel
+    {
+        public decimal EntryPrice { get; set; }
+        public decimal StopLoss { get; set; }
+        public string TargetsText { get; set; } = string.Empty;
+        public decimal Lots { get; set; } = 1;
+    }
+
+    private static string FormatStrike(decimal strike) =>
+        strike.ToString("0.##", CultureInfo.InvariantCulture);
+
+    private static string FormatDelay(decimal ms)
+    {
+        if (ms <= 0) return "-";
+        var seconds = (double)ms / 1000.0;
+        return seconds < 1
+            ? $"{seconds:0.00} s"
+            : seconds < 60
+                ? $"{seconds:0.0} s"
+                : seconds < 3600
+                    ? $"{seconds / 60:0.0} min"
+                    : $"{seconds / 3600:0.0} h";
+    }
+
+    private static string BuildDefaultTargetText(TradingSignal signal)
+    {
+        var firstTarget = signal.Targets.Count > 0 ? signal.Targets[0] : signal.EntryPrice;
+        var adjusted = Math.Max(0, firstTarget - 10);
+        return adjusted.ToString("0.##", CultureInfo.InvariantCulture);
+    }
+
+    private string GetCmpDisplay(TradingSignal signal) =>
+        _cmpBySignal.TryGetValue(signal.Id, out var cmp) && cmp > 0
+            ? cmp.ToString("0.##", CultureInfo.InvariantCulture)
+            : "—";
+
+    private bool HasCmpCrossedEntry(TradingSignal signal)
+    {
+        if (!_cmpBySignal.TryGetValue(signal.Id, out var cmp) || cmp <= 0) return false;
+        var entry = GetEdit(signal).EntryPrice;
+        return signal.Action == SignalAction.Buy ? cmp >= entry : cmp <= entry;
+    }
+
+    private string GetSignalRowStyle(TradingSignal signal, int rowNumber)
+    {
+        if (!HasCmpCrossedEntry(signal)) return string.Empty;
+        return signal.Action == SignalAction.Buy
+            ? "background-color: rgba(47,158,68,0.18);"
+            : "background-color: rgba(224,49,49,0.18);";
+    }
+
+    private int GetCrossedCount() => _signals.Count(HasCmpCrossedEntry);
+
+    private string GetCmpBlinkClass(TradingSignal signal)
+    {
+        if (!_cmpTickDirBySignal.TryGetValue(signal.Id, out var dir) || dir == 0)
+            return string.Empty;
+        if (!_cmpTickAtBySignal.TryGetValue(signal.Id, out var at))
+            return string.Empty;
+        if ((DateTime.UtcNow - at) > TimeSpan.FromSeconds(2))
+            return string.Empty;
+        return dir > 0 ? "cmp-blink-up" : "cmp-blink-down";
+    }
+
+    private static bool TryGetDecimal(JsonElement value, out decimal parsed)
+    {
+        parsed = 0m;
+        if (value.ValueKind == JsonValueKind.Number)
+            return value.TryGetDecimal(out parsed);
+        if (value.ValueKind == JsonValueKind.String)
+            return decimal.TryParse(value.GetString(), NumberStyles.Number, CultureInfo.InvariantCulture, out parsed)
+                   || decimal.TryParse(value.GetString(), NumberStyles.Number, CultureInfo.CurrentCulture, out parsed);
+        return false;
+    }
+
+    // Case-insensitive property probe — SignalR's JSON hub protocol may emit
+    // camelCase (default) or PascalCase depending on server configuration.
+    private static bool TryGetProp(JsonElement obj, out JsonElement value, params string[] names)
+    {
+        for (var i = 0; i < names.Length; i++)
+        {
+            if (obj.TryGetProperty(names[i], out value))
+                return true;
+        }
+        value = default;
+        return false;
+    }
+
+    private async Task LoadHiddenWatchlistIdsAsync()
+    {
+        _hiddenWatchlistSignalIds.Clear();
+        var raw = await SettingsService.GetSettingAsync<string>("Watchlist.HiddenSignalIds");
+        if (string.IsNullOrWhiteSpace(raw))
+            return;
+
+        foreach (var part in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (int.TryParse(part, out var id))
+                _hiddenWatchlistSignalIds.Add(id);
+        }
+    }
+
+    private Task SaveHiddenWatchlistIdsAsync()
+    {
+        var serialized = string.Join(",", _hiddenWatchlistSignalIds.OrderBy(i => i));
+        return SettingsService.SetSettingAsync("Watchlist.HiddenSignalIds", serialized);
+    }
+}

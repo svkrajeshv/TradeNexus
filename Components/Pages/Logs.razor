@@ -1,0 +1,78 @@
+@page "/logs"
+@using MudBlazor
+@inject ISnackbar Snackbar
+
+<PageTitle>Logs</PageTitle>
+
+<MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-3">
+    <MudText Typo="Typo.h4">Application Logs</MudText>
+    <MudStack Row="true" Spacing="2">
+        <MudSelect T="string" @bind-Value="_selectedFile" Label="Log File" Variant="Variant.Outlined" Margin="Margin.Dense">
+            @foreach (var f in _files)
+            {
+                <MudSelectItem Value="@f">@System.IO.Path.GetFileName(f)</MudSelectItem>
+            }
+        </MudSelect>
+        <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="LoadAsync" StartIcon="@Icons.Material.Filled.Refresh">Load</MudButton>
+    </MudStack>
+</MudStack>
+
+<MudPaper Class="pa-2" Elevation="2" Style="max-height: 70vh; overflow: auto;">
+    <pre style="font-family:Consolas, monospace; font-size: 0.8rem; color:#c9cbd0; white-space: pre-wrap;">@_content</pre>
+</MudPaper>
+
+@code {
+    private List<string> _files = new();
+    private string _selectedFile = string.Empty;
+    private string _content = string.Empty;
+
+    protected override void OnInitialized()
+    {
+        var dir = System.IO.Path.Combine(AppContext.BaseDirectory, "Logs");
+        if (!System.IO.Directory.Exists(dir))
+        {
+            dir = System.IO.Path.Combine(Environment.CurrentDirectory, "Logs");
+        }
+
+        try
+        {
+            if (System.IO.Directory.Exists(dir))
+            {
+                _files = System.IO.Directory.GetFiles(dir, "*.txt")
+                    .OrderByDescending(f => f)
+                    .Take(30)
+                    .ToList();
+                _selectedFile = _files.FirstOrDefault() ?? string.Empty;
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to enumerate logs: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_selectedFile) || !System.IO.File.Exists(_selectedFile))
+            {
+                _content = "No log file selected.";
+                return;
+            }
+
+            // Read the tail of the file to avoid loading huge logs into memory.
+            using var fs = new System.IO.FileStream(_selectedFile, System.IO.FileMode.Open,
+                System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
+            const int maxTail = 128 * 1024;
+            long start = Math.Max(0, fs.Length - maxTail);
+            fs.Seek(start, System.IO.SeekOrigin.Begin);
+            using var reader = new System.IO.StreamReader(fs);
+            _content = await reader.ReadToEndAsync();
+        }
+        catch (Exception ex)
+        {
+            _content = $"Error reading log: {ex.Message}";
+        }
+    }
+}

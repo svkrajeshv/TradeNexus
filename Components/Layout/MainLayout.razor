@@ -1,0 +1,208 @@
+@inherits LayoutComponentBase
+@using MudBlazor
+@using Microsoft.JSInterop
+@using NexusApp.Telegram
+@using NexusApp.Interfaces
+@using NexusApp.Services
+@inject TelegramManager TelegramMgr
+@inject IBroker Broker
+@inject DataCleanupService Cleanup
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+@implements IDisposable
+
+<MudThemeProvider Theme="_theme" IsDarkMode="_isDarkMode" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<MudLayout>
+    <MudAppBar Elevation="1" Color="Color.Dark">
+        <MudIconButton Icon="@(_drawerOpen ? Icons.Material.Filled.MenuOpen : Icons.Material.Filled.Menu)" Color="Color.Inherit" Edge="Edge.Start"
+                       OnClick="ToggleDrawer" />
+        <MudText Typo="Typo.h6">NexusApp</MudText>
+        <MudSpacer />
+        <MudMenu Icon="@Icons.Material.Filled.CleaningServices"
+                 Label="@(_cleanupRunning ? "Cleaning..." : "Cleanup")"
+                 Color="Color.Warning"
+                 Variant="Variant.Outlined"
+                 Size="Size.Small"
+                 EndIcon="@Icons.Material.Filled.ArrowDropDown"
+                 Disabled="_cleanupRunning"
+                 Class="mr-2">
+            <MudMenuItem Icon="@Icons.Material.Filled.HistoryToggleOff"
+                         OnClick="@(() => RunCleanupAsync(false))">
+                Clean previous-day data
+            </MudMenuItem>
+            <MudMenuItem Icon="@Icons.Material.Filled.DeleteForever"
+                         IconColor="Color.Error"
+                         OnClick="@(() => RunCleanupAsync(true))">
+                Clean ALL data
+            </MudMenuItem>
+        </MudMenu>
+        <MudIconButton Icon="@(_isDarkMode ? Icons.Material.Filled.LightMode : Icons.Material.Filled.DarkMode)"
+                       Color="Color.Inherit"
+                       OnClick="ToggleTheme" />
+        <MudChip T="string" Icon="@Icons.Material.Filled.Circle" Color="@(_brokerConnected ? Color.Success : Color.Error)"
+                 Size="Size.Small">@(_brokerConnected ? "Broker Online" : "Broker Offline")</MudChip>
+        <MudChip T="string" Icon="@Icons.Material.Filled.Circle" Color="@TelegramChipColor()"
+                 Size="Size.Small">@TelegramChipLabel()</MudChip>
+    </MudAppBar>
+
+    <MudDrawer @bind-Open="_drawerOpen" Elevation="2" ClipMode="DrawerClipMode.Always" Variant="DrawerVariant.Mini" OpenMiniOnHover="true">
+        <NavMenu />
+    </MudDrawer>
+
+    <MudMainContent Class="pt-16 pa-4">
+        @Body
+    </MudMainContent>
+</MudLayout>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">🗙</span>
+</div>
+
+@code {
+    private bool _drawerOpen = true;
+    private bool _isDarkMode = true;
+    private bool _brokerConnected;
+    private bool _cleanupRunning;
+    private TelegramConnectionState _telegramState = TelegramConnectionState.Disconnected;
+    private System.Threading.Timer? _pollTimer;
+
+    protected override void OnInitialized()
+    {
+        _telegramState = TelegramMgr.State;
+        _brokerConnected = Broker.IsConnected;
+        TelegramMgr.StateChanged += OnTelegramStateChanged;
+
+        // Broker doesn't emit events yet; poll quickly so header reflects login promptly.
+        _pollTimer = new System.Threading.Timer(_ =>
+        {
+            var updated = Broker.IsConnected;
+            if (updated != _brokerConnected)
+            {
+                _brokerConnected = updated;
+                _ = InvokeAsync(StateHasChanged);
+            }
+        }, null, TimeSpan.Zero, TimeSpan.FromSeconds(1));
+    }
+
+    private async void OnTelegramStateChanged(TelegramConnectionState s)
+    {
+        _telegramState = s;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        TelegramMgr.StateChanged -= OnTelegramStateChanged;
+        _pollTimer?.Dispose();
+    }
+
+    private void ToggleDrawer() => _drawerOpen = !_drawerOpen;
+
+    private void ToggleTheme() => _isDarkMode = !_isDarkMode;
+
+    private async Task OnCleanupClickedAsync() => await RunCleanupAsync(false);
+
+    private async Task RunCleanupAsync(bool allData)
+    {
+        var message = allData
+            ? "Clean ALL trading data?\n\nThis will permanently delete every signal, order, position, audit log, watchlist item and rolled log file. This cannot be undone."
+            : "Clean previous-day data?\n\nThis will permanently delete signals, orders, positions, audit logs and rolled log files from before today. Today's data is preserved.";
+
+        bool confirmed;
+        try
+        {
+            confirmed = await JS.InvokeAsync<bool>("confirm", message);
+        }
+        catch (JSDisconnectedException) { return; }
+        catch (TaskCanceledException) { return; }
+
+        if (!confirmed) return;
+
+        _cleanupRunning = true;
+        StateHasChanged();
+
+        DataCleanupService.CleanupResult? result = null;
+        try
+        {
+            result = await Cleanup.CleanupAsync(allData: allData);
+        }
+        catch (Exception ex)
+        {
+            try { Snackbar.Add($"Cleanup failed: {ex.Message}", Severity.Error); } catch { }
+            _cleanupRunning = false;
+            StateHasChanged();
+            return;
+        }
+
+        try
+        {
+            Snackbar.Add(
+                $"Cleanup done — signals: {result.SignalsRemoved}, orders: {result.OrdersRemoved}, positions: {result.PositionsRemoved}, audits: {result.AuditLogsRemoved}, logs: {result.LogFilesRemoved}",
+                Severity.Success);
+        }
+        catch { /* snackbar not critical */ }
+
+        // Give the MudMenu a moment to close & the snackbar to render before the
+        // navigation tears down the circuit — otherwise MudMenu's post-click
+        // focus JS interop throws JSDisconnectedException.
+        await Task.Delay(300);
+
+        _cleanupRunning = false;
+        try
+        {
+            // forceLoad=true triggers a full page reload so every page re-queries the DB.
+            Nav.NavigateTo(Nav.Uri, forceLoad: true);
+        }
+        catch (Exception) { /* navigation always throws on server-side; swallow */ }
+    }
+
+    private Color TelegramChipColor() => _telegramState switch
+    {
+        TelegramConnectionState.Connected => Color.Success,
+        TelegramConnectionState.Connecting => Color.Info,
+        TelegramConnectionState.AwaitingCode or TelegramConnectionState.AwaitingPassword => Color.Warning,
+        TelegramConnectionState.Failed => Color.Error,
+        _ => Color.Warning
+    };
+
+    private string TelegramChipLabel() => _telegramState switch
+    {
+        TelegramConnectionState.Connected => "Telegram Live",
+        TelegramConnectionState.Connecting => "Telegram Connecting",
+        TelegramConnectionState.AwaitingCode => "Telegram Awaiting Code",
+        TelegramConnectionState.AwaitingPassword => "Telegram Awaiting 2FA",
+        TelegramConnectionState.Failed => "Telegram Failed",
+        _ => "Telegram Idle"
+    };
+
+    // A muted, high-contrast dark theme suited to trading dashboards.
+    private readonly MudTheme _theme = new()
+    {
+        PaletteDark = new PaletteDark
+        {
+            Primary = "#2f9e44",
+            Secondary = "#4dabf7",
+            Tertiary = "#ffa94d",
+            AppbarBackground = "#111214",
+            AppbarText = "#e6e6e6",
+            DrawerBackground = "#161719",
+            DrawerText = "#c9cbd0",
+            DrawerIcon = "#c9cbd0",
+            Background = "#0e0f11",
+            Surface = "#161719",
+            Success = "#2f9e44",
+            Error = "#e03131",
+            Warning = "#f59f00",
+            Info = "#4dabf7",
+            TextPrimary = "#e6e6e6",
+            TextSecondary = "#adb5bd"
+        }
+    };
+}

@@ -1,0 +1,16 @@
+# Build artifacts
+bin/
+obj/
+
+# Local databases and session files
+*.db
+*.db-shm
+*.db-wal
+*.session
+
+# Logs
+Logs/
+
+# User settings
+*.user
+.vs/

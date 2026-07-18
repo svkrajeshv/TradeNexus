@@ -1,0 +1,190 @@
+@page "/settings"
+@using MudBlazor
+@using NexusApp.Interfaces
+@inject ISettingsService SettingsService
+@inject ISnackbar Snackbar
+
+<PageTitle>Settings</PageTitle>
+
+<MudText Typo="Typo.h4" Class="mb-4">Settings</MudText>
+
+<MudGrid Spacing="3">
+    <MudItem xs="12" md="6">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.h6" Class="mb-3">Trading Mode</MudText>
+            <MudSelect T="string" @bind-Value="_tradingMode" Label="Mode" Variant="Variant.Outlined">
+                <MudSelectItem Value="@("manual")">Manual (confirm each trade)</MudSelectItem>
+                <MudSelectItem Value="@("auto")">Automatic (place immediately)</MudSelectItem>
+            </MudSelect>
+            <MudSwitch T="bool" @bind-Value="_paperTrading" Color="Color.Primary" Class="mt-3" Label="Paper Trading (simulate orders, no real money)" />
+        </MudPaper>
+    </MudItem>
+
+    <MudItem xs="12" md="6">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.h6" Class="mb-3">Risk Management</MudText>
+            <MudNumericField T="decimal" @bind-Value="_dailyMaxLoss" Label="Daily Max Loss (₹)" Variant="Variant.Outlined" Class="mb-2" />
+            <MudNumericField T="decimal" @bind-Value="_dailyMaxProfit" Label="Daily Max Profit (₹)" Variant="Variant.Outlined" Class="mb-2" />
+            <MudNumericField T="int" @bind-Value="_maxOpenPositions" Label="Max Open Positions" Variant="Variant.Outlined" Class="mb-2" />
+            <MudNumericField T="int" @bind-Value="_maxTradesPerDay" Label="Max Trades / Day" Variant="Variant.Outlined" Class="mb-2" />
+            <MudNumericField T="decimal" @bind-Value="_stopLossBuffer" Label="Stop-loss Buffer (pts)" Variant="Variant.Outlined" />
+        </MudPaper>
+    </MudItem>
+
+    <MudItem xs="12" md="6">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.h6" Class="mb-1">Default Order Size</MudText>
+            <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3">
+                Used as the pre-filled Lots value on every new signal. You can override per-signal on the Dashboard.
+            </MudText>
+            <MudNumericField T="int"
+                             @bind-Value="_defaultQuantity"
+                             Label="Default Lots per Order"
+                             HelperText="e.g. 1 lot = 75 qty for NIFTY, 30 for BANKNIFTY"
+                             Variant="Variant.Outlined"
+                             Min="1"
+                             Class="mb-3" />
+
+            <MudDivider Class="my-3" />
+            <MudText Typo="Typo.subtitle2" Class="mb-2">Per-Index Lot Overrides <MudText Typo="Typo.caption" Color="Color.Secondary">(0 = use default above)</MudText></MudText>
+            <MudGrid Spacing="2">
+                <MudItem xs="6">
+                    <MudNumericField T="int" @bind-Value="_lotsNifty"      Label="NIFTY"      Variant="Variant.Outlined" Min="0" />
+                </MudItem>
+                <MudItem xs="6">
+                    <MudNumericField T="int" @bind-Value="_lotsBankNifty"  Label="BANKNIFTY"  Variant="Variant.Outlined" Min="0" />
+                </MudItem>
+                <MudItem xs="6">
+                    <MudNumericField T="int" @bind-Value="_lotsFinNifty"   Label="FINNIFTY"   Variant="Variant.Outlined" Min="0" />
+                </MudItem>
+                <MudItem xs="6">
+                    <MudNumericField T="int" @bind-Value="_lotsMidcpNifty" Label="MIDCPNIFTY" Variant="Variant.Outlined" Min="0" />
+                </MudItem>
+                <MudItem xs="6">
+                    <MudNumericField T="int" @bind-Value="_lotsSensex"     Label="SENSEX"     Variant="Variant.Outlined" Min="0" />
+                </MudItem>
+                <MudItem xs="6">
+                    <MudNumericField T="int" @bind-Value="_lotsBankex"     Label="BANKEX"     Variant="Variant.Outlined" Min="0" />
+                </MudItem>
+            </MudGrid>
+        </MudPaper>
+    </MudItem>
+
+    <MudItem xs="12" md="6">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.h6" Class="mb-3">Notifications</MudText>
+            <MudSwitch T="bool" @bind-Value="_browserNotifications" Color="Color.Primary" Label="Browser notifications" />
+            <MudSwitch T="bool" @bind-Value="_soundAlerts" Color="Color.Primary" Label="Sound alerts" />
+        </MudPaper>
+    </MudItem>
+
+    <MudItem xs="12" md="6">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.h6" Class="mb-3">Trading Hours</MudText>
+            <MudNumericField T="int" @bind-Value="_marketOpenHour" Label="Open Hour (0-23)" Variant="Variant.Outlined" Class="mb-2" />
+            <MudNumericField T="int" @bind-Value="_marketCloseHour" Label="Close Hour (0-23)" Variant="Variant.Outlined" Class="mb-2" />
+            <MudSwitch T="bool" @bind-Value="_allowAfterMarketHours" Color="Color.Warning" Label="Allow orders after market hours (testing)" Class="mb-2" />
+            <MudSwitch T="bool" @bind-Value="_killSwitch" Color="Color.Error" Label="Emergency Kill Switch (block all trades)" />
+        </MudPaper>
+    </MudItem>
+</MudGrid>
+
+<MudStack Row="true" Class="mt-4" Spacing="2">
+    <MudButton Color="Color.Primary" Variant="Variant.Filled" StartIcon="@Icons.Material.Filled.Save" OnClick="SaveAsync">Save Settings</MudButton>
+    <MudButton Variant="Variant.Outlined" OnClick="LoadAsync">Reload</MudButton>
+</MudStack>
+
+@code {
+    private string _tradingMode = "manual";
+    private bool _paperTrading = true;
+    private int _defaultQuantity = 1;
+
+    // Per-index lot overrides
+    private int _lotsNifty      = 0;
+    private int _lotsBankNifty  = 0;
+    private int _lotsFinNifty   = 0;
+    private int _lotsMidcpNifty = 0;
+    private int _lotsSensex     = 0;
+    private int _lotsBankex     = 0;
+
+    private decimal _dailyMaxLoss = 1000;
+    private decimal _dailyMaxProfit = 5000;
+    private int _maxOpenPositions = 5;
+    private int _maxTradesPerDay = 10;
+    private decimal _stopLossBuffer = 0;
+    private bool _browserNotifications = true;
+    private bool _soundAlerts = true;
+    private int _marketOpenHour = 9;
+    private int _marketCloseHour = 15;
+    private bool _killSwitch = false;
+    private bool _allowAfterMarketHours = false;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _tradingMode = await SettingsService.GetSettingAsync<string>("TradingMode") ?? _tradingMode;
+            var paper = await SettingsService.GetSettingAsync<string>("PaperTrading");
+            if (!string.IsNullOrEmpty(paper)) bool.TryParse(paper, out _paperTrading);
+            var qty = await SettingsService.GetSettingAsync<int?>("DefaultQuantity"); if (qty.HasValue) _defaultQuantity = qty.Value;
+
+            var ln  = await SettingsService.GetSettingAsync<int?>("Lots.NIFTY");       if (ln.HasValue)  _lotsNifty      = ln.Value;
+            var lbn = await SettingsService.GetSettingAsync<int?>("Lots.BANKNIFTY");   if (lbn.HasValue) _lotsBankNifty  = lbn.Value;
+            var lfn = await SettingsService.GetSettingAsync<int?>("Lots.FINNIFTY");    if (lfn.HasValue) _lotsFinNifty   = lfn.Value;
+            var lmn = await SettingsService.GetSettingAsync<int?>("Lots.MIDCPNIFTY");  if (lmn.HasValue) _lotsMidcpNifty = lmn.Value;
+            var ls  = await SettingsService.GetSettingAsync<int?>("Lots.SENSEX");      if (ls.HasValue)  _lotsSensex     = ls.Value;
+            var lbx = await SettingsService.GetSettingAsync<int?>("Lots.BANKEX");      if (lbx.HasValue) _lotsBankex     = lbx.Value;
+
+            var dml  = await SettingsService.GetSettingAsync<decimal?>("DailyMaxLoss");       if (dml.HasValue)  _dailyMaxLoss     = dml.Value;
+            var dmp  = await SettingsService.GetSettingAsync<decimal?>("DailyMaxProfit");     if (dmp.HasValue)  _dailyMaxProfit   = dmp.Value;
+            var mop  = await SettingsService.GetSettingAsync<int?>("MaxOpenPositions");       if (mop.HasValue)  _maxOpenPositions  = mop.Value;
+            var mtpd = await SettingsService.GetSettingAsync<int?>("MaxTradesPerDay");        if (mtpd.HasValue) _maxTradesPerDay   = mtpd.Value;
+            var slb  = await SettingsService.GetSettingAsync<decimal?>("StopLossBuffer");     if (slb.HasValue)  _stopLossBuffer    = slb.Value;
+            var ks   = await SettingsService.GetSettingAsync<string>("KillSwitch");
+            if (!string.IsNullOrEmpty(ks)) bool.TryParse(ks, out _killSwitch);
+            var amh = await SettingsService.GetSettingAsync<string>("AllowAfterMarketHours");
+            if (!string.IsNullOrEmpty(amh)) bool.TryParse(amh, out _allowAfterMarketHours);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to load: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        try
+        {
+            await SettingsService.SetSettingAsync("TradingMode",    _tradingMode);
+            await SettingsService.SetSettingAsync("PaperTrading",   _paperTrading);
+            await SettingsService.SetSettingAsync("DefaultQuantity", _defaultQuantity);
+
+            await SettingsService.SetSettingAsync("Lots.NIFTY",      _lotsNifty);
+            await SettingsService.SetSettingAsync("Lots.BANKNIFTY",  _lotsBankNifty);
+            await SettingsService.SetSettingAsync("Lots.FINNIFTY",   _lotsFinNifty);
+            await SettingsService.SetSettingAsync("Lots.MIDCPNIFTY", _lotsMidcpNifty);
+            await SettingsService.SetSettingAsync("Lots.SENSEX",     _lotsSensex);
+            await SettingsService.SetSettingAsync("Lots.BANKEX",     _lotsBankex);
+
+            await SettingsService.SetSettingAsync("DailyMaxLoss",       _dailyMaxLoss);
+            await SettingsService.SetSettingAsync("DailyMaxProfit",     _dailyMaxProfit);
+            await SettingsService.SetSettingAsync("MaxOpenPositions",   _maxOpenPositions);
+            await SettingsService.SetSettingAsync("MaxTradesPerDay",    _maxTradesPerDay);
+            await SettingsService.SetSettingAsync("StopLossBuffer",     _stopLossBuffer);
+            await SettingsService.SetSettingAsync("BrowserNotifications", _browserNotifications);
+            await SettingsService.SetSettingAsync("SoundAlerts",        _soundAlerts);
+            await SettingsService.SetSettingAsync("MarketOpenHour",     _marketOpenHour);
+            await SettingsService.SetSettingAsync("MarketCloseHour",    _marketCloseHour);
+            await SettingsService.SetSettingAsync("KillSwitch",         _killSwitch);
+            await SettingsService.SetSettingAsync("AllowAfterMarketHours", _allowAfterMarketHours);
+
+            Snackbar.Add("Settings saved", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Save failed: {ex.Message}", Severity.Error);
+        }
+    }
+}

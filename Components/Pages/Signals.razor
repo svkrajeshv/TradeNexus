@@ -1,0 +1,103 @@
+@page "/signals"
+@using Microsoft.EntityFrameworkCore
+@using MudBlazor
+@using System.Globalization
+@using NexusApp.Data
+@using NexusApp.Models
+@using NexusApp.Services
+@inject TradingSignalService SignalService
+@inject IDbContextFactory<TradingDbContext> DbFactory
+@inject ISnackbar Snackbar
+
+<PageTitle>Signals</PageTitle>
+
+<MudText Typo="Typo.h4" Class="mb-4">Signals</MudText>
+
+<MudStack Row="true" Class="mb-3" Spacing="2" AlignItems="AlignItems.Center">
+    <MudDatePicker @bind-Date="_selectedDate" Label="Date" Variant="Variant.Outlined" Margin="Margin.Dense" />
+    <MudButton OnClick="LoadAsync" Color="Color.Primary" Variant="Variant.Filled">Load</MudButton>
+    <MudSpacer />
+    <MudText Typo="Typo.body2">Total: @_signals.Count</MudText>
+</MudStack>
+
+<MudPaper Class="pa-4" Elevation="2">
+    <MudTable Items="_signals" Dense="true" Hover="true" Striped="true">
+        <HeaderContent>
+            <MudTh>Time</MudTh>
+            <MudTh>Action</MudTh>
+            <MudTh>Symbol</MudTh>
+            <MudTh>Entry</MudTh>
+            <MudTh>SL</MudTh>
+            <MudTh>Targets</MudTh>
+            <MudTh>Delay</MudTh>
+            <MudTh>Status</MudTh>
+            <MudTh>Message</MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd>@context.ReceivedTimestamp.ToLocalTime().ToString("HH:mm:ss")</MudTd>
+            <MudTd>
+                <MudChip T="string" Size="Size.Small" Color="@(context.Action == SignalAction.Buy ? Color.Success : Color.Error)">@context.Action</MudChip>
+            </MudTd>
+            <MudTd>@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
+            <MudTd>@context.EntryPrice</MudTd>
+            <MudTd>@context.StopLoss</MudTd>
+            <MudTd>@string.Join(" / ", context.Targets)</MudTd>
+            <MudTd>@FormatDelay(context.SignalDelayMs)</MudTd>
+            <MudTd>
+                <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
+            </MudTd>
+            <MudTd Style="max-width:400px;white-space:pre-wrap;font-size:0.75rem;color:#9aa0a6">@context.OriginalMessage</MudTd>
+        </RowTemplate>
+    </MudTable>
+</MudPaper>
+
+@code {
+    private DateTime? _selectedDate = DateTime.Today;
+    private List<TradingSignal> _signals = new();
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            if (_selectedDate is null)
+            {
+                _signals = await SignalService.GetRecentSignalsAsync(100);
+            }
+            else
+            {
+                _signals = await SignalService.GetSignalsByDateAsync(_selectedDate.Value);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Load failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private Color StatusColor(SignalStatus s) => s switch
+    {
+        SignalStatus.Executed => Color.Success,
+        SignalStatus.Failed => Color.Error,
+        SignalStatus.Ignored => Color.Default,
+        SignalStatus.Pending => Color.Warning,
+        _ => Color.Info
+    };
+
+    private static string FormatStrike(decimal strike) =>
+        strike.ToString("0.##", CultureInfo.InvariantCulture);
+
+    private static string FormatDelay(decimal ms)
+    {
+        if (ms <= 0) return "-";
+        var seconds = (double)ms / 1000.0;
+        return seconds < 1
+            ? $"{seconds:0.00} s"
+            : seconds < 60
+                ? $"{seconds:0.0} s"
+                : seconds < 3600
+                    ? $"{seconds / 60:0.0} min"
+                    : $"{seconds / 3600:0.0} h";
+    }
+}

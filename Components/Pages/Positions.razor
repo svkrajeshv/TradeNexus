@@ -1,0 +1,83 @@
+@page "/positions"
+@using Microsoft.EntityFrameworkCore
+@using MudBlazor
+@using NexusApp.Data
+@using NexusApp.Models
+@inject IDbContextFactory<TradingDbContext> DbFactory
+@inject ISnackbar Snackbar
+
+<PageTitle>Positions</PageTitle>
+
+<MudText Typo="Typo.h4" Class="mb-4">Positions</MudText>
+
+<MudTabs Elevation="2" ApplyEffectsToContainer="true" Rounded="true" PanelClass="pa-4">
+    <MudTabPanel Text="Open" Icon="@Icons.Material.Filled.OpenInNew">
+        <MudTable Items="_open" Dense="true" Hover="true" Striped="true">
+            <HeaderContent>
+                <MudTh>Opened</MudTh>
+                <MudTh>Symbol</MudTh>
+                <MudTh>Qty</MudTh>
+                <MudTh>Entry</MudTh>
+                <MudTh>LTP</MudTh>
+                <MudTh>SL</MudTh>
+                <MudTh>Targets</MudTh>
+                <MudTh>P&amp;L</MudTh>
+                <MudTh>P&amp;L %</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd>@context.OpenedAt.ToLocalTime().ToString("HH:mm:ss")</MudTd>
+                <MudTd>@context.Symbol</MudTd>
+                <MudTd>@context.Quantity</MudTd>
+                <MudTd>@context.EntryPrice</MudTd>
+                <MudTd>@context.CurrentPrice</MudTd>
+                <MudTd>@(context.StopLoss?.ToString() ?? "-")</MudTd>
+                <MudTd>@string.Join(" / ", context.Targets)</MudTd>
+                <MudTd><MudText Color="@(context.UnrealizedPnL >= 0 ? Color.Success : Color.Error)">@context.UnrealizedPnL.ToString("N2")</MudText></MudTd>
+                <MudTd>@context.UnrealizedPnLPercentage.ToString("N2")%</MudTd>
+            </RowTemplate>
+        </MudTable>
+    </MudTabPanel>
+    <MudTabPanel Text="Closed" Icon="@Icons.Material.Filled.CheckCircleOutline">
+        <MudTable Items="_closed" Dense="true" Hover="true" Striped="true">
+            <HeaderContent>
+                <MudTh>Closed</MudTh>
+                <MudTh>Symbol</MudTh>
+                <MudTh>Qty</MudTh>
+                <MudTh>Entry</MudTh>
+                <MudTh>Exit</MudTh>
+                <MudTh>Realised P&amp;L</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd>@context.ClosedAt?.ToLocalTime().ToString("HH:mm:ss")</MudTd>
+                <MudTd>@context.Symbol</MudTd>
+                <MudTd>@context.Quantity</MudTd>
+                <MudTd>@context.EntryPrice</MudTd>
+                <MudTd>@(context.ClosingPrice?.ToString() ?? "-")</MudTd>
+                <MudTd><MudText Color="@((context.RealizedPnL ?? 0) >= 0 ? Color.Success : Color.Error)">@((context.RealizedPnL ?? 0).ToString("N2"))</MudText></MudTd>
+            </RowTemplate>
+        </MudTable>
+    </MudTabPanel>
+</MudTabs>
+
+@code {
+    private List<NexusApp.Models.Position> _open = new();
+    private List<NexusApp.Models.Position> _closed = new();
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+            _open = await db.Positions.AsNoTracking().Where(p => p.ClosedAt == null)
+                .OrderByDescending(p => p.OpenedAt).ToListAsync();
+            _closed = await db.Positions.AsNoTracking().Where(p => p.ClosedAt != null)
+                .OrderByDescending(p => p.ClosedAt).Take(100).ToListAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Load failed: {ex.Message}", Severity.Error);
+        }
+    }
+}
