@@ -1,0 +1,209 @@
+@page "/login"
+@layout LoginLayout
+@attribute [AllowAnonymous]
+@using MudBlazor
+@using Microsoft.AspNetCore.Authorization
+@inject NavigationManager Nav
+@inject Microsoft.AspNetCore.Http.IHttpContextAccessor HttpContextAccessor
+
+<PageTitle>Login - NexusApp</PageTitle>
+
+<MudContainer MaxWidth="MaxWidth.ExtraSmall" Class="d-flex align-center justify-center min-vh-100 pa-4" Style="height: 100vh;">
+    <MudPaper Elevation="4" Class="pa-6 rounded-lg w-100" Style="background-color: #ffffff; border: 1px solid #e2e8f0;">
+        <MudStack AlignItems="AlignItems.Center" Spacing="2" Class="mb-6">
+            <MudAvatar Color="Color.Primary" Variant="Variant.Filled" Size="Size.Large" Class="mb-2">
+                <MudIcon Icon="@Icons.Material.Filled.Lock" Size="Size.Large" />
+            </MudAvatar>
+            <MudText Typo="Typo.h5" Style="font-weight: 700; letter-spacing: 0.5px;">NexusApp</MudText>
+            <MudText Typo="Typo.body2" Color="Color.Secondary">Algorithmic Trading Dashboard</MudText>
+        </MudStack>
+
+        @if (_hasError)
+        {
+            <MudAlert Severity="Severity.Error" Variant="Variant.Filled" Class="mb-4" Dense="true">
+                Invalid username or password.
+            </MudAlert>
+        }
+        else if (_loggedOut)
+        {
+            <MudAlert Severity="Severity.Success" Variant="Variant.Filled" Class="mb-4" Dense="true" Icon="@Icons.Material.Filled.CheckCircle">
+                You have been signed out. See you again soon!
+            </MudAlert>
+        }
+        else if (_passwordReset)
+        {
+            <MudAlert Severity="Severity.Success" Variant="Variant.Filled" Class="mb-4" Dense="true" Icon="@Icons.Material.Filled.CheckCircle">
+                Your password has been reset. Sign in with the new password.
+            </MudAlert>
+        }
+
+        @* Native HTML form: posts to the server endpoint so the auth cookie can be
+           written by HttpContext.SignInAsync. This works during prerender and is
+           immune to the browser-storage login/dashboard flip-flop. *@
+        <form method="post" action="/auth/login">
+            <input type="hidden" name="returnUrl" value="@_returnUrl" />
+            <MudStack Spacing="3">
+                <MudTextField T="string"
+                              Value="_username"
+                              ValueChanged="@(v => _username = v)"
+                              Label="Username"
+                              Variant="Variant.Outlined"
+                              Adornment="Adornment.Start"
+                              AdornmentIcon="@Icons.Material.Filled.Person"
+                              UserAttributes="@(new() { ["name"] = "username" })"
+                              Immediate="true" />
+
+                <MudTextField T="string"
+                              Value="_password"
+                              ValueChanged="@(v => _password = v)"
+                              Label="Password"
+                              Variant="Variant.Outlined"
+                              InputType="@_passwordInputType"
+                              Adornment="Adornment.End"
+                              AdornmentIcon="@_passwordIcon"
+                              OnAdornmentClick="TogglePasswordVisibility"
+                              UserAttributes="@(new() { ["name"] = "password" })"
+                              Immediate="true" />
+
+                <MudButton ButtonType="ButtonType.Submit"
+                           Variant="Variant.Filled"
+                           Color="Color.Primary"
+                           Size="Size.Large"
+                           FullWidth="true"
+                           Class="mt-2 py-3">
+                    <MudText Style="font-weight: 600;">Sign In</MudText>
+                </MudButton>
+            </MudStack>
+        </form>
+
+        <MudButton Href="/forgot-password" Variant="Variant.Text" Color="Color.Primary" FullWidth="true" Class="mt-2">
+            Forgot password?
+        </MudButton>
+
+        <MudDivider Class="my-4" Style="border-color: #2b2c30;" />
+
+        <MudStack AlignItems="AlignItems.Center" Spacing="0">
+            <MudChip T="string" Icon="@Icons.Material.Filled.Computer" Color="Color.Dark" Variant="Variant.Outlined" Size="Size.Small" Style="color: #9e9e9e; border-color: #3a3b40;">
+                IP: @_clientIpAddress
+            </MudChip>
+        </MudStack>
+    </MudPaper>
+</MudContainer>
+
+@code {
+    private string _username = string.Empty;
+    private string _password = string.Empty;
+    private bool _showPassword = false;
+    private string _clientIpAddress = "127.0.0.1";
+    private string _returnUrl = "/";
+    private bool _hasError;
+    private bool _loggedOut;
+    private bool _passwordReset;
+
+    private InputType _passwordInputType => _showPassword ? InputType.Text : InputType.Password;
+    private string _passwordIcon => _showPassword ? Icons.Material.Filled.Visibility : Icons.Material.Filled.VisibilityOff;
+
+    private static string? _cachedPublicIp;
+
+    protected override void OnInitialized()
+    {
+        _clientIpAddress = ResolveIpAddress();
+
+        var uri = new Uri(Nav.Uri);
+        var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query);
+        _hasError = query.ContainsKey("error");
+        _loggedOut = query.ContainsKey("loggedout");
+        _passwordReset = query.ContainsKey("reset");
+        if (query.TryGetValue("returnUrl", out var ru) && !string.IsNullOrWhiteSpace(ru))
+            _returnUrl = ru!;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+            _ = FetchPublicIpAsync();
+        await Task.CompletedTask;
+    }
+
+    private string ResolveIpAddress()
+    {
+        if (!string.IsNullOrWhiteSpace(_cachedPublicIp))
+            return _cachedPublicIp;
+
+        try
+        {
+            var ctx = HttpContextAccessor.HttpContext;
+            if (ctx != null)
+            {
+                var headerIp = ctx.Request.Headers["X-Forwarded-For"].FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(headerIp))
+                {
+                    var cleanIp = headerIp.Split(',')[0].Trim();
+                    if (!IsLocalIp(cleanIp)) return cleanIp;
+                }
+
+                var remoteIp = ctx.Connection.RemoteIpAddress?.ToString();
+                if (!string.IsNullOrWhiteSpace(remoteIp) && !IsLocalIp(remoteIp))
+                    return remoteIp;
+            }
+        }
+        catch { }
+
+        return "Fetching Public IP...";
+    }
+
+    private async Task FetchPublicIpAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(_cachedPublicIp))
+        {
+            _clientIpAddress = _cachedPublicIp;
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        try
+        {
+            using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+            var ip = await http.GetStringAsync("https://api.ipify.org");
+            if (!string.IsNullOrWhiteSpace(ip))
+            {
+                _cachedPublicIp = ip.Trim();
+                _clientIpAddress = _cachedPublicIp;
+                await InvokeAsync(StateHasChanged);
+                return;
+            }
+        }
+        catch { }
+
+        try
+        {
+            using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+            var ip = await http.GetStringAsync("https://icanhazip.com");
+            if (!string.IsNullOrWhiteSpace(ip))
+            {
+                _cachedPublicIp = ip.Trim();
+                _clientIpAddress = _cachedPublicIp;
+                await InvokeAsync(StateHasChanged);
+                return;
+            }
+        }
+        catch { }
+
+        if (_clientIpAddress == "Fetching Public IP...")
+        {
+            _clientIpAddress = "127.0.0.1";
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private static bool IsLocalIp(string ip)
+    {
+        if (string.IsNullOrWhiteSpace(ip)) return true;
+        if (ip == "127.0.0.1" || ip == "::1" || ip.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ip.StartsWith("192.168.") || ip.StartsWith("10.") || ip.StartsWith("172.16.")) return true;
+        return false;
+    }
+
+    private void TogglePasswordVisibility() => _showPassword = !_showPassword;
+}
+

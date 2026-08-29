@@ -19,6 +19,7 @@ public sealed class TelegramSettings
     /// <summary>Channels (title or @username) the listener should subscribe to.</summary>
     public List<string> Channels { get; set; } = new();
     public string DestinationChannel { get; set; } = string.Empty;
+    public string OrderNotificationChannel { get; set; } = string.Empty;
     public bool ForwardOnlySignals { get; set; } = true;
     public bool ForwardAsCopy { get; set; } = true;
 }
@@ -37,6 +38,7 @@ public sealed class TelegramManager
     private const string KeySession = "Telegram.SessionPath";
     private const string KeyChannels = "Telegram.Channels";
     private const string KeyDestinationChannel = "Telegram.DestinationChannel";
+    private const string KeyOrderNotificationChannel = "Telegram.OrderNotificationChannel";
     private const string KeyForwardOnlySignals = "Telegram.ForwardOnlySignals";
     private const string KeyForwardAsCopy = "Telegram.ForwardAsCopy";
 
@@ -82,6 +84,7 @@ public sealed class TelegramManager
         var session = await settings.GetSettingAsync<string>(KeySession);
         var channels = await settings.GetSettingAsync<string>(KeyChannels);
         var destChannel = await settings.GetSettingAsync<string>(KeyDestinationChannel);
+        var orderChannel = await settings.GetSettingAsync<string>(KeyOrderNotificationChannel);
         var onlySignals = await settings.GetSettingAsync<string>(KeyForwardOnlySignals);
         var asCopy = await settings.GetSettingAsync<string>(KeyForwardAsCopy);
 
@@ -94,6 +97,7 @@ public sealed class TelegramManager
             SessionPath = string.IsNullOrWhiteSpace(session) ? "telegram.session" : session,
             Channels = ParseChannels(channels),
             DestinationChannel = destChannel ?? string.Empty,
+            OrderNotificationChannel = orderChannel ?? string.Empty,
             ForwardOnlySignals = !bool.TryParse(onlySignals, out var os) || os,
             ForwardAsCopy = !bool.TryParse(asCopy, out var ac) || ac
         };
@@ -114,6 +118,7 @@ public sealed class TelegramManager
         await settings.SetSettingAsync(KeySession, string.IsNullOrWhiteSpace(updated.SessionPath) ? "telegram.session" : updated.SessionPath);
         await settings.SetSettingAsync(KeyChannels, string.Join('\n', updated.Channels.Select(c => c.Trim()).Where(c => c.Length > 0)));
         await settings.SetSettingAsync(KeyDestinationChannel, (updated.DestinationChannel ?? string.Empty).Trim());
+        await settings.SetSettingAsync(KeyOrderNotificationChannel, (updated.OrderNotificationChannel ?? string.Empty).Trim());
         await settings.SetSettingAsync(KeyForwardOnlySignals, updated.ForwardOnlySignals.ToString().ToLowerInvariant());
         await settings.SetSettingAsync(KeyForwardAsCopy, updated.ForwardAsCopy.ToString().ToLowerInvariant());
 
@@ -126,6 +131,7 @@ public sealed class TelegramManager
             SessionPath = string.IsNullOrWhiteSpace(updated.SessionPath) ? "telegram.session" : updated.SessionPath,
             Channels = updated.Channels.Select(c => c.Trim()).Where(c => c.Length > 0).ToList(),
             DestinationChannel = (updated.DestinationChannel ?? string.Empty).Trim(),
+            OrderNotificationChannel = (updated.OrderNotificationChannel ?? string.Empty).Trim(),
             ForwardOnlySignals = updated.ForwardOnlySignals,
             ForwardAsCopy = updated.ForwardAsCopy
         };
@@ -183,6 +189,45 @@ public sealed class TelegramManager
 
     /// <summary>Returns the broadcast channels the connected user has joined.</summary>
     public IReadOnlyList<AvailableChannel> ListAvailableChannels() => _client.ListAvailableChannels();
+
+    /// <summary>
+    /// Sends a trade notification via Telegram if integration is enabled.
+    /// </summary>
+    public async Task<bool> SendOrderNotificationAsync(string messageText)
+    {
+        try
+        {
+            if (!_current.Enabled)
+            {
+                _logger.LogDebug("Telegram integration is disabled; skipping trade notification.");
+                return false;
+            }
+
+            if (!_client.IsConnected)
+            {
+                await ConnectAsync();
+                if (!_client.IsConnected)
+                {
+                    _logger.LogWarning("Telegram client is not connected; could not send trade notification.");
+                    return false;
+                }
+            }
+
+            // Strict segregation: Order notifications go to OrderNotificationChannel (or Saved Messages if blank).
+            // Do NOT fall back to DestinationChannel (which is strictly for signal message copying/forwarding).
+            var targetChannel = !string.IsNullOrWhiteSpace(_current.OrderNotificationChannel)
+                ? _current.OrderNotificationChannel.Trim()
+                : null;
+
+            return await _client.SendTextMessageAsync(messageText, targetChannel);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending Telegram trade notification");
+            return false;
+        }
+    }
+
 
     private static List<string> ParseChannels(string? raw)
     {

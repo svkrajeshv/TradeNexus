@@ -3,7 +3,6 @@ using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Extensions.Logging;
 
 namespace NexusApp.Brokers.AngelOne;
 
@@ -84,6 +83,41 @@ public sealed class AngelOneWebSocketClient : IAsyncDisposable
         // Always resubscribe the full set on (re)connect so nothing is missed.
         var all = _subscribed.Values.ToList();
         await SendSubscribeAsync(all, ct);
+    }
+
+    /// <summary>
+    /// Unsubscribes the given tokens from the live feed and drops their cached LTP.
+    /// Safe to call for tokens that were never subscribed (they are simply ignored).
+    /// </summary>
+    public async Task UnsubscribeAsync(IEnumerable<(string Token, string Exchange)> tokens, CancellationToken ct = default)
+    {
+        var removed = new List<SubscribedToken>();
+        foreach (var (token, exchange) in tokens)
+        {
+            if (string.IsNullOrWhiteSpace(token)) continue;
+            if (_subscribed.TryRemove(token, out var entry))
+                removed.Add(entry);
+            else
+                removed.Add(new SubscribedToken(token, MapExchangeType(exchange)));
+            _lastLtpByToken.TryRemove(token, out _);
+        }
+
+        if (removed.Count == 0 || !IsOpen)
+            return;
+
+        await SendUnsubscribeAsync(removed, ct);
+    }
+
+    /// <summary>
+    /// Clears the entire subscription set and cached ticks. Used by the daily maintenance
+    /// job so each trading day starts clean and does not re-subscribe expired contracts
+    /// accumulated over a long-running process.
+    /// </summary>
+    public void ResetSubscriptions()
+    {
+        _subscribed.Clear();
+        _lastLtpByToken.Clear();
+        _logger.LogInformation("Cleared Angel WS subscription set and cached ticks for daily reset");
     }
 
     private async Task EnsureConnectedAsync(CancellationToken ct)
@@ -167,6 +201,46 @@ public sealed class AngelOneWebSocketClient : IAsyncDisposable
             _logger.LogInformation(
                 "Angel WS subscribed to {Count} token(s) across {Groups} exchange group(s)",
                 tokens.Count, groups.Length);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
+    private async Task SendUnsubscribeAsync(List<SubscribedToken> tokens, CancellationToken ct)
+    {
+        if (_socket is null || _socket.State != WebSocketState.Open || tokens.Count == 0)
+            return;
+
+        var groups = tokens
+            .GroupBy(t => t.ExchangeType)
+            .Select(g => new
+            {
+                exchangeType = g.Key,
+                tokens = g.Select(x => x.Token).ToArray()
+            })
+            .ToArray();
+
+        var payload = new
+        {
+            correlationID = Guid.NewGuid().ToString("N")[..12],
+            action = 0,   // 0 = unsubscribe
+            @params = new
+            {
+                mode = 1, // must match the subscribe mode (LTP)
+                tokenList = groups
+            }
+        };
+
+        var json = JsonSerializer.Serialize(payload);
+        var bytes = Encoding.UTF8.GetBytes(json);
+
+        await _sendLock.WaitAsync(ct);
+        try
+        {
+            await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct);
+            _logger.LogInformation("Angel WS unsubscribed from {Count} token(s)", tokens.Count);
         }
         finally
         {

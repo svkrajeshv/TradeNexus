@@ -5,6 +5,7 @@
 @using System.Globalization
 @using System.Text.Json
 @using NexusApp.Data
+@using NexusApp.Helpers
 @using NexusApp.Interfaces
 @using NexusApp.Models
 @using NexusApp.Services
@@ -27,6 +28,59 @@
     .cmp-blink-down {
         animation: cmp-down 0.7s ease-in-out 1;
     }
+    .live-signals-table {
+        font-size: 0.72rem;
+    }
+    .live-signals-table th,
+    .live-signals-table td {
+        padding: 4px 6px !important;
+        white-space: nowrap;
+    }
+    .live-signals-table .mud-chip {
+        font-size: 0.68rem;
+        height: 22px;
+    }
+    /* Stat cards always share a single row - 5 normally, 6 when the MTM card is live.
+       Applies at every breakpoint so mobile shows one compact row instead of a
+       full-width card per stat. The Live Signals item below stays xs=12 and wraps. */
+    .dashboard-grid > .stat-card {
+        flex-basis: 20%;
+        max-width: 20%;
+    }
+    .dashboard-grid.has-mtm > .stat-card {
+        flex-basis: 16.6667%;
+        max-width: 16.6667%;
+    }
+    /* Keep every stat card the same height regardless of content. */
+    .dashboard-grid > .stat-card > .mud-paper {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    @@media (max-width: 599.98px) {
+        /* Two cards per row on phones - one row of five is unreadably narrow.
+           Note: do NOT override the grid item padding here. MudGrid Spacing="3"
+           pairs a -12px negative margin on the container with 12px padding on
+           each item; shrinking only the padding pulls the edge cards outside the
+           container and misaligns them against the full-width items below. */
+        .dashboard-grid > .stat-card,
+        .dashboard-grid.has-mtm > .stat-card {
+            flex-basis: 50%;
+            max-width: 50%;
+        }
+        .dashboard-grid > .stat-card > .mud-paper {
+            padding: 10px 12px !important;
+        }
+        .dashboard-grid > .stat-card .mud-typography-subtitle2 {
+            font-size: 0.7rem;
+            line-height: 1.25;
+        }
+        .dashboard-grid > .stat-card .mud-typography-h4 {
+            font-size: 1.4rem;
+            line-height: 1.3;
+        }
+    }
     @@keyframes cmp-up {
         0% { box-shadow: 0 0 0 0 rgba(47, 158, 68, 0.9); }
         100% { box-shadow: 0 0 0 8px rgba(47, 158, 68, 0); }
@@ -37,33 +91,70 @@
     }
 </style>
 
-<MudGrid Spacing="3">
-    <MudItem xs="12" sm="6" md="3">
+<MudGrid Class="@($"dashboard-grid{(_isMtmLive ? " has-mtm" : string.Empty)}")" Spacing="3">
+    <MudItem xs="12" sm="6" md="3" Class="stat-card">
         <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Today's Signals</MudText>
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Today's Signals</MudText>
+                <MudIcon Icon="@Icons.Material.Filled.Sensors" Color="Color.Primary" />
+            </MudStack>
             <MudText Typo="Typo.h4">@_todaySignals</MudText>
         </MudPaper>
     </MudItem>
-    <MudItem xs="12" sm="6" md="3">
+    <MudItem xs="12" sm="6" md="3" Class="stat-card">
         <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Open Positions</MudText>
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Open Positions</MudText>
+                <MudIcon Icon="@Icons.Material.Filled.ShowChart" Color="Color.Info" />
+            </MudStack>
             <MudText Typo="Typo.h4">@_openPositions</MudText>
         </MudPaper>
     </MudItem>
-    <MudItem xs="12" sm="6" md="3">
+    <MudItem xs="12" sm="6" md="3" Class="stat-card">
         <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Executed Today</MudText>
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Executed Today</MudText>
+                <MudIcon Icon="@Icons.Material.Filled.TaskAlt" Color="Color.Info" />
+            </MudStack>
             <MudText Typo="Typo.h4">@_executedToday</MudText>
         </MudPaper>
     </MudItem>
-    <MudItem xs="12" sm="6" md="3">
+    <MudItem xs="12" sm="6" md="3" Class="stat-card">
         <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Unrealised P&amp;L</MudText>
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Unrealised P&amp;L</MudText>
+                <MudIcon Icon="@Icons.Material.Filled.AccountBalanceWallet" Color="Color.Error" />
+            </MudStack>
             <MudText Typo="Typo.h4" Color="@(_totalPnL >= 0 ? Color.Success : Color.Error)">
-                @_totalPnL.ToString("N2")
+                ₹@_totalPnL.ToString("N2")
             </MudText>
         </MudPaper>
     </MudItem>
+    <MudItem xs="12" sm="6" md="3" Class="stat-card">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Realised P&amp;L</MudText>
+                <MudIcon Icon="@Icons.Material.Filled.Payments" Color="Color.Success" />
+            </MudStack>
+            <MudText Typo="Typo.h4" Color="@(_realizedPnL >= 0 ? Color.Success : Color.Error)">
+                ₹@_realizedPnL.ToString("N2")
+            </MudText>
+        </MudPaper>
+    </MudItem>
+    @if (_isMtmLive)
+    {
+        <MudItem xs="12" sm="6" md="3" Class="stat-card">
+            <MudPaper Class="pa-4" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                    <MudText Typo="Typo.subtitle2" Color="Color.Secondary">MTM (Live)</MudText>
+                    <MudIcon Icon="@Icons.Material.Filled.Speed" Color="Color.Success" />
+                </MudStack>
+                <MudText Typo="Typo.h4" Color="@(_mtmNet >= 0 ? Color.Success : Color.Error)">
+                    ₹@_mtmNet.ToString("N2")
+                </MudText>
+            </MudPaper>
+        </MudItem>
+    }
 
     <MudItem xs="12">
         <MudPaper Class="pa-4" Elevation="2">
@@ -82,12 +173,12 @@
             }
             else
             {
-                <MudTable Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" RowStyleFunc="GetSignalRowStyle">
+                <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" RowStyleFunc="GetSignalRowStyle">
                     <HeaderContent>
                         <MudTh>Time</MudTh>
+                        <MudTh>Channel</MudTh>
                         <MudTh>Signal</MudTh>
                         <MudTh>Signal Values</MudTh>
-                        <MudTh>Order Inputs</MudTh>
                         <MudTh>CMP</MudTh>
                         <MudTh>Delay</MudTh>
                         <MudTh>Status</MudTh>
@@ -96,8 +187,12 @@
                     <RowTemplate>
                         <MudTd>@context.ReceivedTimestamp.ToLocalTime().ToString("HH:mm:ss")</MudTd>
                         <MudTd>
-                            <MudChip T="string" Size="Size.Small" Color="@(context.Action == SignalAction.Buy ? Color.Success : Color.Error)">@context.Action</MudChip>
-                            @context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                @(string.IsNullOrWhiteSpace(context.ChannelName) ? "-" : context.ChannelName)
+                            </MudChip>
+                        </MudTd>
+                        <MudTd>
+                            @context.Action @context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()
                         </MudTd>
                         <MudTd>
                             <MudStack Row="true" Spacing="1">
@@ -105,46 +200,6 @@
                                 <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">SL: @context.StopLoss.ToString("0.##")</MudChip>
                                 <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">T: @string.Join(" / ", context.Targets.Select(t => t.ToString("0.##")))</MudChip>
                             </MudStack>
-                        </MudTd>
-                        <MudTd>
-                            @if (IsEditable(context))
-                            {
-                                <MudStack Row="true" Spacing="1" Style="min-width:300px" AlignItems="AlignItems.Center">
-                                    <MudNumericField T="decimal"
-                                                     Value="GetEdit(context).EntryPrice"
-                                                     ValueChanged="@((decimal v) => OnEntryChanged(context.Id, v))"
-                                                     Label="Entry"
-                                                     Variant="Variant.Outlined"
-                                                     HideSpinButtons="true"
-                                                     Style="max-width:90px" />
-                                    <MudNumericField T="decimal"
-                                                     Value="GetEdit(context).StopLoss"
-                                                     ValueChanged="@((decimal v) => OnStopLossChanged(context.Id, v))"
-                                                     Label="SL"
-                                                     Variant="Variant.Outlined"
-                                                     HideSpinButtons="true"
-                                                     Style="max-width:90px" />
-                                    <MudTextField T="string"
-                                                  Value="GetEdit(context).TargetsText"
-                                                  ValueChanged="@((string v) => OnTargetsChanged(context.Id, v))"
-                                                  Label="T1"
-                                                  Variant="Variant.Outlined"
-                                                  Style="max-width:100px"
-                                                  Placeholder="155" />
-                                    <MudNumericField T="decimal"
-                                                     Value="GetEdit(context).Lots"
-                                                     ValueChanged="@((decimal v) => OnLotsChanged(context.Id, v))"
-                                                     Label="Lots"
-                                                     Variant="Variant.Outlined"
-                                                     HideSpinButtons="true"
-                                                     Min="1"
-                                                     Style="max-width:72px" />
-                                </MudStack>
-                            }
-                            else
-                            {
-                                <MudText Typo="Typo.body2" Color="Color.Secondary">Locked after execution</MudText>
-                            }
                         </MudTd>
                         <MudTd>
                             <MudChip T="string"
@@ -157,13 +212,7 @@
                         </MudTd>
                         <MudTd>@FormatDelay(context.SignalDelayMs)</MudTd>
                         <MudTd>
-                            <MudStack Row="true" Spacing="1">
-                                <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
-                                @if (HasCmpCrossedEntry(context))
-                                {
-                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Success">Crossed</MudChip>
-                                }
-                            </MudStack>
+                            <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
                         </MudTd>
                         <MudTd>
                             @if (IsEditable(context))
@@ -203,15 +252,23 @@
                 <MudTable Items="_watchlist" Dense="true" Hover="true" Bordered="false">
                     <HeaderContent>
                         <MudTh>Time</MudTh>
+                        <MudTh>Channel</MudTh>
                         <MudTh>Signal</MudTh>
                         <MudTh>Entry</MudTh>
                         <MudTh>CMP</MudTh>
+                        <MudTh>Low</MudTh>
+                        <MudTh>High</MudTh>
+                        <MudTh>Exit</MudTh>
                         <MudTh>Status</MudTh>
-                        <MudTh>Crossed</MudTh>
                         <MudTh>Actions</MudTh>
                     </HeaderContent>
                     <RowTemplate>
                         <MudTd>@context.ReceivedTimestamp.ToLocalTime().ToString("HH:mm:ss")</MudTd>
+                        <MudTd>
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                @(string.IsNullOrWhiteSpace(context.ChannelName) ? "-" : context.ChannelName)
+                            </MudChip>
+                        </MudTd>
                         <MudTd>@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
                         <MudTd>@GetEdit(context).EntryPrice.ToString("0.##")</MudTd>
                         <MudTd>
@@ -223,17 +280,10 @@
                                 @GetCmpDisplay(context)
                             </MudChip>
                         </MudTd>
+                        <MudTd>@GetTickValueDisplay(_lowBySignal, context.Id)</MudTd>
+                        <MudTd>@GetTickValueDisplay(_highBySignal, context.Id)</MudTd>
+                        <MudTd>@GetExitDisplay(context.Id)</MudTd>
                         <MudTd><MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip></MudTd>
-                        <MudTd>
-                            @if (HasCmpCrossedEntry(context))
-                            {
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Success">Yes</MudChip>
-                            }
-                            else
-                            {
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default">No</MudChip>
-                            }
-                        </MudTd>
                         <MudTd>
                             <MudButton Size="Size.Small"
                                        Color="Color.Default"
@@ -257,26 +307,111 @@
             }
             else
             {
-                <MudTable Items="_positions" Dense="true" Hover="true">
-                    <HeaderContent>
-                        <MudTh>Symbol</MudTh>
-                        <MudTh>Qty</MudTh>
-                        <MudTh>Entry</MudTh>
-                        <MudTh>LTP</MudTh>
-                        <MudTh>P&amp;L</MudTh>
-                    </HeaderContent>
-                    <RowTemplate>
-                        <MudTd>@context.Symbol</MudTd>
-                        <MudTd>@context.Quantity</MudTd>
-                        <MudTd>@context.EntryPrice</MudTd>
-                        <MudTd>@context.CurrentPrice</MudTd>
-                        <MudTd>
-                            <MudText Color="@(context.UnrealizedPnL >= 0 ? Color.Success : Color.Error)">
-                                @context.UnrealizedPnL.ToString("N2")
-                            </MudText>
-                        </MudTd>
-                    </RowTemplate>
-                </MudTable>
+                <!-- Desktop Table View (hidden on mobile) -->
+                <div class="d-none d-sm-flex flex-column">
+                    <div class="grid-height-box">
+                    <MudTable Items="_positions" Dense="true" Hover="true">
+                        <HeaderContent>
+                            <MudTh>Symbol</MudTh>
+                            <MudTh>Channel</MudTh>
+                            <MudTh>Qty</MudTh>
+                            <MudTh>Entry</MudTh>
+                            <MudTh>LTP</MudTh>
+                            <MudTh>SL</MudTh>
+                            <MudTh>Target 1</MudTh>
+                            <MudTh>P&amp;L</MudTh>
+                            <MudTh>Action</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd>@context.Symbol</MudTd>
+                            <MudTd>
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                    @(string.IsNullOrWhiteSpace(context.Signal?.ChannelName) ? "-" : context.Signal.ChannelName)
+                                </MudChip>
+                            </MudTd>
+                            <MudTd>@context.Quantity</MudTd>
+                            <MudTd>@context.EntryPrice</MudTd>
+                            <MudTd>@context.CurrentPrice</MudTd>
+                            <MudTd>@(context.StopLoss?.ToString("0.##") ?? "-")</MudTd>
+                            <MudTd>@(context.Targets.Count > 0 ? context.Targets[0].ToString("0.##") : "-")</MudTd>
+                            <MudTd>
+                                <MudText Color="@(context.UnrealizedPnL >= 0 ? Color.Success : Color.Error)">
+                                    @context.UnrealizedPnL.ToString("N2")
+                                </MudText>
+                            </MudTd>
+                            <MudTd>
+                                <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
+                                           StartIcon="@Icons.Material.Filled.Close"
+                                           OnClick="@(() => SquareOffPositionAsync(context))">
+                                    Square Off
+                                </MudButton>
+                            </MudTd>
+                        </RowTemplate>
+                    </MudTable>
+                    </div>
+                </div>
+
+                <!-- Mobile Card View (shown on mobile only) -->
+                <div class="d-flex d-sm-none">
+                    <MudStack Class="w-100">
+                        @foreach (var position in _positions)
+                        {
+                            <div class="position-card">
+                                <div class="watchlist-card-full">
+                                    <div class="watchlist-card-label">Symbol</div>
+                                    <div class="watchlist-card-value">@position.Symbol</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Channel</div>
+                                    <div class="watchlist-card-value">@(position.Signal?.ChannelName ?? "-")</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Qty</div>
+                                    <div class="watchlist-card-value">@position.Quantity</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Entry</div>
+                                    <div class="watchlist-card-value">@position.EntryPrice</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">LTP</div>
+                                    <div class="watchlist-card-value">@position.CurrentPrice</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">SL</div>
+                                    <div class="watchlist-card-value">@(position.StopLoss?.ToString("0.##") ?? "-")</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Target 1</div>
+                                    <div class="watchlist-card-value">@(position.Targets.Count > 0 ? position.Targets[0].ToString("0.##") : "-")</div>
+                                </div>
+
+                                <div class="watchlist-card-full">
+                                    <div class="watchlist-card-label">P&amp;L</div>
+                                    <div class="watchlist-card-value">
+                                        <MudText Color="@(position.UnrealizedPnL >= 0 ? Color.Success : Color.Error)" style="font-weight: 600; font-size: 0.95rem;">
+                                            ₹@position.UnrealizedPnL.ToString("N2")
+                                        </MudText>
+                                    </div>
+                                </div>
+
+                                <div class="watchlist-card-full">
+                                    <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
+                                               StartIcon="@Icons.Material.Filled.Close"
+                                               OnClick="@(() => SquareOffPositionAsync(position))">
+                                        Square Off
+                                    </MudButton>
+                                </div>
+                            </div>
+                        }
+                    </MudStack>
+                </div>
             }
         </MudPaper>
     </MudItem>
@@ -289,6 +424,9 @@
     private List<NexusApp.Models.Position> _positions = new();
     private readonly Dictionary<int, SignalEditModel> _edits = new();
     private readonly Dictionary<int, decimal> _cmpBySignal = new();
+    private readonly Dictionary<int, decimal> _lowBySignal = new();
+    private readonly Dictionary<int, decimal> _highBySignal = new();
+    private readonly Dictionary<int, decimal> _exitBySignal = new();
     private readonly Dictionary<int, int> _cmpTickDirBySignal = new();
     private readonly Dictionary<int, DateTime> _cmpTickAtBySignal = new();
     private readonly HashSet<int> _hiddenWatchlistSignalIds = new();
@@ -296,6 +434,19 @@
     private int _openPositions;
     private int _executedToday;
     private decimal _totalPnL;
+    private decimal _realizedPnL;
+
+    // Live MTM card state, fed by the HealthMonitorService "HealthTick" broadcast.
+    private bool _brokerConnected;
+    private decimal _mtmNet;
+    private int _mtmOpenCount;
+    private DateTime? _mtmAtIst;
+
+    /// <summary>
+    /// The MTM figure is only meaningful once the broker feed is up AND at least
+    /// one order has actually filled into a position; the card is hidden otherwise.
+    /// </summary>
+    private bool _isMtmLive => _brokerConnected && _mtmAtIst.HasValue && _mtmOpenCount > 0;
     // Default lots loaded from global settings (Settings page → "Default Lots per Order")
     private decimal _defaultLots = 1;
 
@@ -335,36 +486,100 @@
                 await InvokeAsync(RefreshAsync);
             });
 
+            _hub.On<JsonElement>("PositionChanged", async _ =>
+            {
+                await InvokeAsync(RefreshAsync);
+            });
+
+            _hub.On<JsonElement>("HealthTick", payload =>
+            {
+                _ = InvokeAsync(() =>
+                {
+                    if (payload.ValueKind != JsonValueKind.Object)
+                        return;
+
+                    if (TryGetProp(payload, out var connectedProp, "BrokerConnected", "brokerConnected"))
+                        _brokerConnected = connectedProp.ValueKind == JsonValueKind.True;
+
+                    if (TryGetProp(payload, out var netProp, "NetPnL", "netPnL") &&
+                        TryGetDecimal(netProp, out var net))
+                        _mtmNet = net;
+
+                    if (TryGetProp(payload, out var openProp, "OpenPositions", "openPositions") &&
+                        openProp.TryGetInt32(out var openCount))
+                        _mtmOpenCount = openCount;
+
+                    // Read as DateTimeOffset: System.Text.Json returns Kind=Local for a
+                    // "Z" instant, which would be double-shifted by ToIst().
+                    if (TryGetProp(payload, out var tsProp, "Timestamp", "timestamp") &&
+                        tsProp.TryGetDateTimeOffset(out var tsOffset))
+                        _mtmAtIst = tsOffset.UtcDateTime.ToIst();
+
+                    StateHasChanged();
+                });
+            });
+
             _hub.On<JsonElement>("CmpTick", payload =>
             {
-                if (payload.ValueKind != JsonValueKind.Array)
-                    return;
-
-                var changed = false;
-                foreach (var item in payload.EnumerateArray())
+                _ = InvokeAsync(() =>
                 {
-                    if (!TryGetProp(item, out var idProp, "SignalId", "signalId") ||
-                        !idProp.TryGetInt32(out var signalId) ||
-                        !TryGetProp(item, out var cmpProp, "Cmp", "cmp"))
+                    if (payload.ValueKind != JsonValueKind.Array)
+                        return;
+
+                    var changed = false;
+                    foreach (var item in payload.EnumerateArray())
                     {
-                        continue;
+                        if (!TryGetProp(item, out var idProp, "SignalId", "signalId") ||
+                            !idProp.TryGetInt32(out var signalId) ||
+                            !TryGetProp(item, out var cmpProp, "Cmp", "cmp") ||
+                            !TryGetProp(item, out var symbolProp, "Symbol", "symbol"))
+                        {
+                            continue;
+                        }
+
+                        if (!TryGetDecimal(cmpProp, out var cmp) || cmp <= 0 ||
+                            symbolProp.ValueKind != JsonValueKind.String)
+                            continue;
+
+                        var symbol = symbolProp.GetString();
+                        if (string.IsNullOrWhiteSpace(symbol))
+                            continue;
+
+                        if (_cmpBySignal.TryGetValue(signalId, out var previous) && previous > 0 && previous != cmp)
+                        {
+                            _cmpTickDirBySignal[signalId] = cmp > previous ? 1 : -1;
+                            _cmpTickAtBySignal[signalId] = DateTime.UtcNow;
+                        }
+
+                        _cmpBySignal[signalId] = cmp;
+                        if (TryGetProp(item, out var lowProp, "Low", "low") &&
+                            TryGetDecimal(lowProp, out var low) && low > 0)
+                            _lowBySignal[signalId] = low;
+                        if (TryGetProp(item, out var highProp, "High", "high") &&
+                            TryGetDecimal(highProp, out var high) && high > 0)
+                            _highBySignal[signalId] = high;
+
+                        foreach (var position in _positions.Where(p =>
+                                     p.ClosedAt == null &&
+                                     string.Equals(p.Symbol, symbol, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            position.CurrentPrice = cmp;
+                            position.UnrealizedPnL = PnlCalculator.UnrealizedPnl(
+                                position.EntryPrice, cmp, position.Quantity);
+                            position.UnrealizedPnLPercentage = position.EntryPrice > 0
+                                ? position.UnrealizedPnL / (position.EntryPrice * position.Quantity) * 100m
+                                : 0m;
+                        }
+
+                        changed = true;
                     }
 
-                    if (!TryGetDecimal(cmpProp, out var cmp) || cmp <= 0)
-                        continue;
-
-                    if (_cmpBySignal.TryGetValue(signalId, out var previous) && previous > 0 && previous != cmp)
+                    if (changed)
                     {
-                        _cmpTickDirBySignal[signalId] = cmp > previous ? 1 : -1;
-                        _cmpTickAtBySignal[signalId] = DateTime.UtcNow;
+                        _totalPnL = _positions.Sum(p => p.UnrealizedPnL);
+                        StateHasChanged();
                     }
-
-                    _cmpBySignal[signalId] = cmp;
-                    changed = true;
-                }
-
-                if (changed)
-                    _ = InvokeAsync(StateHasChanged);
+                });
             });
 
             await _hub.StartAsync();
@@ -375,19 +590,15 @@
         }
     }
 
-    // Live Signals grid should show only recent signals. Signals older than this
-    // are stale (older than the 10-min execution cutoff plus a small grace window),
-    // so they don't belong in the "Live" grid — historical rows live in Signals page.
-    private static readonly TimeSpan LiveSignalWindow = TimeSpan.FromMinutes(15);
-
     private async Task RefreshAsync()
     {
         try
         {
             var allRecent = await SignalService.GetRecentSignalsAsync(50);
-            var cutoff = DateTime.UtcNow - LiveSignalWindow;
+            var todayIst = DateTime.UtcNow.ToIst().Date;
             _signals = allRecent
-                .Where(s => s.ReceivedTimestamp >= cutoff)
+                .Where(s => s.ReceivedTimestamp.ToIst().Date == todayIst &&
+                            s.Status != SignalStatus.Executed)
                 .Take(30)
                 .ToList();
 
@@ -397,6 +608,7 @@
 
             using var db = await DbFactory.CreateDbContextAsync();
             _positions = await db.Positions.AsNoTracking()
+                .Include(p => p.Signal)
                 .Where(p => p.ClosedAt == null)
                 .OrderByDescending(p => p.OpenedAt)
                 .Take(20)
@@ -409,8 +621,26 @@
             _watchlist = watch
                 .Where(s => !_hiddenWatchlistSignalIds.Contains(s.Id))
                 .ToList();
+
+            var watchSignalIds = _watchlist.Select(s => s.Id).ToList();
+            _exitBySignal.Clear();
+            if (watchSignalIds.Count > 0)
+            {
+                var closedPositions = await db.Positions.AsNoTracking()
+                    .Where(p => watchSignalIds.Contains(p.SignalId) && p.ClosedAt != null && p.ClosingPrice != null)
+                    .OrderByDescending(p => p.ClosedAt)
+                    .ToListAsync();
+
+                foreach (var position in closedPositions)
+                    _exitBySignal.TryAdd(position.SignalId, position.ClosingPrice!.Value);
+            }
+
             _openPositions = _positions.Count;
             _totalPnL = _positions.Sum(p => p.UnrealizedPnL);
+            var todayStart = DateTime.UtcNow.Date;
+            _realizedPnL = await db.Positions
+                .Where(p => p.ClosedAt >= todayStart && p.ClosedAt < todayStart.AddDays(1))
+                .SumAsync(p => p.RealizedPnL ?? 0m);
             SyncEdits();
             StateHasChanged();
         }
@@ -460,7 +690,7 @@
             ExpiryDate      = refreshed.ExpiryDate,
             SignalTime      = refreshed.TelegramTimestamp,
             OriginalMessage = refreshed.OriginalMessage,
-            Lots            = edit.Lots > 0 ? edit.Lots : 1
+            Lots            = edit.Lots > 0 ? edit.Lots : _defaultLots
         };
 
         Snackbar.Add($"Manual BUY dispatched for {signal.Index} {FormatStrike(signal.Strike)}{signal.OptionType.ToString().ToUpper()}", Severity.Info);
@@ -496,6 +726,29 @@
         }
 
         await RefreshAsync();
+    }
+
+    private async Task SquareOffPositionAsync(NexusApp.Models.Position position)
+    {
+        var confirmed = await JS.InvokeAsync<bool>(
+            "confirm",
+            $"Are you sure you want to square off {position.Symbol} at market price?");
+
+        if (!confirmed)
+            return;
+
+        try
+        {
+            var ok = await TradingEngine.SquareOffPositionAsync(position.Id);
+            Snackbar.Add(
+                ok ? $"Square-off submitted for {position.Symbol}." : $"Square-off failed for {position.Symbol}.",
+                ok ? Severity.Success : Severity.Error);
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Square-off failed: {ex.Message}", Severity.Error);
+        }
     }
 
     private async Task SaveAsync(TradingSignal signal)
@@ -580,6 +833,12 @@
             _edits.Remove(id);
         foreach (var id in _cmpBySignal.Keys.Where(k => !activeIds.Contains(k)).ToList())
             _cmpBySignal.Remove(id);
+        foreach (var id in _lowBySignal.Keys.Where(k => !activeIds.Contains(k)).ToList())
+            _lowBySignal.Remove(id);
+        foreach (var id in _highBySignal.Keys.Where(k => !activeIds.Contains(k)).ToList())
+            _highBySignal.Remove(id);
+        foreach (var id in _exitBySignal.Keys.Where(k => !activeIds.Contains(k)).ToList())
+            _exitBySignal.Remove(id);
         foreach (var id in _cmpTickDirBySignal.Keys.Where(k => !activeIds.Contains(k)).ToList())
             _cmpTickDirBySignal.Remove(id);
         foreach (var id in _cmpTickAtBySignal.Keys.Where(k => !activeIds.Contains(k)).ToList())
@@ -702,11 +961,23 @@
             ? cmp.ToString("0.##", CultureInfo.InvariantCulture)
             : "—";
 
+    private static string GetTickValueDisplay(Dictionary<int, decimal> values, int signalId) =>
+        values.TryGetValue(signalId, out var value) && value > 0
+            ? value.ToString("0.##", CultureInfo.InvariantCulture)
+            : "—";
+
+    private string GetExitDisplay(int signalId) =>
+        _exitBySignal.TryGetValue(signalId, out var exitPrice) && exitPrice > 0
+            ? exitPrice.ToString("0.##", CultureInfo.InvariantCulture)
+            : "-";
+
     private bool HasCmpCrossedEntry(TradingSignal signal)
     {
         if (!_cmpBySignal.TryGetValue(signal.Id, out var cmp) || cmp <= 0) return false;
         var entry = GetEdit(signal).EntryPrice;
-        return signal.Action == SignalAction.Buy ? cmp >= entry : cmp <= entry;
+        return signal.Action == SignalAction.Buy
+            ? PriceComparison.IsGreaterThanOrEqual(cmp, entry)
+            : PriceComparison.IsLessThanOrEqual(cmp, entry);
     }
 
     private string GetSignalRowStyle(TradingSignal signal, int rowNumber)

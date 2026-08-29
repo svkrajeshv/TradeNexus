@@ -31,6 +31,12 @@ public class TradingAccount
     
     public DateTime UpdatedAt { get; set; }
 
+    /// <summary>
+    /// True when this account is a paper/simulated account (ClientId is "PAPER").
+    /// Paper accounts route to the PaperTradingEngine; real accounts place live broker orders.
+    /// </summary>
+    public bool IsPaperAccount => string.Equals(ClientId, "PAPER", StringComparison.OrdinalIgnoreCase);
+
     // Navigation properties
     public ICollection<Order> Orders { get; set; } = new List<Order>();
     public ICollection<Position> Positions { get; set; } = new List<Position>();

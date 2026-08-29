@@ -1,25 +1,29 @@
 using Microsoft.AspNetCore.SignalR;
-using Microsoft.Extensions.Logging;
-using NexusApp.BackgroundServices;
+using Microsoft.EntityFrameworkCore;
+using NexusApp.Data;
+using NexusApp.Helpers;
+using NexusApp.Hubs;
 using NexusApp.Interfaces;
+using NexusApp.Telegram;
 
 namespace NexusApp.Notifications;
 
 /// <summary>
-/// Broadcasts notifications to connected Blazor clients via SignalR.
+/// Broadcasts notifications to connected Blazor clients via SignalR
+/// and sends trade notifications to Telegram.
 /// UI components subscribe to <c>Notification</c>, <c>SignalReceived</c> and
 /// <c>OrderUpdate</c> events on the trading hub.
 /// </summary>
-public sealed class NotificationService : INotificationService
+public sealed class NotificationService(
+    IHubContext<TradingHub> hub,
+    TelegramManager telegramManager,
+    IDbContextFactory<TradingDbContext> dbFactory,
+    ILogger<NotificationService> logger) : INotificationService
 {
-    private readonly IHubContext<TradingHub> _hub;
-    private readonly ILogger<NotificationService> _logger;
-
-    public NotificationService(IHubContext<TradingHub> hub, ILogger<NotificationService> logger)
-    {
-        _hub = hub;
-        _logger = logger;
-    }
+    private readonly IHubContext<TradingHub> _hub = hub;
+    private readonly TelegramManager _telegramManager = telegramManager;
+    private readonly IDbContextFactory<TradingDbContext> _dbFactory = dbFactory;
+    private readonly ILogger<NotificationService> _logger = logger;
 
     public async Task SendSignalNotificationAsync(ParsedSignal signal)
     {
@@ -72,6 +76,165 @@ public sealed class NotificationService : INotificationService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to broadcast error notification");
+        }
+    }
+
+    public async Task SendTelegramOrderPlacedAsync(
+        string accountName, 
+        bool isPaper, 
+        string symbol, 
+        string action, 
+        decimal entryPrice, 
+        decimal quantity, 
+        string? orderId = null, 
+        string orderStatus = "ACCEPTED")
+    {
+        try
+        {
+            var accountType = isPaper ? "Paper Account" : "Real/Live Account";
+            var modeBadge = isPaper ? "📝 [PAPER]" : "⚡ [REAL]";
+            var istTime = DateTime.UtcNow.ToIstString("hh:mm:ss tt");
+            var orderIdDisplay = string.IsNullOrWhiteSpace(orderId) ? "N/A" : orderId;
+
+            var message =
+$@"🛒 ORDER PLACED {modeBadge}
+
+• Account: {accountName} ({accountType})
+• Order ID: {orderIdDisplay}
+• Status: {orderStatus}
+• Symbol: {symbol}
+• Action: {action.ToUpper()}
+• Entry Price: ₹{entryPrice:N2}
+• Quantity: {quantity:N0}
+• Time: {istTime} IST";
+
+            await _telegramManager.SendOrderNotificationAsync(message);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send Telegram order placed notification");
+        }
+    }
+
+    public async Task SendTelegramOrderClosedAsync(string accountName, bool isPaper, string symbol, decimal entryPrice, decimal exitPrice, decimal realizedPnL, decimal quantity, string reason)
+    {
+        try
+        {
+            var accountType = isPaper ? "Paper Account" : "Real/Live Account";
+            var modeBadge = isPaper ? "📝 [PAPER]" : "⚡ [REAL]";
+            var pnlBadge = realizedPnL >= 0 ? "🟢 PROFIT" : "🔴 LOSS";
+            var istTime = DateTime.UtcNow.ToIstString("hh:mm:ss tt");
+
+            var message =
+$@"🚪 POSITION CLOSED {modeBadge} {pnlBadge}
+
+• Account: {accountName} ({accountType})
+• Symbol: {symbol}
+• Entry Price: ₹{entryPrice:N2}
+• Exit Price: ₹{exitPrice:N2}
+• Realized P&L: ₹{realizedPnL:N2}
+• Quantity: {quantity:N0}
+• Reason: {reason}
+• Time: {istTime} IST";
+
+            await _telegramManager.SendOrderNotificationAsync(message);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send Telegram order closed notification");
+        }
+    }
+
+    public async Task SendTelegramCustomNotificationAsync(string message)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                await _telegramManager.SendOrderNotificationAsync(message);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send custom Telegram notification");
+        }
+    }
+
+    public async Task SendTelegramDailyPnlSummaryAsync()
+    {
+        try
+        {
+            // Determine today's IST day boundaries expressed in UTC (ClosedAt is stored in UTC).
+            var istNow = DateTime.UtcNow.ToIst();
+            var istDayStart = istNow.Date;
+            var istDayEnd = istDayStart.AddDays(1);
+            var utcStart = istDayStart.IstToUtc();
+            var utcEnd = istDayEnd.IstToUtc();
+
+            await using var db = await _dbFactory.CreateDbContextAsync();
+
+            var closedToday = await db.Positions
+                .AsNoTracking()
+                .Where(p => p.ClosedAt != null
+                            && p.ClosedAt >= utcStart
+                            && p.ClosedAt < utcEnd)
+                .Select(p => new
+                {
+                    p.Symbol,
+                    p.Quantity,
+                    RealizedPnL = p.RealizedPnL ?? 0m
+                })
+                .ToListAsync();
+
+            var istDate = istDayStart.ToString("dd MMM yyyy");
+
+            if (closedToday.Count == 0)
+            {
+                var noneMessage =
+$@"📊 DAILY P&L SUMMARY — {istDate}
+
+No positions were closed today.";
+                await _telegramManager.SendOrderNotificationAsync(noneMessage);
+                return;
+            }
+
+            var perSymbol = closedToday
+                .GroupBy(p => p.Symbol)
+                .Select(g => new
+                {
+                    Symbol = g.Key,
+                    Quantity = g.Sum(x => x.Quantity),
+                    Pnl = g.Sum(x => x.RealizedPnL)
+                })
+                .OrderByDescending(x => x.Pnl)
+                .ToList();
+
+            var netPnl = closedToday.Sum(x => x.RealizedPnL);
+            var totalTrades = closedToday.Count;
+            var wins = closedToday.Count(x => x.RealizedPnL > 0);
+            var losses = closedToday.Count(x => x.RealizedPnL < 0);
+            var netBadge = netPnl >= 0 ? "🟢 PROFIT" : "🔴 LOSS";
+
+            var lines = new System.Text.StringBuilder();
+            lines.AppendLine($"📊 DAILY P&L SUMMARY — {istDate} {netBadge}");
+            lines.AppendLine();
+            lines.AppendLine("Executed Symbols:");
+            foreach (var s in perSymbol)
+            {
+                var symBadge = s.Pnl >= 0 ? "🟢" : "🔴";
+                lines.AppendLine($"{symBadge} {s.Symbol}  |  Qty: {s.Quantity:N0}  |  P&L: ₹{s.Pnl:N2}");
+            }
+            lines.AppendLine();
+            lines.AppendLine($"• Total Trades: {totalTrades}");
+            lines.AppendLine($"• Wins / Losses: {wins} / {losses}");
+            lines.AppendLine($"• Net P&L: ₹{netPnl:N2}");
+            lines.Append($"• Time: {istNow:hh:mm:ss tt} IST");
+
+            await _telegramManager.SendOrderNotificationAsync(lines.ToString());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send Telegram daily P&L summary");
         }
     }
 }

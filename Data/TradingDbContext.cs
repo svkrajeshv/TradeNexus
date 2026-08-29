@@ -6,18 +6,15 @@ namespace NexusApp.Data;
 /// <summary>
 /// Entity Framework Core DbContext for the trading application
 /// </summary>
-public class TradingDbContext : DbContext
+public class TradingDbContext(DbContextOptions<TradingDbContext> options) : DbContext(options)
 {
-    public TradingDbContext(DbContextOptions<TradingDbContext> options) : base(options)
-    {
-    }
-
     public DbSet<TradingSignal> TradingSignals { get; set; }
     public DbSet<Order> Orders { get; set; }
     public DbSet<Position> Positions { get; set; }
     public DbSet<TradingAccount> TradingAccounts { get; set; }
     public DbSet<ApplicationSetting> ApplicationSettings { get; set; }
     public DbSet<AuditLog> AuditLogs { get; set; }
+    public DbSet<ClosedTradeHistory> ClosedTradeHistory { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -30,6 +27,7 @@ public class TradingDbContext : DbContext
             entity.Property(e => e.OriginalMessage).HasMaxLength(4000);
             entity.Property(e => e.Index).HasMaxLength(50);
             entity.Property(e => e.Symbol).HasMaxLength(50);
+            entity.Property(e => e.ChannelName).HasMaxLength(150);
             entity.HasIndex(e => e.TelegramMessageId).IsUnique();
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.ReceivedTimestamp);
@@ -108,6 +106,17 @@ public class TradingDbContext : DbContext
             entity.Property(e => e.Details).HasMaxLength(2000);
             entity.HasIndex(e => e.Timestamp);
             entity.HasIndex(e => e.EventType);
+        });
+
+        // ClosedTradeHistory configuration (durable P&L archive; not cleaned up)
+        modelBuilder.Entity<ClosedTradeHistory>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Symbol).HasMaxLength(50);
+            entity.Property(e => e.ChannelName).HasMaxLength(150);
+            entity.Property(e => e.TerminalName).HasMaxLength(100);
+            entity.HasIndex(e => e.PositionId).IsUnique();
+            entity.HasIndex(e => e.ClosedAt);
         });
 
         // Seed default data

@@ -38,6 +38,13 @@ public interface IBroker
     /// Gets live price for an instrument
     /// </summary>
     Task<decimal> GetLiveQuoteAsync(string symbol);
+
+    /// <summary>
+    /// Releases any live price feed (e.g. WebSocket subscription) held for a symbol,
+    /// typically once its position is closed and no longer needs monitoring.
+    /// Default is a no-op for brokers that do not maintain a streaming feed.
+    /// </summary>
+    Task ReleaseSymbolFeedAsync(string symbol) => Task.CompletedTask;
     
     /// <summary>
     /// Places a new order
@@ -99,6 +106,16 @@ public class BrokerOrderRequest
     public OrderSide Side { get; set; }
     public OrderType OrderType { get; set; }
     public ProductType ProductType { get; set; }
+
+    // Robo / Bracket order fields
+    /// <summary>Angel One variety: "NORMAL" (plain limit) or "ROBO" (bracket with SL + target).</summary>
+    public string Variety { get; set; } = "NORMAL";
+    /// <summary>Target profit offset in absolute points from entry price.</summary>
+    public decimal SquareOffPoints { get; set; }
+    /// <summary>Stop-loss offset in absolute points from entry price.</summary>
+    public decimal StopLossPoints { get; set; }
+    /// <summary>Trailing stop-loss step in absolute points (0 = disabled).</summary>
+    public decimal TrailingStopLossPoints { get; set; }
 }
 
 /// <summary>

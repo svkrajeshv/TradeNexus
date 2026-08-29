@@ -1,91 +1,239 @@
 @page "/settings"
 @using MudBlazor
 @using NexusApp.Interfaces
+@using NexusApp.Services
 @inject ISettingsService SettingsService
+@inject AuthService Auth
 @inject ISnackbar Snackbar
 
-<PageTitle>Settings</PageTitle>
+<PageTitle>NexusApp - Settings</PageTitle>
 
-<MudText Typo="Typo.h4" Class="mb-4">Settings</MudText>
+<MudText Typo="Typo.h4" Class="mb-4 font-weight-bold">Settings</MudText>
 
 <MudGrid Spacing="3">
+    <!-- Left Column -->
     <MudItem xs="12" md="6">
-        <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.h6" Class="mb-3">Trading Mode</MudText>
-            <MudSelect T="string" @bind-Value="_tradingMode" Label="Mode" Variant="Variant.Outlined">
-                <MudSelectItem Value="@("manual")">Manual (confirm each trade)</MudSelectItem>
-                <MudSelectItem Value="@("auto")">Automatic (place immediately)</MudSelectItem>
-            </MudSelect>
-            <MudSwitch T="bool" @bind-Value="_paperTrading" Color="Color.Primary" Class="mt-3" Label="Paper Trading (simulate orders, no real money)" />
-        </MudPaper>
+        <MudStack Spacing="3">
+            <!-- Trading Mode -->
+            <MudPaper Class="pa-4 settings-card-blue" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3">
+                    <MudIcon Icon="@Icons.Material.Filled.Tune" Color="Color.Primary" />
+                    <MudText Typo="Typo.h6">Trading Mode</MudText>
+                </MudStack>
+                <MudSelect T="string" @bind-Value="_tradingMode" Label="Mode" Variant="Variant.Outlined">
+                    <MudSelectItem Value="@("manual")">Manual (confirm each trade)</MudSelectItem>
+                    <MudSelectItem Value="@("auto")">Automatic (place immediately)</MudSelectItem>
+                </MudSelect>
+            </MudPaper>
+
+            <!-- Default Order Size -->
+            <MudPaper Class="pa-4 settings-card-purple" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
+                    <MudIcon Icon="@Icons.Material.Filled.FormatListNumbered" Color="Color.Secondary" />
+                    <MudText Typo="Typo.h6">Default Order Size</MudText>
+                </MudStack>
+                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
+                    Used as the pre-filled Lots value on every new signal. You can override per-signal on the Dashboard.
+                </MudText>
+                <MudNumericField T="int"
+                                  @bind-Value="_defaultQuantity"
+                                  Label="Default Lots per Order"
+                                  HelperText="e.g. 1 lot = 75 qty for NIFTY, 30 for BANKNIFTY"
+                                  Variant="Variant.Outlined"
+                                  Min="1"
+                                  Class="mb-3" />
+
+                <MudDivider Class="my-3" />
+                <MudText Typo="Typo.subtitle2" Class="mb-2">Per-Index Lot Overrides <MudText Typo="Typo.caption" Color="Color.Secondary">(0 = use default above)</MudText></MudText>
+                <MudGrid Spacing="2">
+                    <MudItem xs="6">
+                        <MudNumericField T="int" @bind-Value="_lotsNifty"      Label="NIFTY"      Variant="Variant.Outlined" Min="0" />
+                    </MudItem>
+                    <MudItem xs="6">
+                        <MudNumericField T="int" @bind-Value="_lotsBankNifty"  Label="BANKNIFTY"  Variant="Variant.Outlined" Min="0" />
+                    </MudItem>
+                    <MudItem xs="6">
+                        <MudNumericField T="int" @bind-Value="_lotsFinNifty"   Label="FINNIFTY"   Variant="Variant.Outlined" Min="0" />
+                    </MudItem>
+                    <MudItem xs="6">
+                        <MudNumericField T="int" @bind-Value="_lotsMidcpNifty" Label="MIDCPNIFTY" Variant="Variant.Outlined" Min="0" />
+                    </MudItem>
+                    <MudItem xs="6">
+                        <MudNumericField T="int" @bind-Value="_lotsSensex"     Label="SENSEX"     Variant="Variant.Outlined" Min="0" />
+                    </MudItem>
+                    <MudItem xs="6">
+                        <MudNumericField T="int" @bind-Value="_lotsBankex"     Label="BANKEX"     Variant="Variant.Outlined" Min="0" />
+                    </MudItem>
+                </MudGrid>
+            </MudPaper>
+
+            <!-- Notifications -->
+            <MudPaper Class="pa-4 settings-card-cyan" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3">
+                    <MudIcon Icon="@Icons.Material.Filled.Notifications" Color="Color.Info" />
+                    <MudText Typo="Typo.h6">Notifications</MudText>
+                </MudStack>
+                <MudSwitch T="bool" @bind-Value="_browserNotifications" Color="Color.Primary" Label="Browser notifications" Class="mb-1" />
+                <MudSwitch T="bool" @bind-Value="_soundAlerts" Color="Color.Primary" Label="Sound alerts" />
+            </MudPaper>
+
+            <!-- Admin Account Security -->
+            <MudPaper Class="pa-4 settings-card-amber" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
+                    <MudIcon Icon="@Icons.Material.Filled.Security" Color="Color.Warning" />
+                    <MudText Typo="Typo.h6">Admin Account Security</MudText>
+                </MudStack>
+                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
+                    Update your application login credentials.
+                </MudText>
+                <MudTextField T="string" @bind-Value="_adminUsername" Label="Admin Username" Variant="Variant.Outlined" Class="mb-3" />
+                <MudTextField T="string" @bind-Value="_adminPassword" Label="New Admin Password" Variant="Variant.Outlined" InputType="InputType.Password" HelperText="Leave blank to keep current password" />
+            </MudPaper>
+
+            <!-- Data Retention -->
+            <MudPaper Class="pa-4 settings-card-cyan" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
+                    <MudIcon Icon="@Icons.Material.Filled.History" Color="Color.Info" />
+                    <MudText Typo="Typo.h6">Data Retention</MudText>
+                </MudStack>
+                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
+                    Durable P&amp;L history shown on the PNL Statements page is trimmed daily beyond this window.
+                </MudText>
+                <MudNumericField T="int"
+                                  @bind-Value="_pnlHistoryRetentionDays"
+                                  Label="P&amp;L History Retention (days)"
+                                  HelperText="Delete P&L history older than this many days (0 = keep forever)"
+                                  Variant="Variant.Outlined"
+                                  Min="0" />
+            </MudPaper>
+
+            <!-- Risk Management -->
+            <MudPaper Class="pa-4 settings-card-red" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3">
+                    <MudIcon Icon="@Icons.Material.Filled.Shield" Color="Color.Error" />
+                    <MudText Typo="Typo.h6">Risk Management</MudText>
+                </MudStack>
+                <MudNumericField T="decimal" @bind-Value="_dailyMaxLoss" Label="Daily Max Loss (₹)" Variant="Variant.Outlined" Class="mb-3" />
+                <MudNumericField T="decimal" @bind-Value="_dailyMaxProfit" Label="Daily Max Profit (₹)" Variant="Variant.Outlined" Class="mb-3" />
+                <MudNumericField T="int" @bind-Value="_maxOpenPositions" Label="Max Open Positions" Variant="Variant.Outlined" Class="mb-3" />
+                <MudNumericField T="int" @bind-Value="_maxTradesPerDay" Label="Max Trades / Day" Variant="Variant.Outlined" Class="mb-3" />
+                <MudNumericField T="int"
+                                  @bind-Value="_duplicateSignalCooldownMinutes"
+                                  Label="Duplicate Signal Cooldown (minutes)"
+                                  HelperText="Block repeat executions of the same contract for this many minutes (0 = disabled)"
+                                  Variant="Variant.Outlined"
+                                  Min="0"
+                                  Class="mb-3" />
+                <MudNumericField T="decimal"
+                                 @bind-Value="_stopLossBuffer"
+                                  Label="Stop-Loss Buffer (pts)"
+                                 HelperText="Moves an already parsed signal stop-loss closer to entry; does not create a missing stop-loss. 0 = disabled"
+                                 Variant="Variant.Outlined"
+                                 Min="0m" />
+            </MudPaper>
+        </MudStack>
     </MudItem>
 
+    <!-- Right Column -->
     <MudItem xs="12" md="6">
-        <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.h6" Class="mb-3">Risk Management</MudText>
-            <MudNumericField T="decimal" @bind-Value="_dailyMaxLoss" Label="Daily Max Loss (₹)" Variant="Variant.Outlined" Class="mb-2" />
-            <MudNumericField T="decimal" @bind-Value="_dailyMaxProfit" Label="Daily Max Profit (₹)" Variant="Variant.Outlined" Class="mb-2" />
-            <MudNumericField T="int" @bind-Value="_maxOpenPositions" Label="Max Open Positions" Variant="Variant.Outlined" Class="mb-2" />
-            <MudNumericField T="int" @bind-Value="_maxTradesPerDay" Label="Max Trades / Day" Variant="Variant.Outlined" Class="mb-2" />
-            <MudNumericField T="decimal" @bind-Value="_stopLossBuffer" Label="Stop-loss Buffer (pts)" Variant="Variant.Outlined" />
-        </MudPaper>
-    </MudItem>
+        <MudStack Spacing="3">
+            <!-- Trading Hours & Auto Square-Off -->
+            <MudPaper Class="pa-4 settings-card-blue" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3">
+                    <MudIcon Icon="@Icons.Material.Filled.AccessTime" Color="Color.Primary" />
+                    <MudText Typo="Typo.h6">Trading Hours &amp; Square-Off</MudText>
+                </MudStack>
+                <MudSwitch T="bool" @bind-Value="_allowAfterMarketHours" Color="Color.Warning" Label="Allow orders after market hours (testing)" Class="mb-2" />
+                <MudSwitch T="bool" @bind-Value="_killSwitch" Color="Color.Error" Label="Emergency Kill Switch (block all trades)" Class="mb-2" />
+                <MudDivider Class="my-3" />
+                <MudText Typo="Typo.subtitle2" Class="mb-2 font-weight-bold">Auto Square-Off</MudText>
+                <MudSwitch T="bool" @bind-Value="_autoSquareOffEnabled" Color="Color.Error" Label="Enable Auto Square-Off" Class="mb-2" />
+                <MudTextField T="string" @bind-Value="_autoSquareOffTime" Label="Auto Square-Off Time (24h IST, e.g. 15:10)" Variant="Variant.Outlined" HelperText="All open positions are closed automatically at this IST time each day" />
+                <MudDivider Class="my-3" />
+                <MudText Typo="Typo.subtitle2" Class="mb-2 font-weight-bold">Signals by Time</MudText>
+                <MudSwitch T="bool" @bind-Value="_signalTimeWindowEnabled" Color="Color.Primary" Label="Only execute signals within trading window" Class="mb-2" />
+                <MudTextField T="string" @bind-Value="_signalTimeWindowStart" Label="Signal Start Time (24h IST, e.g. 09:15)" Variant="Variant.Outlined" Class="mb-3" HelperText="Signals received before this IST time are skipped" />
+                <MudTextField T="string" @bind-Value="_signalTimeWindowEnd" Label="Signal End Time (24h IST, e.g. 15:00)" Variant="Variant.Outlined" HelperText="Signals received after this IST time are skipped" />
+                <MudDivider Class="my-3" />
+                <MudText Typo="Typo.subtitle2" Class="mb-2 font-weight-bold">Slippage Guard</MudText>
+                <MudSwitch T="bool" @bind-Value="_slippageGuardEnabled" Color="Color.Warning" Label="Reject live orders on excessive slippage" Class="mb-2" />
+                <MudNumericField T="decimal"
+                                  @bind-Value="_maxSlippagePercent"
+                                  Label="Max Slippage (%)"
+                                  HelperText="Reject order if CMP has moved adversely beyond this % from signal entry"
+                                  Variant="Variant.Outlined"
+                                  Min="0m" />
+            </MudPaper>
 
-    <MudItem xs="12" md="6">
-        <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.h6" Class="mb-1">Default Order Size</MudText>
-            <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3">
-                Used as the pre-filled Lots value on every new signal. You can override per-signal on the Dashboard.
-            </MudText>
-            <MudNumericField T="int"
-                             @bind-Value="_defaultQuantity"
-                             Label="Default Lots per Order"
-                             HelperText="e.g. 1 lot = 75 qty for NIFTY, 30 for BANKNIFTY"
-                             Variant="Variant.Outlined"
-                             Min="1"
-                             Class="mb-3" />
-
-            <MudDivider Class="my-3" />
-            <MudText Typo="Typo.subtitle2" Class="mb-2">Per-Index Lot Overrides <MudText Typo="Typo.caption" Color="Color.Secondary">(0 = use default above)</MudText></MudText>
-            <MudGrid Spacing="2">
-                <MudItem xs="6">
-                    <MudNumericField T="int" @bind-Value="_lotsNifty"      Label="NIFTY"      Variant="Variant.Outlined" Min="0" />
-                </MudItem>
-                <MudItem xs="6">
-                    <MudNumericField T="int" @bind-Value="_lotsBankNifty"  Label="BANKNIFTY"  Variant="Variant.Outlined" Min="0" />
-                </MudItem>
-                <MudItem xs="6">
-                    <MudNumericField T="int" @bind-Value="_lotsFinNifty"   Label="FINNIFTY"   Variant="Variant.Outlined" Min="0" />
-                </MudItem>
-                <MudItem xs="6">
-                    <MudNumericField T="int" @bind-Value="_lotsMidcpNifty" Label="MIDCPNIFTY" Variant="Variant.Outlined" Min="0" />
-                </MudItem>
-                <MudItem xs="6">
-                    <MudNumericField T="int" @bind-Value="_lotsSensex"     Label="SENSEX"     Variant="Variant.Outlined" Min="0" />
-                </MudItem>
-                <MudItem xs="6">
-                    <MudNumericField T="int" @bind-Value="_lotsBankex"     Label="BANKEX"     Variant="Variant.Outlined" Min="0" />
-                </MudItem>
-            </MudGrid>
-        </MudPaper>
-    </MudItem>
-
-    <MudItem xs="12" md="6">
-        <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.h6" Class="mb-3">Notifications</MudText>
-            <MudSwitch T="bool" @bind-Value="_browserNotifications" Color="Color.Primary" Label="Browser notifications" />
-            <MudSwitch T="bool" @bind-Value="_soundAlerts" Color="Color.Primary" Label="Sound alerts" />
-        </MudPaper>
-    </MudItem>
-
-    <MudItem xs="12" md="6">
-        <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.h6" Class="mb-3">Trading Hours</MudText>
-            <MudNumericField T="int" @bind-Value="_marketOpenHour" Label="Open Hour (0-23)" Variant="Variant.Outlined" Class="mb-2" />
-            <MudNumericField T="int" @bind-Value="_marketCloseHour" Label="Close Hour (0-23)" Variant="Variant.Outlined" Class="mb-2" />
-            <MudSwitch T="bool" @bind-Value="_allowAfterMarketHours" Color="Color.Warning" Label="Allow orders after market hours (testing)" Class="mb-2" />
-            <MudSwitch T="bool" @bind-Value="_killSwitch" Color="Color.Error" Label="Emergency Kill Switch (block all trades)" />
-        </MudPaper>
+            <!-- Entry Trigger & Price Offsets -->
+            <MudPaper Class="pa-4 settings-card-purple" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
+                    <MudIcon Icon="@Icons.Material.Filled.Build" Color="Color.Secondary" />
+                    <MudText Typo="Typo.h6">Entry Trigger &amp; Price Offsets</MudText>
+                </MudStack>
+                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
+                    Configure breakout trigger conditions and limit order retracement buffers.
+                </MudText>
+                <MudSelect T="string" @bind-Value="_orderVariety" Label="Order Type" Variant="Variant.Outlined" Class="mb-3">
+                    <MudSelectItem Value="@("Robo")">Robo / Bracket Order (SL + Target auto-managed by broker)</MudSelectItem>
+                    <MudSelectItem Value="@("Limit")">Plain Limit Order (manual SL/target management)</MudSelectItem>
+                    <MudSelectItem Value="@("Market")">Market Order (immediate execution at live CMP)</MudSelectItem>
+                </MudSelect>
+                <MudSwitch T="bool" @bind-Value="_enableEntryCrossingTrigger" Color="Color.Primary" Label="Enable Entry Price Crossing Trigger" Class="mb-3" />
+                <MudNumericField T="decimal"
+                                  @bind-Value="_entryPriceOffset"
+                                  Label="Entry Price Offset (pts)"
+                                  HelperText="Adjusts a non-market limit order to (Entry - Offset); 0 = no adjustment"
+                                  Variant="Variant.Outlined"
+                                  Class="mb-3" />
+                <MudNumericField T="decimal"
+                                  @bind-Value="_targetPriceOffset"
+                                  Label="Target Price Offset (pts)"
+                                  HelperText="Adjusts numeric targets supplied by the signal to (Target - Offset); 0 = no adjustment"
+                                  Variant="Variant.Outlined"
+                                  Class="mb-3" />
+                <MudDivider Class="my-3" />
+                <MudText Typo="Typo.subtitle2" Class="mb-1">Signal Defaults</MudText>
+                <MudNumericField T="decimal"
+                                  @bind-Value="_defaultTargetPoints"
+                                   Label="Default Target (pts)"
+                                  HelperText="Creates a target this many points from entry when the signal target is missing or non-numeric"
+                                  Variant="Variant.Outlined"
+                                  Min="0m"
+                                  Class="mb-3" />
+                <MudNumericField T="decimal"
+                                  @bind-Value="_defaultStopLossPoints"
+                                   Label="Default Stop-Loss (pts)"
+                                  HelperText="Creates a stop-loss this many points below entry when the signal SL is missing or non-numeric"
+                                  Variant="Variant.Outlined"
+                                  Min="0m"
+                                  Class="mb-3" />
+                <MudNumericField T="decimal"
+                                  @bind-Value="_exitPriceOffset"
+                                   Label="Exit Price Offset (pts)"
+                                   HelperText="Paper trading only: adjusts the observed exit CMP adversely; live exits use the broker fill. 0 = no adjustment"
+                                  Variant="Variant.Outlined"
+                                  Class="mb-3"
+                                  Min="0m" />
+                @if (string.Equals(_orderVariety, "Robo", StringComparison.OrdinalIgnoreCase))
+                {
+                    <MudNumericField T="decimal"
+                                      @bind-Value="_trailingStopLossPoints"
+                                      Label="Trailing Stop-Loss (pts)"
+                                      HelperText="Auto-trail SL by this many points as price moves favorably (0 = disabled)"
+                                      Variant="Variant.Outlined"
+                                      Min="0m"
+                                      Class="mb-3" />
+                }
+                <MudDivider Class="my-3" />
+                <MudNumericField T="int"
+                                  @bind-Value="_pendingOrderTimeoutMinutes"
+                                  Label="Pending Order Auto-Cancel (mins)"
+                                  HelperText="Cancel unfilled limit orders after this many minutes (0 = disabled)"
+                                  Variant="Variant.Outlined"
+                                  Min="0" />
+            </MudPaper>
+        </MudStack>
     </MudItem>
 </MudGrid>
 
@@ -96,7 +244,6 @@
 
 @code {
     private string _tradingMode = "manual";
-    private bool _paperTrading = true;
     private int _defaultQuantity = 1;
 
     // Per-index lot overrides
@@ -114,10 +261,28 @@
     private decimal _stopLossBuffer = 0;
     private bool _browserNotifications = true;
     private bool _soundAlerts = true;
-    private int _marketOpenHour = 9;
-    private int _marketCloseHour = 15;
     private bool _killSwitch = false;
     private bool _allowAfterMarketHours = false;
+    private bool _autoSquareOffEnabled = false;
+    private string _autoSquareOffTime = "15:10";
+    private bool _signalTimeWindowEnabled = false;
+    private string _signalTimeWindowStart = "09:15";
+    private string _signalTimeWindowEnd = "15:00";
+    private bool _slippageGuardEnabled = false;
+    private decimal _maxSlippagePercent = 1.0m;
+    private bool _enableEntryCrossingTrigger = true;
+    private decimal _entryPriceOffset = 10.0m;
+    private decimal _targetPriceOffset = 10.0m;
+    private decimal _defaultTargetPoints = 20.0m;
+    private decimal _defaultStopLossPoints = 50.0m;
+    private decimal _exitPriceOffset = 0m;
+    private int _pendingOrderTimeoutMinutes = 5;
+    private int _duplicateSignalCooldownMinutes = 2;
+    private int _pnlHistoryRetentionDays = 90;
+    private string _orderVariety = "Robo";
+    private decimal _trailingStopLossPoints = 0m;
+    private string _adminUsername = "admin";
+    private string _adminPassword = "";
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
 
@@ -126,26 +291,61 @@
         try
         {
             _tradingMode = await SettingsService.GetSettingAsync<string>("TradingMode") ?? _tradingMode;
-            var paper = await SettingsService.GetSettingAsync<string>("PaperTrading");
-            if (!string.IsNullOrEmpty(paper)) bool.TryParse(paper, out _paperTrading);
             var qty = await SettingsService.GetSettingAsync<int?>("DefaultQuantity"); if (qty.HasValue) _defaultQuantity = qty.Value;
-
+ 
             var ln  = await SettingsService.GetSettingAsync<int?>("Lots.NIFTY");       if (ln.HasValue)  _lotsNifty      = ln.Value;
             var lbn = await SettingsService.GetSettingAsync<int?>("Lots.BANKNIFTY");   if (lbn.HasValue) _lotsBankNifty  = lbn.Value;
             var lfn = await SettingsService.GetSettingAsync<int?>("Lots.FINNIFTY");    if (lfn.HasValue) _lotsFinNifty   = lfn.Value;
             var lmn = await SettingsService.GetSettingAsync<int?>("Lots.MIDCPNIFTY");  if (lmn.HasValue) _lotsMidcpNifty = lmn.Value;
             var ls  = await SettingsService.GetSettingAsync<int?>("Lots.SENSEX");      if (ls.HasValue)  _lotsSensex     = ls.Value;
             var lbx = await SettingsService.GetSettingAsync<int?>("Lots.BANKEX");      if (lbx.HasValue) _lotsBankex     = lbx.Value;
-
+ 
             var dml  = await SettingsService.GetSettingAsync<decimal?>("DailyMaxLoss");       if (dml.HasValue)  _dailyMaxLoss     = dml.Value;
             var dmp  = await SettingsService.GetSettingAsync<decimal?>("DailyMaxProfit");     if (dmp.HasValue)  _dailyMaxProfit   = dmp.Value;
             var mop  = await SettingsService.GetSettingAsync<int?>("MaxOpenPositions");       if (mop.HasValue)  _maxOpenPositions  = mop.Value;
             var mtpd = await SettingsService.GetSettingAsync<int?>("MaxTradesPerDay");        if (mtpd.HasValue) _maxTradesPerDay   = mtpd.Value;
             var slb  = await SettingsService.GetSettingAsync<decimal?>("StopLossBuffer");     if (slb.HasValue)  _stopLossBuffer    = slb.Value;
-            var ks   = await SettingsService.GetSettingAsync<string>("KillSwitch");
-            if (!string.IsNullOrEmpty(ks)) bool.TryParse(ks, out _killSwitch);
-            var amh = await SettingsService.GetSettingAsync<string>("AllowAfterMarketHours");
-            if (!string.IsNullOrEmpty(amh)) bool.TryParse(amh, out _allowAfterMarketHours);
+            var ks   = await SettingsService.GetSettingAsync<bool?>("KillSwitch");
+            if (ks.HasValue) _killSwitch = ks.Value;
+            var amh = await SettingsService.GetSettingAsync<bool?>("AllowAfterMarketHours");
+            if (amh.HasValue) _allowAfterMarketHours = amh.Value;
+            var asoe = await SettingsService.GetSettingAsync<bool?>("AutoSquareOffEnabled");
+            if (asoe.HasValue) _autoSquareOffEnabled = asoe.Value;
+            _autoSquareOffTime = await SettingsService.GetSettingAsync<string>("AutoSquareOffTime") ?? "15:10";
+
+            var stwe = await SettingsService.GetSettingAsync<bool?>("SignalTimeWindowEnabled");
+            if (stwe.HasValue) _signalTimeWindowEnabled = stwe.Value;
+            _signalTimeWindowStart = await SettingsService.GetSettingAsync<string>("SignalTimeWindowStart") ?? "09:15";
+            _signalTimeWindowEnd = await SettingsService.GetSettingAsync<string>("SignalTimeWindowEnd") ?? "15:00";
+            var sge = await SettingsService.GetSettingAsync<bool?>("SlippageGuardEnabled");
+            if (sge.HasValue) _slippageGuardEnabled = sge.Value;
+            var msp = await SettingsService.GetSettingAsync<decimal?>("MaxSlippagePercent");
+            if (msp.HasValue) _maxSlippagePercent = msp.Value;
+
+            var eect = await SettingsService.GetSettingAsync<bool?>("EnableEntryPriceCrossingTrigger");
+            if (eect.HasValue) _enableEntryCrossingTrigger = eect.Value;
+            var epo = await SettingsService.GetSettingAsync<decimal?>("EntryPriceOffset");
+            if (epo.HasValue) _entryPriceOffset = epo.Value;
+            var tpo = await SettingsService.GetSettingAsync<decimal?>("TargetPriceOffset");
+            if (tpo.HasValue) _targetPriceOffset = tpo.Value;
+            var dtp = await SettingsService.GetSettingAsync<decimal?>("DefaultTargetPoints");
+            if (dtp.HasValue) _defaultTargetPoints = dtp.Value;
+            var dsl = await SettingsService.GetSettingAsync<decimal?>("DefaultStopLossPoints");
+            if (dsl.HasValue) _defaultStopLossPoints = dsl.Value;
+            var xpo = await SettingsService.GetSettingAsync<decimal?>("ExitPriceOffset");
+            if (xpo.HasValue) _exitPriceOffset = xpo.Value;
+            var potm = await SettingsService.GetSettingAsync<int?>("PendingOrderTimeoutMinutes");
+            if (potm.HasValue) _pendingOrderTimeoutMinutes = potm.Value;
+            var dscm = await SettingsService.GetSettingAsync<int?>("DuplicateSignalCooldownMinutes");
+            if (dscm.HasValue) _duplicateSignalCooldownMinutes = dscm.Value;
+            var phrd = await SettingsService.GetSettingAsync<int?>("PnlHistoryRetentionDays");
+            if (phrd.HasValue) _pnlHistoryRetentionDays = phrd.Value;
+            _orderVariety = await SettingsService.GetSettingAsync<string>("OrderVariety") ?? "Robo";
+            var tslp = await SettingsService.GetSettingAsync<decimal?>("TrailingStopLossPoints");
+            if (tslp.HasValue) _trailingStopLossPoints = tslp.Value;
+
+            _adminUsername = await Auth.GetAdminUsernameAsync();
+            _adminPassword = "";
         }
         catch (Exception ex)
         {
@@ -158,7 +358,6 @@
         try
         {
             await SettingsService.SetSettingAsync("TradingMode",    _tradingMode);
-            await SettingsService.SetSettingAsync("PaperTrading",   _paperTrading);
             await SettingsService.SetSettingAsync("DefaultQuantity", _defaultQuantity);
 
             await SettingsService.SetSettingAsync("Lots.NIFTY",      _lotsNifty);
@@ -175,10 +374,36 @@
             await SettingsService.SetSettingAsync("StopLossBuffer",     _stopLossBuffer);
             await SettingsService.SetSettingAsync("BrowserNotifications", _browserNotifications);
             await SettingsService.SetSettingAsync("SoundAlerts",        _soundAlerts);
-            await SettingsService.SetSettingAsync("MarketOpenHour",     _marketOpenHour);
-            await SettingsService.SetSettingAsync("MarketCloseHour",    _marketCloseHour);
             await SettingsService.SetSettingAsync("KillSwitch",         _killSwitch);
             await SettingsService.SetSettingAsync("AllowAfterMarketHours", _allowAfterMarketHours);
+            await SettingsService.SetSettingAsync("AutoSquareOffEnabled", _autoSquareOffEnabled);
+            await SettingsService.SetSettingAsync("AutoSquareOffTime", _autoSquareOffTime);
+
+            await SettingsService.SetSettingAsync("SignalTimeWindowEnabled", _signalTimeWindowEnabled);
+            await SettingsService.SetSettingAsync("SignalTimeWindowStart", _signalTimeWindowStart);
+            await SettingsService.SetSettingAsync("SignalTimeWindowEnd", _signalTimeWindowEnd);
+            await SettingsService.SetSettingAsync("SlippageGuardEnabled", _slippageGuardEnabled);
+            await SettingsService.SetSettingAsync("MaxSlippagePercent", _maxSlippagePercent);
+
+            await SettingsService.SetSettingAsync("EnableEntryPriceCrossingTrigger", _enableEntryCrossingTrigger);
+            await SettingsService.SetSettingAsync("EntryPriceOffset", _entryPriceOffset);
+            await SettingsService.SetSettingAsync("TargetPriceOffset", _targetPriceOffset);
+            await SettingsService.SetSettingAsync("DefaultTargetPoints", _defaultTargetPoints);
+            await SettingsService.SetSettingAsync("DefaultStopLossPoints", _defaultStopLossPoints);
+            await SettingsService.SetSettingAsync("ExitPriceOffset", _exitPriceOffset);
+            await SettingsService.SetSettingAsync("PendingOrderTimeoutMinutes", _pendingOrderTimeoutMinutes);
+            await SettingsService.SetSettingAsync("DuplicateSignalCooldownMinutes", _duplicateSignalCooldownMinutes);
+            await SettingsService.SetSettingAsync("PnlHistoryRetentionDays", _pnlHistoryRetentionDays);
+            await SettingsService.SetSettingAsync("OrderVariety", _orderVariety);
+            await SettingsService.SetSettingAsync("TrailingStopLossPoints", _trailingStopLossPoints);
+
+            if (!string.IsNullOrWhiteSpace(_adminUsername))
+            {
+                var currentPwd = await SettingsService.GetSettingAsync<string>("Admin.Password") ?? "admin123";
+                var pwdToSave = string.IsNullOrWhiteSpace(_adminPassword) ? currentPwd : _adminPassword;
+                await Auth.UpdateCredentialsAsync(_adminUsername, pwdToSave);
+                _adminPassword = "";
+            }
 
             Snackbar.Add("Settings saved", Severity.Success);
         }

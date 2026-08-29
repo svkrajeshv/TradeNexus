@@ -1,34 +1,27 @@
-using Microsoft.Extensions.Logging;
 using NexusApp.Interfaces;
 using NexusApp.Models;
-using System.Text.Json;
-using System.Globalization;
 using System.Collections.Concurrent;
+using System.Globalization;
+using System.Text.Json;
 
 namespace NexusApp.Brokers.AngelOne;
 
 /// <summary>
 /// Angel One broker implementation
 /// </summary>
-public class AngelOneBroker : IBroker
+public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker> logger, AngelInstrumentMaster? instrumentMaster = null, AngelOneWebSocketClient? webSocket = null) : IBroker
 {
-    private readonly AngelOneApiClient _apiClient;
-    private readonly ILogger<AngelOneBroker> _logger;
-    private readonly AngelInstrumentMaster? _instrumentMaster;
-    private bool _isConnected;
+    private const string orderId = "orderid";
+    private readonly AngelOneApiClient _apiClient = apiClient;
+    private readonly ILogger<AngelOneBroker> _logger = logger;
+    private readonly AngelInstrumentMaster? _instrumentMaster = instrumentMaster;
+    private readonly AngelOneWebSocketClient? _webSocket = webSocket;
+    private bool _isConnected = false;
     private readonly ConcurrentDictionary<string, CachedInstrument> _instrumentCache = new(StringComparer.OrdinalIgnoreCase);
 
     public string BrokerName => "AngelOne";
     
     public bool IsConnected => _isConnected && _apiClient.IsAuthenticated;
-
-    public AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker> logger, AngelInstrumentMaster? instrumentMaster = null)
-    {
-        _apiClient = apiClient;
-        _logger = logger;
-        _instrumentMaster = instrumentMaster;
-        _isConnected = false;
-    }
 
     public async Task<bool> AuthenticateAsync(string clientId, string password, string? twoFactorCode = null)
     {
@@ -227,6 +220,27 @@ public class AngelOneBroker : IBroker
             if (string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(tradingSymbol))
                 return 0m;
 
+            // Prefer the live WebSocket tick stream when available. It is far lighter than
+            // a REST quote per call (one persistent connection, broker pushes ticks) and
+            // scales flat with the number of symbols. Ensure this token is subscribed so
+            // future ticks stream in, then serve the last cached tick if we already have one.
+            if (_webSocket is not null)
+            {
+                try
+                {
+                    _ = _webSocket.SubscribeAsync(new[] { (token!, exchange ?? "NFO") });
+                    var wsLtp = _webSocket.GetLastLtp(token!);
+                    if (wsLtp > 0)
+                        return wsLtp;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "WebSocket LTP lookup failed for {Symbol}; falling back to REST", symbol);
+                }
+            }
+
+            // Fallback: no tick cached yet (just subscribed / illiquid) or WS unavailable —
+            // fetch a one-off REST quote so the first read isn't blocked waiting for a tick.
             var result = await _apiClient.GetLtpAsync(exchange ?? "NFO", tradingSymbol!, token!);
             if (result is null)
                 return 0m;
@@ -241,6 +255,31 @@ public class AngelOneBroker : IBroker
         {
             _logger.LogDebug(ex, "Error getting live quote for {Symbol}", symbol);
             return 0m;
+        }
+    }
+
+    /// <summary>
+    /// Unsubscribes the symbol's token from the live WebSocket feed once it is no longer
+    /// monitored (e.g. after square-off), so subscriptions don't accumulate over time.
+    /// </summary>
+    public async Task ReleaseSymbolFeedAsync(string symbol)
+    {
+        if (_webSocket is null || string.IsNullOrWhiteSpace(symbol) || _instrumentMaster is null)
+            return;
+
+        try
+        {
+            await _instrumentMaster.EnsureLoadedAsync();
+            var entry = _instrumentMaster.FindByTradingSymbol(symbol);
+            if (entry is not null && !string.IsNullOrWhiteSpace(entry.Token))
+            {
+                var exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? "NFO" : entry.ExchangeSegment;
+                await _webSocket.UnsubscribeAsync(new[] { (entry.Token, exchange) });
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to release WS feed for {Symbol}", symbol);
         }
     }
 
@@ -348,29 +387,73 @@ public class AngelOneBroker : IBroker
                 };
             }
 
-            var orderRequest = new
+            var isRobo = string.Equals(request.Variety, "ROBO", StringComparison.OrdinalIgnoreCase);
+
+            object orderRequest;
+            if (isRobo)
             {
-                variety = "NORMAL",
-                tradingsymbol = tradingSymbol,
-                symboltoken = symbolToken,
-                transactiontype = request.Side == OrderSide.Buy ? "BUY" : "SELL",
-                exchange,
-                ordertype = request.OrderType == OrderType.Limit ? "LIMIT" : "MARKET",
-                producttype = request.ProductType == ProductType.Mis ? "INTRADAY" : "CARRYFORWARD",
-                duration = "DAY",
-                price = request.OrderType == OrderType.Market
-                    ? "0"
-                    : request.Price.ToString("0.##", CultureInfo.InvariantCulture),
-                quantity = Math.Max(1, (int)Math.Round(request.Quantity, MidpointRounding.AwayFromZero))
-            };
+                orderRequest = new
+                {
+                    variety = "ROBO",
+                    tradingsymbol = tradingSymbol,
+                    symboltoken = symbolToken,
+                    transactiontype = request.Side == OrderSide.Buy ? "BUY" : "SELL",
+                    exchange,
+                    ordertype = request.OrderType == OrderType.Limit ? "LIMIT" : "MARKET",
+                    producttype = "BO",
+                    duration = "DAY",
+                    price = request.OrderType == OrderType.Market
+                        ? "0"
+                        : request.Price.ToString("0.##", CultureInfo.InvariantCulture),
+                    quantity = Math.Max(1, (int)Math.Round(request.Quantity, MidpointRounding.AwayFromZero)),
+                    squareoff = request.SquareOffPoints.ToString("0.##", CultureInfo.InvariantCulture),
+                    stoploss = request.StopLossPoints.ToString("0.##", CultureInfo.InvariantCulture),
+                    trailingStopLoss = request.TrailingStopLossPoints > 0
+                        ? request.TrailingStopLossPoints.ToString("0.##", CultureInfo.InvariantCulture)
+                        : "0"
+                };
+                _logger.LogInformation(
+                    "Placing ROBO order: {Symbol} {Side} qty={Qty} @ {Price}, squareoff={SqOff}, stoploss={SL}, trailingSL={TSL}",
+                    tradingSymbol, request.Side, request.Quantity, request.Price,
+                    request.SquareOffPoints, request.StopLossPoints, request.TrailingStopLossPoints);
+            }
+            else
+            {
+                orderRequest = new
+                {
+                    variety = "NORMAL",
+                    tradingsymbol = tradingSymbol,
+                    symboltoken = symbolToken,
+                    transactiontype = request.Side == OrderSide.Buy ? "BUY" : "SELL",
+                    exchange,
+                    ordertype = request.OrderType == OrderType.Limit ? "LIMIT" : "MARKET",
+                    producttype = request.ProductType == ProductType.Nrml ? "CARRYFORWARD" : "INTRADAY",
+                    duration = "DAY",
+                    price = request.OrderType == OrderType.Market
+                        ? "0"
+                        : request.Price.ToString("0.##", CultureInfo.InvariantCulture),
+                    quantity = Math.Max(1, (int)Math.Round(request.Quantity, MidpointRounding.AwayFromZero))
+                };
+            }
 
             var result = await _apiClient.PlaceOrderAsync(orderRequest);
              
             if (result == null)
-                return new BrokerOrderResponse { Success = false, ErrorMessage = "API call failed" };
+                return new BrokerOrderResponse { Success = false, ErrorMessage = "API call failed (null response)" };
 
-            if (result.Value.TryGetProperty("status", out var statusEl) &&
-                statusEl.ValueKind == JsonValueKind.False)
+            _logger.LogInformation("Angel One raw placeOrder response: {Raw}", result.Value.GetRawText());
+
+            bool isStatusFalse = false;
+            if (result.Value.TryGetProperty("status", out var statusEl))
+            {
+                if (statusEl.ValueKind == JsonValueKind.False)
+                    isStatusFalse = true;
+                else if (statusEl.ValueKind == JsonValueKind.String &&
+                         string.Equals(statusEl.GetString(), "false", StringComparison.OrdinalIgnoreCase))
+                    isStatusFalse = true;
+            }
+
+            if (isStatusFalse)
             {
                 var reason = ExtractBrokerError(result.Value);
                 _logger.LogWarning("Broker placeOrder rejected: {Reason}", reason);
@@ -394,20 +477,18 @@ public class AngelOneBroker : IBroker
                 {
                     case JsonValueKind.Object:
                         response.OrderId =
-                            TryGetStringAny(data, "orderid", "orderId", "amoOrderId", "exchangeOrderId")
+                            TryGetStringAny(data, orderId, "orderId", "amoOrderId", "exchangeOrderId")
                             ?? string.Empty;
                         break;
                     case JsonValueKind.String:
-                        // Some Angel One responses return order id directly as string in "data".
                         response.OrderId = data.GetString() ?? string.Empty;
                         break;
                     case JsonValueKind.Array:
-                        // Defensive parse for variant payloads; take first order id if present.
                         foreach (var item in data.EnumerateArray())
                         {
                             if (item.ValueKind == JsonValueKind.Object)
                             {
-                                var arrOrderId = TryGetStringAny(item, "orderid", "orderId", "amoOrderId", "exchangeOrderId");
+                                var arrOrderId = TryGetStringAny(item, orderId, "orderId", "amoOrderId", "exchangeOrderId");
                                 if (string.IsNullOrWhiteSpace(arrOrderId))
                                     continue;
                                 response.OrderId = arrOrderId;
@@ -417,13 +498,24 @@ public class AngelOneBroker : IBroker
                         break;
                 }
             }
-            else if (result.Value.TryGetProperty("message", out var msg) && msg.ValueKind == JsonValueKind.String)
+
+            if (string.IsNullOrWhiteSpace(response.OrderId))
             {
-                // Keep success true for HTTP 200, but expose broker message for traceability.
-                response.ErrorMessage = msg.GetString();
+                var reason = ExtractBrokerError(result.Value);
+                if (string.IsNullOrWhiteSpace(reason) && result.Value.TryGetProperty("message", out var msgEl))
+                    reason = msgEl.GetString();
+
+                var errorMsg = string.IsNullOrWhiteSpace(reason) ? "Broker response missing order ID" : reason;
+                _logger.LogWarning("Angel One order placement returned no orderid. Error: {Error}", errorMsg);
+                return new BrokerOrderResponse
+                {
+                    Success = false,
+                    ErrorMessage = errorMsg,
+                    Timestamp = DateTime.UtcNow
+                };
             }
 
-            _logger.LogInformation("Order placed successfully: {OrderId}", response.OrderId);
+            _logger.LogInformation("Order placed successfully on Angel One: OrderId={OrderId}", response.OrderId);
             return response;
         }
         catch (Exception ex)
@@ -469,30 +561,48 @@ public class AngelOneBroker : IBroker
                 return decimal.TryParse(element.GetString(), out value);
 
             case JsonValueKind.Object:
+                // Only extract a genuine last-traded-price field. We must NOT fall back
+                // to the first numeric property found (open/high/low/close), because the
+                // Angel LTP payload is { open, high, low, close, ltp } and grabbing the
+                // wrong field yields a stale/incorrect quote — which corrupts square-off
+                // exit prices, realized P&L and slippage checks.
                 foreach (var prop in element.EnumerateObject())
                 {
-                    if (prop.NameEquals("ltp") ||
+                    if ((prop.NameEquals("ltp") ||
                         prop.NameEquals("lastPrice") ||
                         prop.NameEquals("lastprice") ||
                         prop.NameEquals("last_traded_price") ||
-                        prop.NameEquals("close"))
+                        prop.NameEquals("ltpc")) && TryExtractDecimal(prop.Value, out value) && value > 0m)
+                        return true;
+                }
+
+                // Nested container (e.g. { "data": { ... } } / { "fetched": [ ... ] }):
+                // recurse only into object/array values, never scalar siblings.
+                foreach (var prop in element.EnumerateObject())
+                {
+                    if ((prop.Value.ValueKind == JsonValueKind.Object ||
+                         prop.Value.ValueKind == JsonValueKind.Array) &&
+                        TryExtractDecimal(prop.Value, out value) && value > 0m)
                     {
-                        if (TryExtractDecimal(prop.Value, out value))
-                            return true;
+                        return true;
                     }
                 }
 
+                // Last resort: previous-day close, only if no LTP was present at all.
                 foreach (var prop in element.EnumerateObject())
                 {
-                    if (TryExtractDecimal(prop.Value, out value))
+                    if (prop.NameEquals("close") &&
+                        TryExtractDecimal(prop.Value, out value) && value > 0m)
+                    {
                         return true;
+                    }
                 }
                 break;
 
             case JsonValueKind.Array:
                 foreach (var item in element.EnumerateArray())
                 {
-                    if (TryExtractDecimal(item, out value))
+                    if (TryExtractDecimal(item, out value) && value > 0m)
                         return true;
                 }
                 break;
@@ -508,7 +618,7 @@ public class AngelOneBroker : IBroker
     }
 
     private static readonly string[] KnownUnderlyings =
-        { "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTY" };
+        ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTY"];
 
     /// <summary>
     /// Decomposes an Angel option tradingsymbol into its parts. Handles both
@@ -733,7 +843,7 @@ public class AngelOneBroker : IBroker
                 {
                     foreach (var row in data.EnumerateArray())
                     {
-                        var rowId = TryGetStringAny(row, "orderid", "orderId");
+                        var rowId = TryGetStringAny(row, AngelOneBroker.orderId, "orderId");
                         if (!string.Equals(rowId, orderId, StringComparison.OrdinalIgnoreCase))
                             continue;
 
@@ -759,13 +869,13 @@ public class AngelOneBroker : IBroker
                 _logger.LogDebug(ex, "Could not read order book before cancel — proceeding with defaults");
             }
 
-            var cancelRequest = new { variety, orderid = orderId };
+            var cancelRequest = new { variety = NormalizeCancelVariety(variety), orderid = orderId };
             var (ok, message) = await _apiClient.CancelOrderAsync(cancelRequest);
             if (ok)
-                _logger.LogInformation("Order cancelled: {OrderId} (variety={Variety})", orderId, variety);
+                _logger.LogInformation("Order cancelled: {OrderId} (variety={Variety})", orderId, NormalizeCancelVariety(variety));
             else
                 _logger.LogWarning("Broker refused cancel for {OrderId} (variety={Variety}): {Message}",
-                    orderId, variety, message);
+                    orderId, NormalizeCancelVariety(variety), message);
             return ok;
         }
         catch (Exception ex)
@@ -773,6 +883,24 @@ public class AngelOneBroker : IBroker
             _logger.LogError(ex, "Error cancelling order: {OrderId}", orderId);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Maps an order-book variety to a value accepted by Angel's cancelOrder API,
+    /// which only allows NORMAL, STOPLOSS or ROBO. After-market orders are reported
+    /// as "AMO" in the order book but must be cancelled as their underlying variety
+    /// (NORMAL), otherwise Angel rejects with AB1007 "Invalid Order Variety".
+    /// </summary>
+    private static string NormalizeCancelVariety(string? variety)
+    {
+        var v = (variety ?? string.Empty).Trim().ToUpperInvariant();
+        return v switch
+        {
+            "STOPLOSS" => "STOPLOSS",
+            "ROBO" => "ROBO",
+            // NORMAL, AMO and anything unexpected map to NORMAL.
+            _ => "NORMAL"
+        };
     }
 
     public async Task<List<BrokerOrder>> GetOrderBookAsync()
@@ -786,7 +914,7 @@ public class AngelOneBroker : IBroker
             {
                 foreach (var item in EnumerateObjects(data))
                 {
-                    var orderId = TryGetStringAny(item, "orderId", "orderid", "amoOrderId", "exchangeOrderId");
+                    var orderId = TryGetStringAny(item, "orderId", AngelOneBroker.orderId, "amoOrderId", "exchangeOrderId");
                     var symbol = TryGetStringAny(item, "tradingSymbol", "tradingsymbol");
                     if (string.IsNullOrWhiteSpace(orderId) || string.IsNullOrWhiteSpace(symbol))
                         continue;
@@ -820,7 +948,7 @@ public class AngelOneBroker : IBroker
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting order book");
-            return new List<BrokerOrder>();
+            return [];
         }
     }
 
@@ -842,7 +970,7 @@ public class AngelOneBroker : IBroker
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting position book");
-            return new List<BrokerPosition>();
+            return [];
         }
     }
 
@@ -864,7 +992,7 @@ public class AngelOneBroker : IBroker
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting trade book");
-            return new List<BrokerTrade>();
+            return [];
         }
     }
 

@@ -1,0 +1,361 @@
+@page "/pnl"
+@using Microsoft.EntityFrameworkCore
+@using MudBlazor
+@using NexusApp.Data
+@using NexusApp.Models
+@using NexusApp.Helpers
+@inject IDbContextFactory<TradingDbContext> DbFactory
+@inject NexusApp.Services.TradeHistoryService TradeHistory
+@inject ISnackbar Snackbar
+
+<PageTitle>NexusApp - PNL Statements</PageTitle>
+
+<MudText Typo="Typo.h4" Class="mb-4">PNL Statements</MudText>
+
+<MudPaper Class="pa-4 mb-4" Elevation="2">
+    <MudGrid Spacing="2" Justify="Justify.FlexStart">
+        <MudItem xs="12" sm="4" md="3">
+            <MudDatePicker Label="From" @bind-Date="_fromDate" Variant="Variant.Outlined" DateFormat="dd-MMM-yyyy" />
+        </MudItem>
+        <MudItem xs="12" sm="4" md="3">
+            <MudDatePicker Label="To" @bind-Date="_toDate" Variant="Variant.Outlined" DateFormat="dd-MMM-yyyy" />
+        </MudItem>
+        <MudItem xs="12" sm="4" md="2">
+            <MudSelect T="string" Label="Channel" @bind-Value="_selectedChannel" Variant="Variant.Outlined" Clearable="true">
+                <MudSelectItem T="string" Value="@AllChannels">All Channels</MudSelectItem>
+                @foreach (var ch in _channels)
+                {
+                    <MudSelectItem T="string" Value="@ch">@ch</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="4" md="2">
+            <MudSelect T="string" Label="Terminal" @bind-Value="_selectedTerminal" Variant="Variant.Outlined" Clearable="true">
+                <MudSelectItem T="string" Value="@AllTerminals">All Terminals</MudSelectItem>
+                @foreach (var t in _terminals)
+                {
+                    <MudSelectItem T="string" Value="@t">@t</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="12" md="2" Class="d-flex align-center">
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Search" OnClick="ApplyAsync" Class="mr-2">Apply</MudButton>
+            <MudButton Variant="Variant.Outlined" Color="Color.Default" StartIcon="@Icons.Material.Filled.RestartAlt" OnClick="ResetAsync">Reset</MudButton>
+        </MudItem>
+    </MudGrid>
+</MudPaper>
+
+<MudGrid Spacing="3" Class="mb-4">
+    <MudItem xs="12" sm="6" md="3">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Net P&amp;L</MudText>
+            <MudText Typo="Typo.h4" Color="@(_totalPnL >= 0 ? Color.Success : Color.Error)">@_totalPnL.ToString("N2")</MudText>
+        </MudPaper>
+    </MudItem>
+    <MudItem xs="12" sm="6" md="3">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Total Trades</MudText>
+            <MudText Typo="Typo.h4">@_totalTrades</MudText>
+        </MudPaper>
+    </MudItem>
+    <MudItem xs="12" sm="6" md="3">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Win Rate</MudText>
+            <MudText Typo="Typo.h4" Color="@(_winRate >= 50 ? Color.Success : Color.Warning)">@_winRate.ToString("N1")%</MudText>
+        </MudPaper>
+    </MudItem>
+    <MudItem xs="12" sm="6" md="3">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Wins / Losses</MudText>
+            <MudText Typo="Typo.h4">
+                <MudText Typo="Typo.h4" Color="Color.Success" Inline="true">@_wins</MudText>
+                <MudText Typo="Typo.h4" Inline="true"> / </MudText>
+                <MudText Typo="Typo.h4" Color="Color.Error" Inline="true">@_losses</MudText>
+            </MudText>
+        </MudPaper>
+    </MudItem>
+</MudGrid>
+
+<MudPaper Class="pa-4 mb-4" Elevation="2">
+    <MudText Typo="Typo.h6" Class="mb-2">Performance by Channel</MudText>
+    @if (_channelStats.Count == 0)
+    {
+        <MudText Typo="Typo.body2" Color="Color.Secondary">No closed trades in the selected range.</MudText>
+    }
+    else
+    {
+        <MudTable Items="_channelStats" Dense="true" Hover="true" Striped="true" HorizontalScrollbar="true">
+            <HeaderContent>
+                <MudTh>Channel</MudTh>
+                <MudTh>Trades</MudTh>
+                <MudTh>Wins</MudTh>
+                <MudTh>Losses</MudTh>
+                <MudTh>Win %</MudTh>
+                <MudTh>Net P&amp;L</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd DataLabel="Channel">@context.Channel</MudTd>
+                <MudTd DataLabel="Trades">@context.Trades</MudTd>
+                <MudTd DataLabel="Wins">@context.Wins</MudTd>
+                <MudTd DataLabel="Losses">@context.Losses</MudTd>
+                <MudTd DataLabel="Win %">@context.WinRate.ToString("N1")%</MudTd>
+                <MudTd DataLabel="Net P&amp;L">
+                    <MudText Color="@(context.NetPnL >= 0 ? Color.Success : Color.Error)">@context.NetPnL.ToString("N2")</MudText>
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+    }
+</MudPaper>
+
+<MudPaper Class="pa-4 mb-4" Elevation="2">
+    <MudText Typo="Typo.h6" Class="mb-2">Performance by Terminal</MudText>
+    @if (_terminalStats.Count == 0)
+    {
+        <MudText Typo="Typo.body2" Color="Color.Secondary">No closed trades in the selected range.</MudText>
+    }
+    else
+    {
+        <MudTable Items="_terminalStats" Dense="true" Hover="true" Striped="true" HorizontalScrollbar="true">
+            <HeaderContent>
+                <MudTh>Terminal</MudTh>
+                <MudTh>Trades</MudTh>
+                <MudTh>Wins</MudTh>
+                <MudTh>Losses</MudTh>
+                <MudTh>Win %</MudTh>
+                <MudTh>Net P&amp;L</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd DataLabel="Terminal">@context.Terminal</MudTd>
+                <MudTd DataLabel="Trades">@context.Trades</MudTd>
+                <MudTd DataLabel="Wins">@context.Wins</MudTd>
+                <MudTd DataLabel="Losses">@context.Losses</MudTd>
+                <MudTd DataLabel="Win %">@context.WinRate.ToString("N1")%</MudTd>
+                <MudTd DataLabel="Net P&amp;L">
+                    <MudText Color="@(context.NetPnL >= 0 ? Color.Success : Color.Error)">@context.NetPnL.ToString("N2")</MudText>
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+    }
+</MudPaper>
+
+<MudPaper Class="pa-4" Elevation="2">
+    <MudText Typo="Typo.h6" Class="mb-2">Executed Trades</MudText>
+    @if (_rows.Count == 0)
+    {
+        <MudText Typo="Typo.body2" Color="Color.Secondary">No executed trades in the selected range.</MudText>
+    }
+    else
+    {
+        <MudTable Items="_rows" Dense="true" Hover="true" Striped="true" HorizontalScrollbar="true"
+                  Filter="null" Bordered="false" FixedHeader="true" Height="480px">
+            <HeaderContent>
+                <MudTh>Closed</MudTh>
+                <MudTh>Channel</MudTh>
+                <MudTh>Terminal</MudTh>
+                <MudTh>Symbol</MudTh>
+                <MudTh>Qty</MudTh>
+                <MudTh>Entry</MudTh>
+                <MudTh>Exit</MudTh>
+                <MudTh>Realised P&amp;L</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd DataLabel="Closed">@context.ClosedAt.ToIstString("dd-MMM hh:mm:ss tt")</MudTd>
+                <MudTd DataLabel="Channel">@context.Channel</MudTd>
+                <MudTd DataLabel="Terminal">@context.Terminal</MudTd>
+                <MudTd DataLabel="Symbol">@context.Symbol</MudTd>
+                <MudTd DataLabel="Qty">@context.Quantity</MudTd>
+                <MudTd DataLabel="Entry">@context.EntryPrice.ToString("N2")</MudTd>
+                <MudTd DataLabel="Exit">@(context.ExitPrice?.ToString("N2") ?? "-")</MudTd>
+                <MudTd DataLabel="Realised P&amp;L">
+                    <MudText Color="@(context.RealizedPnL >= 0 ? Color.Success : Color.Error)">@context.RealizedPnL.ToString("N2")</MudText>
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+    }
+</MudPaper>
+
+@code {
+    private const string AllChannels = "__ALL__";
+    private const string AllTerminals = "__ALL__";
+    private const string UnknownChannel = "Unknown";
+    private const string UnknownTerminal = "Unknown";
+
+    private DateTime? _fromDate = DateTime.Today.AddDays(-30);
+    private DateTime? _toDate = DateTime.Today;
+    private string _selectedChannel = AllChannels;
+    private string _selectedTerminal = AllTerminals;
+
+    private readonly List<string> _channels = new();
+    private readonly List<string> _terminals = new();
+    private List<TradeRow> _rows = new();
+    private List<ChannelStat> _channelStats = new();
+    private List<TerminalStat> _terminalStats = new();
+
+    private decimal _totalPnL;
+    private int _totalTrades;
+    private int _wins;
+    private int _losses;
+    private double _winRate;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Capture any not-yet-archived closed positions so today's trades appear immediately.
+        try { await TradeHistory.ArchiveClosedPositionsAsync(); }
+        catch { /* archive is best-effort; page still renders from existing history */ }
+
+        await LoadFiltersAsync();
+        await ApplyAsync();
+    }
+
+    private async Task LoadFiltersAsync()
+    {
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+            var names = await db.ClosedTradeHistory.AsNoTracking()
+                .Where(h => h.ChannelName != null && h.ChannelName != string.Empty)
+                .Select(h => h.ChannelName)
+                .Distinct()
+                .OrderBy(n => n)
+                .ToListAsync();
+
+            _channels.Clear();
+            _channels.AddRange(names);
+
+            var terminals = await db.ClosedTradeHistory.AsNoTracking()
+                .Where(h => h.TerminalName != null && h.TerminalName != string.Empty)
+                .Select(h => h.TerminalName)
+                .Distinct()
+                .OrderBy(n => n)
+                .ToListAsync();
+
+            _terminals.Clear();
+            _terminals.AddRange(terminals);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to load filters: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private async Task ApplyAsync()
+    {
+        try
+        {
+            var fromUtc = (_fromDate ?? DateTime.Today.AddDays(-30)).Date.EnsureUtc();
+            var toUtc = (_toDate ?? DateTime.Today).Date.AddDays(1).EnsureUtc(); // inclusive end-of-day
+
+            using var db = await DbFactory.CreateDbContextAsync();
+
+            // Durable P&L history survives the daily/session cleanup that deletes positions.
+            var query =
+                from h in db.ClosedTradeHistory.AsNoTracking()
+                where h.ClosedAt >= fromUtc && h.ClosedAt < toUtc
+                select new TradeRow
+                {
+                    ClosedAt = h.ClosedAt,
+                    Channel = h.ChannelName != null && h.ChannelName != string.Empty ? h.ChannelName : UnknownChannel,
+                    Terminal = h.TerminalName != null && h.TerminalName != string.Empty ? h.TerminalName : UnknownTerminal,
+                    Symbol = h.Symbol,
+                    Quantity = h.Quantity,
+                    EntryPrice = h.EntryPrice,
+                    ExitPrice = h.ExitPrice,
+                    RealizedPnL = h.RealizedPnL
+                };
+
+            var rows = await query.OrderByDescending(r => r.ClosedAt).ToListAsync();
+
+            if (_selectedChannel != AllChannels && !string.IsNullOrEmpty(_selectedChannel))
+                rows = rows.Where(r => string.Equals(r.Channel, _selectedChannel, StringComparison.OrdinalIgnoreCase)).ToList();
+
+            if (_selectedTerminal != AllTerminals && !string.IsNullOrEmpty(_selectedTerminal))
+                rows = rows.Where(r => string.Equals(r.Terminal, _selectedTerminal, StringComparison.OrdinalIgnoreCase)).ToList();
+
+            _rows = rows;
+            ComputeStats();
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to load PNL statements: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private async Task ResetAsync()
+    {
+        _fromDate = DateTime.Today.AddDays(-30);
+        _toDate = DateTime.Today;
+        _selectedChannel = AllChannels;
+        _selectedTerminal = AllTerminals;
+        await ApplyAsync();
+    }
+
+    private void ComputeStats()
+    {
+        _totalTrades = _rows.Count;
+        _totalPnL = _rows.Sum(r => r.RealizedPnL);
+        _wins = _rows.Count(r => r.RealizedPnL > 0);
+        _losses = _rows.Count(r => r.RealizedPnL < 0);
+        _winRate = _totalTrades > 0 ? (double)_wins / _totalTrades * 100.0 : 0;
+
+        _channelStats = _rows
+            .GroupBy(r => r.Channel)
+            .Select(g => new ChannelStat
+            {
+                Channel = g.Key,
+                Trades = g.Count(),
+                Wins = g.Count(r => r.RealizedPnL > 0),
+                Losses = g.Count(r => r.RealizedPnL < 0),
+                NetPnL = g.Sum(r => r.RealizedPnL),
+                WinRate = g.Count() > 0 ? (double)g.Count(r => r.RealizedPnL > 0) / g.Count() * 100.0 : 0
+            })
+            .OrderByDescending(c => c.NetPnL)
+            .ToList();
+
+        _terminalStats = _rows
+            .GroupBy(r => r.Terminal)
+            .Select(g => new TerminalStat
+            {
+                Terminal = g.Key,
+                Trades = g.Count(),
+                Wins = g.Count(r => r.RealizedPnL > 0),
+                Losses = g.Count(r => r.RealizedPnL < 0),
+                NetPnL = g.Sum(r => r.RealizedPnL),
+                WinRate = g.Count() > 0 ? (double)g.Count(r => r.RealizedPnL > 0) / g.Count() * 100.0 : 0
+            })
+            .OrderByDescending(t => t.NetPnL)
+            .ToList();
+    }
+
+    private sealed class TradeRow
+    {
+        public DateTime ClosedAt { get; set; }
+        public string Channel { get; set; } = string.Empty;
+        public string Terminal { get; set; } = string.Empty;
+        public string Symbol { get; set; } = string.Empty;
+        public decimal Quantity { get; set; }
+        public decimal EntryPrice { get; set; }
+        public decimal? ExitPrice { get; set; }
+        public decimal RealizedPnL { get; set; }
+    }
+
+    private sealed class ChannelStat
+    {
+        public string Channel { get; set; } = string.Empty;
+        public int Trades { get; set; }
+        public int Wins { get; set; }
+        public int Losses { get; set; }
+        public double WinRate { get; set; }
+        public decimal NetPnL { get; set; }
+    }
+
+    private sealed class TerminalStat
+    {
+        public string Terminal { get; set; } = string.Empty;
+        public int Trades { get; set; }
+        public int Wins { get; set; }
+        public int Losses { get; set; }
+        public double WinRate { get; set; }
+        public decimal NetPnL { get; set; }
+    }
+}

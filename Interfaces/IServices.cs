@@ -19,6 +19,7 @@ public interface ITradingEngine
     Task<bool> ExecuteSignalAsync(ParsedSignal signal, int? accountId = null);
     Task<bool> UpdatePositionsAsync();
     Task<bool> CheckRiskLimitsAsync(int accountId);
+    Task<bool> SquareOffPositionAsync(int positionId);
 }
 
 /// <summary>
@@ -29,6 +30,10 @@ public interface INotificationService
     Task SendSignalNotificationAsync(ParsedSignal signal);
     Task SendOrderNotificationAsync(string symbol, string action, string details);
     Task SendErrorNotificationAsync(string error);
+    Task SendTelegramOrderPlacedAsync(string accountName, bool isPaper, string symbol, string action, decimal entryPrice, decimal quantity, string? orderId = null, string orderStatus = "ACCEPTED");
+    Task SendTelegramOrderClosedAsync(string accountName, bool isPaper, string symbol, decimal entryPrice, decimal exitPrice, decimal realizedPnL, decimal quantity, string reason);
+    Task SendTelegramCustomNotificationAsync(string message);
+    Task SendTelegramDailyPnlSummaryAsync();
 }
 
 /// <summary>
@@ -41,6 +46,7 @@ public interface ITradingAccountService
     Task<int> CreateAccountAsync(TradingAccountDto account);
     Task<bool> UpdateAccountAsync(int id, TradingAccountDto account);
     Task<bool> DeleteAccountAsync(int id);
+    Task<bool> SetDefaultAccountAsync(int id);
 }
 
 /// <summary>

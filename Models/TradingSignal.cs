@@ -38,6 +38,8 @@ public class TradingSignal
     public string? Symbol { get; set; }
     
     public decimal SignalDelayMs { get; set; }
+    
+    public string? ChannelName { get; set; }
 
     /// <summary>
     /// Navigation property for related orders
@@ -64,5 +66,7 @@ public enum SignalStatus
     Pending = 2,
     Executed = 3,
     Failed = 4,
-    Ignored = 5
+    Ignored = 5,
+    AwaitingActivation = 6,
+    AwaitingEntry = 7
 }

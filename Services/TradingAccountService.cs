@@ -73,6 +73,12 @@ public class TradingAccountService : ITradingAccountService
                 UpdatedAt = DateTime.UtcNow
             };
 
+            if (account.IsDefault)
+            {
+                var defaults = await _context.TradingAccounts.Where(a => a.IsDefault).ToListAsync();
+                foreach (var d in defaults) d.IsDefault = false;
+            }
+
             _context.TradingAccounts.Add(account);
             await _context.SaveChangesAsync();
 
@@ -95,6 +101,12 @@ public class TradingAccountService : ITradingAccountService
             {
                 _logger.LogWarning("Account not found: {Id}", id);
                 return false;
+            }
+
+            if (accountDto.IsDefault && !account.IsDefault)
+            {
+                var defaults = await _context.TradingAccounts.Where(a => a.IsDefault && a.Id != id).ToListAsync();
+                foreach (var d in defaults) d.IsDefault = false;
             }
 
             account.Name = accountDto.Name;
@@ -140,6 +152,27 @@ public class TradingAccountService : ITradingAccountService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error deleting account: {Id}", id);
+            return false;
+        }
+    }
+
+    public async Task<bool> SetDefaultAccountAsync(int id)
+    {
+        try
+        {
+            var accounts = await _context.TradingAccounts.ToListAsync();
+            foreach (var acc in accounts)
+            {
+                acc.IsDefault = (acc.Id == id);
+                acc.UpdatedAt = DateTime.UtcNow;
+            }
+            await _context.SaveChangesAsync();
+            _logger.LogInformation("Default account set to: {Id}", id);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error setting default account: {Id}", id);
             return false;
         }
     }

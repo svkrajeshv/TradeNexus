@@ -3,23 +3,26 @@
 @using NexusApp.Interfaces
 @using NexusApp.Infrastructure
 @using NexusApp.Brokers.AngelOne
+@using Microsoft.Extensions.DependencyInjection
 @inject ITradingAccountService AccountService
 @inject ISettingsService SettingsService
 @inject IBroker Broker
 @inject NexusApp.Brokers.AngelOne.AngelOneApiClient AngelApiClient
+@inject NexusApp.Brokers.AliceBlue.AliceBlueApiClient AliceApiClient
 @inject AngelInstrumentMaster InstrumentMaster
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
+@inject IServiceProvider ServiceProvider
 
-<PageTitle>Trading Accounts</PageTitle>
+<PageTitle>NexusApp - Trading Accounts</PageTitle>
 
-<MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-3">
+<MudStack Row="true" Wrap="Wrap.Wrap" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-3">
     <MudText Typo="Typo.h4">Trading Accounts</MudText>
     <MudButton Color="Color.Primary" Variant="Variant.Filled" StartIcon="@Icons.Material.Filled.Add" OnClick="OpenAddDialog">Add</MudButton>
 </MudStack>
 
-<MudPaper Class="pa-4" Elevation="2">
-    <MudTable Items="_accounts" Dense="true" Hover="true" Striped="true">
+<MudPaper Class="pa-2 pa-sm-4" Elevation="2">
+    <MudTable Items="_accounts" HorizontalScrollbar="true" Dense="true" Hover="true" Striped="true">
         <HeaderContent>
             <MudTh>Name</MudTh>
             <MudTh>Broker</MudTh>
@@ -37,29 +40,44 @@
             <MudTd>@context.BrokerType</MudTd>
             <MudTd>@context.ClientId</MudTd>
             <MudTd><MudSwitch T="bool" Value="@context.IsEnabled" ValueChanged="@(v => ToggleEnabled(context, v))" Color="Color.Success" /></MudTd>
-            <MudTd><MudIcon Icon="@(context.IsDefault ? Icons.Material.Filled.Star : Icons.Material.Filled.StarBorder)" /></MudTd>
+            <MudTd>
+                <MudIconButton Icon="@(context.IsDefault ? Icons.Material.Filled.Star : Icons.Material.Filled.StarBorder)"
+                               Color="@(context.IsDefault ? Color.Warning : Color.Default)"
+                               OnClick="@(() => SetAsDefaultAsync(context.Id))"
+                               Disabled="@context.IsDefault"
+                               Size="Size.Small" />
+            </MudTd>
             <MudTd>@context.DailyMaxLoss</MudTd>
             <MudTd>@context.DailyMaxProfit</MudTd>
             <MudTd>@context.MaxTradesPerDay</MudTd>
             <MudTd>@context.MaxOpenPositions</MudTd>
             <MudTd>
-                <MudStack Row="true" Wrap="Wrap.NoWrap" Spacing="1" AlignItems="AlignItems.Center">
+                <MudStack Row="true" Wrap="Wrap.NoWrap" Spacing="0" AlignItems="AlignItems.Center">
                     <MudButton Size="Size.Small"
+                               Variant="Variant.Text"
                                Color="Color.Success"
-                               Variant="Variant.Filled"
                                StartIcon="@Icons.Material.Filled.Login"
                                OnClick="@(() => LoginAccountAsync(context))">
                         Login
                     </MudButton>
                     <MudButton Size="Size.Small"
-                               Color="Color.Info"
                                Variant="Variant.Text"
+                               Color="Color.Primary"
+                               StartIcon="@Icons.Material.Filled.Edit"
+                               OnClick="@(() => OpenEditDialogAsync(context))">
+                        Edit
+                    </MudButton>
+                    <MudButton Size="Size.Small"
+                               Variant="Variant.Text"
+                               Color="Color.Info"
+                               StartIcon="@Icons.Material.Filled.VpnKey"
                                OnClick="@(() => ConfigureApiAsync(context))">
                         API
                     </MudButton>
                     <MudButton Size="Size.Small"
+                               Variant="Variant.Text"
                                Color="Color.Error"
-                               Variant="Variant.Outlined"
+                               StartIcon="@Icons.Material.Filled.Delete"
                                Disabled="@context.IsDefault"
                                OnClick="@(() => DeleteAccountAsync(context))">
                         Delete
@@ -72,7 +90,7 @@
     @if (_selectedAccount is not null)
     {
         <MudDivider Class="my-4" />
-        <MudText Typo="Typo.h6" Class="mb-2">Angel One API Login - @_selectedAccount.Name</MudText>
+        <MudText Typo="Typo.h6" Class="mb-2">@_selectedAccount.BrokerType API Login - @_selectedAccount.Name</MudText>
         <MudGrid Spacing="2">
             <MudItem xs="12" md="6">
                 <MudTextField T="string" Label="API Key" Variant="Variant.Outlined" InputType="InputType.Password" @bind-Value="_apiKey" />
@@ -111,9 +129,9 @@
 {
     <MudOverlay Visible="true" DarkBackground="true" AutoClose="false" ZIndex="1500">
         <MudPaper Class="pa-4 mx-auto mt-8" Style="max-width:760px; width:95%;">
-            <MudText Typo="Typo.h6" Class="mb-2">Add Trading Account</MudText>
+            <MudText Typo="Typo.h6" Class="mb-2">@(_isEditMode ? "Edit Trading Account" : "Add Trading Account")</MudText>
             <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3">
-                Login is validated with Angel One before the account is saved.
+                @(_isEditMode ? "Update account properties, broker type, and API parameters below." : "Login is validated with the selected broker before the account is saved.")
             </MudText>
 
             <MudGrid Spacing="2">
@@ -123,6 +141,7 @@
                 <MudItem xs="12" md="6">
                     <MudSelect T="string" Label="Broker Type" Variant="Variant.Outlined" @bind-Value="_newBrokerType">
                         <MudSelectItem Value="@("AngelOne")">AngelOne</MudSelectItem>
+                        <MudSelectItem Value="@("AliceBlue")">AliceBlue</MudSelectItem>
                     </MudSelect>
                 </MudItem>
                 <MudItem xs="12" md="6">
@@ -171,7 +190,14 @@
             </MudGrid>
 
             <MudStack Row="true" Class="mt-3" Spacing="2">
-                <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="ValidateAndCreateAccountAsync">Validate Login & Save</MudButton>
+                @if (_isEditMode)
+                {
+                    <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="SaveEditedAccountAsync">Save Changes</MudButton>
+                }
+                else
+                {
+                    <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="ValidateAndCreateAccountAsync">Validate Login &amp; Save</MudButton>
+                }
                 <MudButton Color="Color.Default" Variant="Variant.Outlined" OnClick="CloseAddDialog">Cancel</MudButton>
             </MudStack>
         </MudPaper>
@@ -189,6 +215,8 @@
     private string _wsUrl = string.Empty;
     private Dictionary<string, string> _settingsSnapshot = new();
     private bool _showAddDialog;
+    private bool _isEditMode;
+    private int _editingAccountId;
     private string _newName = string.Empty;
     private string _newBrokerType = "AngelOne";
     private string _newApiKey = string.Empty;
@@ -243,7 +271,79 @@
         _newMaxTrades = 10;
         _newMaxPositions = 5;
         _newDefaultLots = 1;
+        _isEditMode = false;
+        _editingAccountId = 0;
         _showAddDialog = true;
+    }
+
+    private async Task OpenEditDialogAsync(TradingAccountDto acc)
+    {
+        _isEditMode = true;
+        _editingAccountId = acc.Id;
+        _newName = acc.Name;
+        _newBrokerType = acc.BrokerType;
+        _newClientId = acc.ClientId;
+        _newDailyMaxLoss = acc.DailyMaxLoss;
+        _newDailyMaxProfit = acc.DailyMaxProfit;
+        _newMaxTrades = acc.MaxTradesPerDay;
+        _newMaxPositions = acc.MaxOpenPositions;
+        _newDefaultLots = acc.DefaultQuantity;
+        _newIsEnabled = acc.IsEnabled;
+        _newIsDefault = acc.IsDefault;
+
+        _settingsSnapshot = await SettingsService.GetAllSettingsAsync();
+        _newApiKey = ReadFromSnapshot(acc.BrokerType, acc.Id, "ApiKey", decrypt: false);
+        _newPassword = ReadFromSnapshot(acc.BrokerType, acc.Id, "Password", decrypt: true);
+        _newTotp = ReadFromSnapshot(acc.BrokerType, acc.Id, "Totp", decrypt: true);
+        _newApiUrl = ReadFromSnapshot(acc.BrokerType, acc.Id, "ApiUrl", decrypt: false);
+        _newWsUrl = ReadFromSnapshot(acc.BrokerType, acc.Id, "WebSocketUrl", decrypt: false);
+
+        if (string.IsNullOrWhiteSpace(_newApiUrl))
+            _newApiUrl = "https://apiconnect.angelone.in";
+
+        _showAddDialog = true;
+    }
+
+    private async Task SaveEditedAccountAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_newName) || string.IsNullOrWhiteSpace(_newClientId))
+        {
+            Snackbar.Add("Name and Client ID are required.", Severity.Warning);
+            return;
+        }
+
+        try
+        {
+            var dto = new TradingAccountDto
+            {
+                Id = _editingAccountId,
+                Name = (_newName ?? string.Empty).Trim(),
+                BrokerType = _newBrokerType,
+                ClientId = (_newClientId ?? string.Empty).Trim(),
+                IsEnabled = _newIsEnabled,
+                IsDefault = _newIsDefault,
+                DailyMaxLoss = _newDailyMaxLoss,
+                DailyMaxProfit = _newDailyMaxProfit,
+                MaxTradesPerDay = _newMaxTrades,
+                MaxOpenPositions = _newMaxPositions,
+                DefaultQuantity = _newDefaultLots <= 0 ? 1 : _newDefaultLots
+            };
+
+            await AccountService.UpdateAccountAsync(_editingAccountId, dto);
+            await WriteAccountSettingAsync(_newBrokerType, _editingAccountId, "ApiKey", (_newApiKey ?? string.Empty).Trim(), encrypt: false);
+            await WriteAccountSettingAsync(_newBrokerType, _editingAccountId, "Password", _newPassword ?? string.Empty, encrypt: true);
+            await WriteAccountSettingAsync(_newBrokerType, _editingAccountId, "Totp", _newTotp ?? string.Empty, encrypt: true);
+            await WriteAccountSettingAsync(_newBrokerType, _editingAccountId, "ApiUrl", (_newApiUrl ?? string.Empty).Trim(), encrypt: false);
+            await WriteAccountSettingAsync(_newBrokerType, _editingAccountId, "WebSocketUrl", (_newWsUrl ?? string.Empty).Trim(), encrypt: false);
+
+            _showAddDialog = false;
+            await LoadAsync();
+            Snackbar.Add($"Trading account '{dto.Name}' updated successfully.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not update account: {ex.Message}", Severity.Error);
+        }
     }
 
     private void CloseAddDialog() => _showAddDialog = false;
@@ -251,36 +351,68 @@
     private async Task ValidateAndCreateAccountAsync()
     {
         if (string.IsNullOrWhiteSpace(_newName) ||
-            string.IsNullOrWhiteSpace(_newClientId) ||
-            string.IsNullOrWhiteSpace(_newApiKey) ||
-            string.IsNullOrWhiteSpace(_newPassword) ||
-            string.IsNullOrWhiteSpace(_newTotp))
+            string.IsNullOrWhiteSpace(_newClientId))
         {
-            Snackbar.Add("Name, API Key, Client ID, Password and TOTP code/secret are required.", Severity.Warning);
+            Snackbar.Add("Name and Client ID are required.", Severity.Warning);
             return;
         }
 
-        if (_newBrokerType != "AngelOne")
+        var isPaper = string.Equals((_newClientId ?? string.Empty).Trim(), "PAPER", StringComparison.OrdinalIgnoreCase);
+
+        if (!isPaper)
         {
-            Snackbar.Add("Only AngelOne is supported currently.", Severity.Warning);
+            if (_newBrokerType == "AliceBlue")
+            {
+                if (string.IsNullOrWhiteSpace(_newApiKey))
+                {
+                    Snackbar.Add("Name, API Key and Client ID are required for AliceBlue.", Severity.Warning);
+                    return;
+                }
+            }
+            else if (string.IsNullOrWhiteSpace(_newApiKey) ||
+                     string.IsNullOrWhiteSpace(_newPassword) ||
+                     string.IsNullOrWhiteSpace(_newTotp))
+            {
+                Snackbar.Add("Name, API Key, Client ID, Password and TOTP code/secret are required.", Severity.Warning);
+                return;
+            }
+        }
+
+        if (_newBrokerType != "AngelOne" && _newBrokerType != "AliceBlue")
+        {
+            Snackbar.Add("Unsupported broker type.", Severity.Warning);
             return;
         }
 
         try
         {
-            AngelApiClient.Configure(_newApiKey.Trim(), _newApiUrl.Trim());
-            var loginOk = await Broker.AuthenticateAsync(_newClientId.Trim(), _newPassword, _newTotp.Trim());
-            if (!loginOk)
+            if (!isPaper)
             {
-                Snackbar.Add("Login validation failed. Account not saved.", Severity.Error);
-                return;
+                var targetBroker = ServiceProvider.GetRequiredKeyedService<IBroker>(_newBrokerType);
+                bool loginOk;
+                if (_newBrokerType == "AngelOne")
+                {
+                    AngelApiClient.Configure((_newApiKey ?? string.Empty).Trim(), (_newApiUrl ?? string.Empty).Trim());
+                    loginOk = await targetBroker.AuthenticateAsync((_newClientId ?? string.Empty).Trim(), _newPassword, (_newTotp ?? string.Empty).Trim());
+                }
+                else // AliceBlue
+                {
+                    AliceApiClient.Configure((_newApiKey ?? string.Empty).Trim(), string.IsNullOrWhiteSpace(_newApiUrl) ? null : (_newApiUrl ?? string.Empty).Trim());
+                    loginOk = await targetBroker.AuthenticateAsync((_newClientId ?? string.Empty).Trim(), string.Empty, (_newApiKey ?? string.Empty).Trim());
+                }
+
+                if (!loginOk)
+                {
+                    Snackbar.Add("Login validation failed. Account not saved.", Severity.Error);
+                    return;
+                }
             }
 
             var dto = new TradingAccountDto
             {
-                Name = _newName.Trim(),
+                Name = (_newName ?? string.Empty).Trim(),
                 BrokerType = _newBrokerType,
-                ClientId = _newClientId.Trim(),
+                ClientId = (_newClientId ?? string.Empty).Trim(),
                 IsEnabled = _newIsEnabled,
                 IsDefault = _newIsDefault,
                 DailyMaxLoss = _newDailyMaxLoss,
@@ -291,16 +423,19 @@
             };
 
             var accountId = await AccountService.CreateAccountAsync(dto);
-            await WriteAccountSettingAsync(accountId, "ApiKey", _newApiKey.Trim(), encrypt: false);
-            await WriteAccountSettingAsync(accountId, "Password", _newPassword, encrypt: true);
-            await WriteAccountSettingAsync(accountId, "Totp", _newTotp, encrypt: true);
-            await WriteAccountSettingAsync(accountId, "ApiUrl", _newApiUrl.Trim(), encrypt: false);
-            await WriteAccountSettingAsync(accountId, "WebSocketUrl", _newWsUrl.Trim(), encrypt: false);
+            await WriteAccountSettingAsync(_newBrokerType, accountId, "ApiKey", (_newApiKey ?? string.Empty).Trim(), encrypt: false);
+            await WriteAccountSettingAsync(_newBrokerType, accountId, "Password", _newPassword ?? string.Empty, encrypt: true);
+            await WriteAccountSettingAsync(_newBrokerType, accountId, "Totp", _newTotp ?? string.Empty, encrypt: true);
+            await WriteAccountSettingAsync(_newBrokerType, accountId, "ApiUrl", (_newApiUrl ?? string.Empty).Trim(), encrypt: false);
+            await WriteAccountSettingAsync(_newBrokerType, accountId, "WebSocketUrl", (_newWsUrl ?? string.Empty).Trim(), encrypt: false);
 
             _showAddDialog = false;
             await LoadAsync();
-            Snackbar.Add("Account created and login validated successfully.", Severity.Success);
-            _ = PreloadInstrumentMasterAsync(dto.Name);
+            Snackbar.Add(isPaper ? "Paper trading account created successfully." : "Account created and login validated successfully.", Severity.Success);
+            if (!isPaper && dto.BrokerType == "AngelOne")
+            {
+                _ = PreloadInstrumentMasterAsync(dto.Name);
+            }
         }
         catch (Exception ex)
         {
@@ -314,14 +449,16 @@
         _apiClientId = acc.ClientId;
         _settingsSnapshot = await SettingsService.GetAllSettingsAsync();
 
-        _apiKey = ReadFromSnapshot(acc.Id, "ApiKey", decrypt: false);
-        _apiPassword = ReadFromSnapshot(acc.Id, "Password", decrypt: true);
-        _apiTotp = ReadFromSnapshot(acc.Id, "Totp", decrypt: true);
-        _apiUrl = ReadFromSnapshot(acc.Id, "ApiUrl", decrypt: false);
-        _wsUrl = ReadFromSnapshot(acc.Id, "WebSocketUrl", decrypt: false);
+        _apiKey = ReadFromSnapshot(acc.BrokerType, acc.Id, "ApiKey", decrypt: false);
+        _apiPassword = ReadFromSnapshot(acc.BrokerType, acc.Id, "Password", decrypt: true);
+        _apiTotp = ReadFromSnapshot(acc.BrokerType, acc.Id, "Totp", decrypt: true);
+        _apiUrl = ReadFromSnapshot(acc.BrokerType, acc.Id, "ApiUrl", decrypt: false);
+        _wsUrl = ReadFromSnapshot(acc.BrokerType, acc.Id, "WebSocketUrl", decrypt: false);
 
         if (string.IsNullOrWhiteSpace(_apiUrl))
-            _apiUrl = "https://apiconnect.angelone.in";
+            _apiUrl = acc.BrokerType == "AliceBlue"
+                ? "https://ant.aliceblueonline.com/rest/AliceBlueAPIService"
+                : "https://apiconnect.angelone.in";
     }
 
     private void ClearSelection()
@@ -346,18 +483,20 @@
             return;
         }
 
+        var isPaper = string.Equals((_apiClientId ?? string.Empty).Trim(), "PAPER", StringComparison.OrdinalIgnoreCase);
+
         // keep account row and API config in sync
-        _selectedAccount.ClientId = _apiClientId.Trim();
+        _selectedAccount.ClientId = (_apiClientId ?? string.Empty).Trim();
         await AccountService.UpdateAccountAsync(_selectedAccount.Id, _selectedAccount);
 
-        await WriteAccountSettingAsync(_selectedAccount.Id, "ApiKey", _apiKey.Trim(), encrypt: false);
-        await WriteAccountSettingAsync(_selectedAccount.Id, "Password", _apiPassword, encrypt: true);
-        await WriteAccountSettingAsync(_selectedAccount.Id, "Totp", _apiTotp, encrypt: true);
-        await WriteAccountSettingAsync(_selectedAccount.Id, "ApiUrl", _apiUrl.Trim(), encrypt: false);
-        await WriteAccountSettingAsync(_selectedAccount.Id, "WebSocketUrl", _wsUrl.Trim(), encrypt: false);
+        await WriteAccountSettingAsync(_selectedAccount.BrokerType, _selectedAccount.Id, "ApiKey", (_apiKey ?? string.Empty).Trim(), encrypt: false);
+        await WriteAccountSettingAsync(_selectedAccount.BrokerType, _selectedAccount.Id, "Password", _apiPassword ?? string.Empty, encrypt: true);
+        await WriteAccountSettingAsync(_selectedAccount.BrokerType, _selectedAccount.Id, "Totp", _apiTotp ?? string.Empty, encrypt: true);
+        await WriteAccountSettingAsync(_selectedAccount.BrokerType, _selectedAccount.Id, "ApiUrl", (_apiUrl ?? string.Empty).Trim(), encrypt: false);
+        await WriteAccountSettingAsync(_selectedAccount.BrokerType, _selectedAccount.Id, "WebSocketUrl", (_wsUrl ?? string.Empty).Trim(), encrypt: false);
 
         await LoadAsync();
-        Snackbar.Add("Angel One API config saved.", Severity.Success);
+        Snackbar.Add(isPaper ? "Paper trading config saved." : $"{_selectedAccount.BrokerType} API config saved.", Severity.Success);
     }
 
     private async Task TestApiLoginAsync()
@@ -365,7 +504,30 @@
         if (_selectedAccount is null)
             return;
 
-        if (string.IsNullOrWhiteSpace(_apiClientId) || string.IsNullOrWhiteSpace(_apiPassword) || string.IsNullOrWhiteSpace(_apiTotp))
+        var isPaper = string.Equals((_apiClientId ?? string.Empty).Trim(), "PAPER", StringComparison.OrdinalIgnoreCase);
+        if (isPaper)
+        {
+            Snackbar.Add("Paper Trading API login successful (Simulated) — Broker Online!", Severity.Success);
+            _ = PreloadInstrumentMasterAsync(_selectedAccount.Name);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_apiClientId))
+        {
+            Snackbar.Add("Client ID is required for login test.", Severity.Warning);
+            return;
+        }
+
+        var brokerTypeForCheck = _selectedAccount?.BrokerType ?? "AngelOne";
+        if (brokerTypeForCheck == "AliceBlue")
+        {
+            if (string.IsNullOrWhiteSpace(_apiKey))
+            {
+                Snackbar.Add("Client ID and API Key are required for AliceBlue login test.", Severity.Warning);
+                return;
+            }
+        }
+        else if (string.IsNullOrWhiteSpace(_apiPassword) || string.IsNullOrWhiteSpace(_apiTotp))
         {
             Snackbar.Add("Client ID, Password and TOTP code/secret are required for login test.", Severity.Warning);
             return;
@@ -373,17 +535,36 @@
 
         try
         {
-            // Configure the shared API client with the API key + URL BEFORE calling IBroker.AuthenticateAsync.
-            // This ensures IBroker._isConnected is set (not just the raw ApiClient.IsAuthenticated).
-            AngelApiClient.Configure(_apiKey.Trim(), _apiUrl.Trim());
+            var brokerType = _selectedAccount?.BrokerType ?? "AngelOne";
+            var targetBroker = ServiceProvider.GetRequiredKeyedService<IBroker>(brokerType);
 
-            var ok = await Broker.AuthenticateAsync(
-                _apiClientId.Trim(),
-                _apiPassword,
-                _apiTotp.Trim());
+            bool ok;
+            if (brokerType == "AngelOne")
+            {
+                AngelApiClient.Configure((_apiKey ?? string.Empty).Trim(), (_apiUrl ?? string.Empty).Trim());
+                ok = await targetBroker.AuthenticateAsync(
+                    (_apiClientId ?? string.Empty).Trim(),
+                    _apiPassword,
+                    (_apiTotp ?? string.Empty).Trim());
+            }
+            else if (brokerType == "AliceBlue")
+            {
+                AliceApiClient.Configure((_apiKey ?? string.Empty).Trim(), string.IsNullOrWhiteSpace(_apiUrl) ? null : (_apiUrl ?? string.Empty).Trim());
+                ok = await targetBroker.AuthenticateAsync(
+                    (_apiClientId ?? string.Empty).Trim(),
+                    string.Empty,
+                    (_apiKey ?? string.Empty).Trim());
+            }
+            else
+            {
+                ok = await targetBroker.AuthenticateAsync(
+                    (_apiClientId ?? string.Empty).Trim(),
+                    _apiPassword,
+                    (_apiTotp ?? string.Empty).Trim());
+            }
 
-            Snackbar.Add(ok ? "Angel One API login successful — Broker Online!" : "Angel One API login failed.", ok ? Severity.Success : Severity.Error);
-            if (ok) _ = PreloadInstrumentMasterAsync(_selectedAccount.Name);
+            Snackbar.Add(ok ? $"{brokerType} API login successful — Broker Online!" : $"{brokerType} API login failed.", ok ? Severity.Success : Severity.Error);
+            if (ok && brokerType == "AngelOne") _ = PreloadInstrumentMasterAsync(_selectedAccount!.Name);
         }
         catch (Exception ex)
         {
@@ -393,33 +574,56 @@
 
     private async Task LoginAccountAsync(TradingAccountDto account)
     {
+        var isPaper = string.Equals((account.ClientId ?? string.Empty).Trim(), "PAPER", StringComparison.OrdinalIgnoreCase);
+        if (isPaper)
+        {
+            Snackbar.Add($"Login successful for {account.Name} (Paper Trading Mode) — Broker Online!", Severity.Success);
+            _ = PreloadInstrumentMasterAsync(account.Name);
+            return;
+        }
+
         try
         {
             var settings = await SettingsService.GetAllSettingsAsync();
-            var apiKey = ReadFromMap(settings, account.Id, "ApiKey", decrypt: false);
-            var password = ReadFromMap(settings, account.Id, "Password", decrypt: true);
-            var totp = ReadFromMap(settings, account.Id, "Totp", decrypt: true);
-            var apiUrl = ReadFromMap(settings, account.Id, "ApiUrl", decrypt: false);
+            var apiKey = ReadFromMap(settings, account.BrokerType, account.Id, "ApiKey", decrypt: false);
+            var password = ReadFromMap(settings, account.BrokerType, account.Id, "Password", decrypt: true);
+            var totp = ReadFromMap(settings, account.BrokerType, account.Id, "Totp", decrypt: true);
+            var apiUrl = ReadFromMap(settings, account.BrokerType, account.Id, "ApiUrl", decrypt: false);
 
             if (string.IsNullOrWhiteSpace(account.ClientId) ||
-                string.IsNullOrWhiteSpace(password) ||
-                string.IsNullOrWhiteSpace(totp))
+                (account.BrokerType != "AliceBlue" &&
+                 (string.IsNullOrWhiteSpace(password) || string.IsNullOrWhiteSpace(totp))) ||
+                (account.BrokerType == "AliceBlue" && string.IsNullOrWhiteSpace(apiKey)))
             {
                 Snackbar.Add($"Missing login configuration for {account.Name}. Click API and save credentials first.", Severity.Warning);
                 return;
             }
 
-            AngelApiClient.Configure(apiKey.Trim(), string.IsNullOrWhiteSpace(apiUrl) ? "https://apiconnect.angelone.in" : apiUrl.Trim());
+            var targetBroker = ServiceProvider.GetRequiredKeyedService<IBroker>(account.BrokerType);
 
-            var ok = await Broker.AuthenticateAsync(
-                account.ClientId.Trim(),
-                password,
-                totp.Trim());
+            bool ok;
+            if (account.BrokerType == "AngelOne")
+            {
+                AngelApiClient.Configure((apiKey ?? string.Empty).Trim(), string.IsNullOrWhiteSpace(apiUrl) ? "https://apiconnect.angelone.in" : (apiUrl ?? string.Empty).Trim());
+                ok = await targetBroker.AuthenticateAsync((account.ClientId ?? string.Empty).Trim(), password, (totp ?? string.Empty).Trim());
+            }
+            else if (account.BrokerType == "AliceBlue")
+            {
+                AliceApiClient.Configure((apiKey ?? string.Empty).Trim(), string.IsNullOrWhiteSpace(apiUrl) ? null : (apiUrl ?? string.Empty).Trim());
+                ok = await targetBroker.AuthenticateAsync((account.ClientId ?? string.Empty).Trim(), string.Empty, (apiKey ?? string.Empty).Trim());
+            }
+            else
+            {
+                ok = await targetBroker.AuthenticateAsync((account.ClientId ?? string.Empty).Trim(), password, (totp ?? string.Empty).Trim());
+            }
 
             if (ok)
             {
                 Snackbar.Add($"Login successful for {account.Name}.", Severity.Success);
-                _ = PreloadInstrumentMasterAsync(account.Name);
+                if (account.BrokerType == "AngelOne")
+                {
+                    _ = PreloadInstrumentMasterAsync(account.Name);
+                }
             }
             else
             {
@@ -434,22 +638,36 @@
 
     private async Task PreloadInstrumentMasterAsync(string accountName)
     {
-        if (InstrumentMaster.IsLoaded)
+        // If it was already refreshed today, keep the in-memory copy — no need to
+        // re-download on every login click.
+        if (InstrumentMaster.IsLoadedToday)
         {
-            Snackbar.Add($"Instrument master already loaded ({InstrumentMaster.Count:N0} contracts).", Severity.Info);
+            Snackbar.Add($"Instrument master already refreshed today ({InstrumentMaster.Count:N0} contracts).", Severity.Info);
             return;
         }
 
-        Snackbar.Add($"Loading Angel One instrument master in background…", Severity.Info);
+        Snackbar.Add($"Refreshing Angel One instrument master (once per day)…", Severity.Info);
 
         try
         {
-            await Task.Run(() => InstrumentMaster.EnsureLoadedAsync());
+            // Clean + reload once per calendar day: drops the stale in-memory index,
+            // deletes yesterday's disk cache and downloads a fresh master. Returns the
+            // number of contracts actually loaded.
+            var count = await Task.Run(() => InstrumentMaster.RefreshDailyAsync());
             await InvokeAsync(() =>
             {
-                Snackbar.Add(
-                    $"Instrument master loaded ({InstrumentMaster.Count:N0} contracts). Orders will now resolve instantly.",
-                    Severity.Success);
+                if (count > 0)
+                {
+                    Snackbar.Add(
+                        $"Instrument master refreshed ({count:N0} contracts). Orders will now resolve instantly.",
+                        Severity.Success);
+                }
+                else
+                {
+                    Snackbar.Add(
+                        "Instrument master refresh returned 0 contracts. Check internet access to Angel One and try login again.",
+                        Severity.Warning);
+                }
                 StateHasChanged();
             });
         }
@@ -457,6 +675,27 @@
         {
             await InvokeAsync(() =>
                 Snackbar.Add($"Failed to load instrument master: {ex.Message}", Severity.Error));
+        }
+    }
+
+    private async Task SetAsDefaultAsync(int accountId)
+    {
+        try
+        {
+            var ok = await AccountService.SetDefaultAccountAsync(accountId);
+            if (ok)
+            {
+                Snackbar.Add("Default account updated.", Severity.Success);
+                await LoadAsync();
+            }
+            else
+            {
+                Snackbar.Add("Failed to update default account.", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Error setting default account: {ex.Message}", Severity.Error);
         }
     }
 
@@ -482,27 +721,27 @@
         await LoadAsync();
     }
 
-    private string ReadFromSnapshot(int accountId, string keySuffix, bool decrypt)
+    private string ReadFromSnapshot(string brokerType, int accountId, string keySuffix, bool decrypt)
     {
-        _settingsSnapshot.TryGetValue($"AngelOne.Account.{accountId}.{keySuffix}", out var raw);
+        _settingsSnapshot.TryGetValue($"{brokerType}.Account.{accountId}.{keySuffix}", out var raw);
         raw ??= string.Empty;
         if (!decrypt || string.IsNullOrWhiteSpace(raw))
             return raw;
         return CredentialProtector.Unprotect(raw);
     }
 
-    private static string ReadFromMap(Dictionary<string, string> map, int accountId, string keySuffix, bool decrypt)
+    private static string ReadFromMap(Dictionary<string, string> map, string brokerType, int accountId, string keySuffix, bool decrypt)
     {
-        map.TryGetValue($"AngelOne.Account.{accountId}.{keySuffix}", out var raw);
+        map.TryGetValue($"{brokerType}.Account.{accountId}.{keySuffix}", out var raw);
         raw ??= string.Empty;
         if (!decrypt || string.IsNullOrWhiteSpace(raw))
             return raw;
         return CredentialProtector.Unprotect(raw);
     }
 
-    private async Task WriteAccountSettingAsync(int accountId, string keySuffix, string value, bool encrypt)
+    private async Task WriteAccountSettingAsync(string brokerType, int accountId, string keySuffix, string value, bool encrypt)
     {
         var toSave = encrypt ? CredentialProtector.Protect(value ?? string.Empty) : value ?? string.Empty;
-        await SettingsService.SetSettingAsync($"AngelOne.Account.{accountId}.{keySuffix}", toSave);
+        await SettingsService.SetSettingAsync($"{brokerType}.Account.{accountId}.{keySuffix}", toSave);
     }
 }

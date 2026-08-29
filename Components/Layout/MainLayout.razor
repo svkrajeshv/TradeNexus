@@ -1,6 +1,8 @@
 @inherits LayoutComponentBase
 @using MudBlazor
+@using System.Text.Json
 @using Microsoft.JSInterop
+@using Microsoft.AspNetCore.SignalR.Client
 @using NexusApp.Telegram
 @using NexusApp.Interfaces
 @using NexusApp.Services
@@ -10,7 +12,7 @@
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
 @inject NavigationManager Nav
-@implements IDisposable
+@implements IAsyncDisposable
 
 <MudThemeProvider Theme="_theme" IsDarkMode="_isDarkMode" />
 <MudPopoverProvider />
@@ -18,19 +20,18 @@
 <MudSnackbarProvider />
 
 <MudLayout>
-    <MudAppBar Elevation="1" Color="Color.Dark">
+    <MudAppBar Elevation="1" Color="Color.Surface" Dense="true" Style="border-bottom: 1px solid var(--mud-palette-lines-default);">
         <MudIconButton Icon="@(_drawerOpen ? Icons.Material.Filled.MenuOpen : Icons.Material.Filled.Menu)" Color="Color.Inherit" Edge="Edge.Start"
                        OnClick="ToggleDrawer" />
-        <MudText Typo="Typo.h6">NexusApp</MudText>
+        <MudText Typo="Typo.h6" Class="mr-2">NexusApp</MudText>
         <MudSpacer />
         <MudMenu Icon="@Icons.Material.Filled.CleaningServices"
-                 Label="@(_cleanupRunning ? "Cleaning..." : "Cleanup")"
                  Color="Color.Warning"
                  Variant="Variant.Outlined"
                  Size="Size.Small"
                  EndIcon="@Icons.Material.Filled.ArrowDropDown"
                  Disabled="_cleanupRunning"
-                 Class="mr-2">
+                 Class="mr-1">
             <MudMenuItem Icon="@Icons.Material.Filled.HistoryToggleOff"
                          OnClick="@(() => RunCleanupAsync(false))">
                 Clean previous-day data
@@ -43,18 +44,24 @@
         </MudMenu>
         <MudIconButton Icon="@(_isDarkMode ? Icons.Material.Filled.LightMode : Icons.Material.Filled.DarkMode)"
                        Color="Color.Inherit"
+                       Size="Size.Small"
                        OnClick="ToggleTheme" />
         <MudChip T="string" Icon="@Icons.Material.Filled.Circle" Color="@(_brokerConnected ? Color.Success : Color.Error)"
-                 Size="Size.Small">@(_brokerConnected ? "Broker Online" : "Broker Offline")</MudChip>
+                 Size="Size.Small" Class="px-2">
+            <span class="d-none d-sm-inline">@(_brokerConnected ? "Broker Online" : "Broker Offline")</span>
+        </MudChip>
         <MudChip T="string" Icon="@Icons.Material.Filled.Circle" Color="@TelegramChipColor()"
-                 Size="Size.Small">@TelegramChipLabel()</MudChip>
+                 Size="Size.Small" Class="px-2">
+            <span class="d-none d-sm-inline">@TelegramChipLabel()</span>
+        </MudChip>
+        <MudIconButton Icon="@Icons.Material.Filled.Logout" Color="Color.Inherit" Size="Size.Small" OnClick="LogoutAsync" Class="ml-1" />
     </MudAppBar>
 
-    <MudDrawer @bind-Open="_drawerOpen" Elevation="2" ClipMode="DrawerClipMode.Always" Variant="DrawerVariant.Mini" OpenMiniOnHover="true">
+    <MudDrawer @bind-Open="_drawerOpen" Elevation="2" ClipMode="DrawerClipMode.Always" Breakpoint="Breakpoint.Md" Variant="DrawerVariant.Responsive">
         <NavMenu />
     </MudDrawer>
 
-    <MudMainContent Class="pt-16 pa-4">
+    <MudMainContent Class="pa-3 pa-sm-5" Style="padding-top: 84px !important;">
         @Body
     </MudMainContent>
 </MudLayout>
@@ -67,11 +74,12 @@
 
 @code {
     private bool _drawerOpen = true;
-    private bool _isDarkMode = true;
+    private bool _isDarkMode = false;
     private bool _brokerConnected;
     private bool _cleanupRunning;
     private TelegramConnectionState _telegramState = TelegramConnectionState.Disconnected;
     private System.Threading.Timer? _pollTimer;
+    private HubConnection? _hub;
 
     protected override void OnInitialized()
     {
@@ -91,16 +99,73 @@
         }, null, TimeSpan.Zero, TimeSpan.FromSeconds(1));
     }
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _hub is not null)
+            return;
+
+        // Subscribe to server-broadcast notifications so a flyout (snackbar) shows on
+        // every page when orders execute / signals arrive / positions close.
+        // Done after first render (not in OnInitialized) so the SignalR handshake never
+        // blocks the layout render / page navigation.
+        try
+        {
+            _hub = new HubConnectionBuilder()
+                .WithUrl(Nav.ToAbsoluteUri("/tradingHub"))
+                .WithAutomaticReconnect()
+                .Build();
+
+            _hub.On<JsonElement>("Notification", async payload =>
+            {
+                var (kind, title, body) = ParseNotification(payload);
+                var severity = kind switch
+                {
+                    "error" => Severity.Error,
+                    "order" => Severity.Success,
+                    "signal" => Severity.Info,
+                    _ => Severity.Normal
+                };
+
+                await InvokeAsync(() =>
+                {
+                    var text = string.IsNullOrWhiteSpace(body) ? title : $"{title} — {body}";
+                    Snackbar.Add(text, severity);
+                });
+
+                // Best-effort browser notification + beep.
+                try { await JS.InvokeVoidAsync("NexusApp.notify", title, body); } catch { }
+                try { await JS.InvokeVoidAsync("NexusApp.beep"); } catch { }
+            });
+
+            await _hub.StartAsync();
+        }
+        catch { /* hub is best-effort */ }
+    }
+
+    private static (string Kind, string Title, string Body) ParseNotification(JsonElement payload)
+    {
+        string Get(string name) =>
+            payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var v)
+                ? v.GetString() ?? string.Empty
+                : string.Empty;
+
+        return (Get("Kind"), Get("Title"), Get("Body"));
+    }
+
     private async void OnTelegramStateChanged(TelegramConnectionState s)
     {
         _telegramState = s;
         await InvokeAsync(StateHasChanged);
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         TelegramMgr.StateChanged -= OnTelegramStateChanged;
         _pollTimer?.Dispose();
+        if (_hub is not null)
+        {
+            try { await _hub.DisposeAsync(); } catch { }
+        }
     }
 
     private void ToggleDrawer() => _drawerOpen = !_drawerOpen;
@@ -182,27 +247,59 @@
         _ => "Telegram Idle"
     };
 
+    private void LogoutAsync()
+    {
+        // Full-page navigation to the logout endpoint so the server can clear the
+        // auth cookie via HttpContext.SignOutAsync (cannot be done from a circuit).
+        Nav.NavigateTo("/auth/logout", forceLoad: true);
+    }
+
     // A muted, high-contrast dark theme suited to trading dashboards.
     private readonly MudTheme _theme = new()
     {
+        PaletteLight = new PaletteLight
+        {
+            Primary = "#2563eb",
+            Secondary = "#0ea5e9",
+            Tertiary = "#f59e0b",
+            AppbarBackground = "#0f172a",
+            AppbarText = "#f8fafc",
+            DrawerBackground = "#ffffff",
+            DrawerText = "#1e293b",
+            DrawerIcon = "#475569",
+            Background = "#e2e8f0",
+            Surface = "#ffffff",
+            Success = "#16a34a",
+            Error = "#dc2626",
+            Warning = "#d97706",
+            Info = "#0284c7",
+            TextPrimary = "#0f172a",
+            TextSecondary = "#64748b",
+            LinesDefault = "#cbd5e1",
+            TableLines = "#e2e8f0",
+            Divider = "#cbd5e1"
+        },
         PaletteDark = new PaletteDark
         {
-            Primary = "#2f9e44",
-            Secondary = "#4dabf7",
-            Tertiary = "#ffa94d",
-            AppbarBackground = "#111214",
-            AppbarText = "#e6e6e6",
-            DrawerBackground = "#161719",
-            DrawerText = "#c9cbd0",
-            DrawerIcon = "#c9cbd0",
-            Background = "#0e0f11",
-            Surface = "#161719",
-            Success = "#2f9e44",
-            Error = "#e03131",
-            Warning = "#f59f00",
-            Info = "#4dabf7",
-            TextPrimary = "#e6e6e6",
-            TextSecondary = "#adb5bd"
+            Primary = "#3b82f6",
+            Secondary = "#38bdf8",
+            Tertiary = "#fbbf24",
+            AppbarBackground = "#0f172a",
+            AppbarText = "#f8fafc",
+            DrawerBackground = "#1e293b",
+            DrawerText = "#e2e8f0",
+            DrawerIcon = "#94a3b8",
+            Background = "#0f172a",
+            Surface = "#1e293b",
+            Success = "#22c55e",
+            Error = "#ef4444",
+            Warning = "#f59e0b",
+            Info = "#38bdf8",
+            TextPrimary = "#f8fafc",
+            TextSecondary = "#94a3b8",
+            LinesDefault = "#334155",
+            TableLines = "#334155",
+            Divider = "#334155"
         }
     };
 }

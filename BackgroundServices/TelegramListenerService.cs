@@ -1,14 +1,14 @@
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using System.Collections.Concurrent;
 using NexusApp.Data;
+using NexusApp.Helpers;
+using NexusApp.Hubs;
 using NexusApp.Interfaces;
 using NexusApp.Models;
+using NexusApp.Parser;
 using NexusApp.Telegram;
+using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 
 namespace NexusApp.BackgroundServices;
 
@@ -19,30 +19,22 @@ namespace NexusApp.BackgroundServices;
 /// Configuration comes from the DB-persisted <see cref="TelegramManager"/> so that
 /// changes made in the UI take effect on the next reconnect without an app restart.
 /// </summary>
-public sealed class TelegramListenerService : BackgroundService
+public sealed partial class TelegramListenerService(
+    ILogger<TelegramListenerService> logger,
+    IConfiguration config,
+    IServiceProvider serviceProvider,
+    TelegramManager manager,
+    IHubContext<TradingHub> hub) : BackgroundService
 {
-    private readonly ILogger<TelegramListenerService> _logger;
-    private readonly IConfiguration _config;
-    private readonly IServiceProvider _serviceProvider;
-    private readonly TelegramManager _manager;
-    private readonly IHubContext<TradingHub> _hub;
+    private readonly ILogger<TelegramListenerService> _logger = logger;
+    private readonly IConfiguration _config = config;
+    private readonly IServiceProvider _serviceProvider = serviceProvider;
+    private readonly TelegramManager _manager = manager;
+    private readonly IHubContext<TradingHub> _hub = hub;
     private readonly ConcurrentDictionary<(string Channel, long MessageId), byte> _processedMessages = new();
     private readonly ConcurrentDictionary<string, int> _lastSeenMessageIds = new(StringComparer.OrdinalIgnoreCase);
+    private const string SignalStatusChangedEvent = "SignalStatusChanged";
     private DateTime _serviceStartTime = DateTime.UtcNow;
-
-    public TelegramListenerService(
-        ILogger<TelegramListenerService> logger,
-        IConfiguration config,
-        IServiceProvider serviceProvider,
-        TelegramManager manager,
-        IHubContext<TradingHub> hub)
-    {
-        _logger = logger;
-        _config = config;
-        _serviceProvider = serviceProvider;
-        _manager = manager;
-        _hub = hub;
-    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -102,15 +94,22 @@ public sealed class TelegramListenerService : BackgroundService
                     {
                         var recent = await _manager.Client.PollChannelAsync(channel, 10);
                         var isFirstPoll = !_lastSeenMessageIds.ContainsKey(channel);
-                        
+
                         if (isFirstPoll && recent.Count > 0)
                         {
                             var maxId = recent.Max(m => (int)m.MessageId);
                             _lastSeenMessageIds[channel] = maxId;
                             _logger.LogInformation("Initialized last seen message ID for channel '{Channel}' to {MaxId}", channel, maxId);
-                            
+
+                            // Only process messages received after startup (or within 2 minutes)
+                            // to prevent reloading old historical data on startup.
                             foreach (var msg in recent)
-                                await HandleIncomingAsync(msg);
+                            {
+                                if ((DateTime.UtcNow - msg.Timestamp).TotalMinutes <= 2)
+                                {
+                                    await HandleIncomingAsync(msg);
+                                }
+                            }
                         }
                         else
                         {
@@ -172,8 +171,65 @@ public sealed class TelegramListenerService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Returns true only when the message's channel is present in the user's
+    /// configured monitored-channels list. Matching is case-insensitive and tolerant
+    /// of a leading '@' on either side. Because incoming messages are identified by
+    /// channel <b>title</b> but users may have saved a <b>@username</b> (or vice-versa),
+    /// the joined-channels list is used to treat the title and username of the same
+    /// channel as equivalent.
+    /// </summary>
+    private bool IsMonitoredChannel(string? senderName)
+    {
+        if (string.IsNullOrWhiteSpace(senderName))
+            return false;
+
+        var monitored = _manager.Snapshot().Channels;
+        if (monitored is null || monitored.Count == 0)
+            return false;
+
+        static string Normalize(string s) => s.Trim().TrimStart('@');
+        var sender = Normalize(senderName);
+
+        // Build the set of identifiers (title + username) that refer to the sender's
+        // channel, so a monitored entry matches regardless of which form was saved.
+        var senderAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { sender };
+        try
+        {
+            foreach (var ac in _manager.ListAvailableChannels())
+            {
+                var title = Normalize(ac.Title ?? string.Empty);
+                var username = Normalize(ac.Username ?? string.Empty);
+                if ((title.Length > 0 && string.Equals(title, sender, StringComparison.OrdinalIgnoreCase)) ||
+                    (username.Length > 0 && string.Equals(username, sender, StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (title.Length > 0) senderAliases.Add(title);
+                    if (username.Length > 0) senderAliases.Add(username);
+                }
+            }
+        }
+        catch
+        {
+            // If the joined-channels list can't be read, fall back to plain title match.
+        }
+
+        return monitored.Any(c => senderAliases.Contains(Normalize(c)));
+    }
+
     private async Task HandleIncomingAsync(TelegramMessage message)
     {
+        // Only process messages that originate from an explicitly monitored channel.
+        // The real-time MessageReceived event fires for EVERY channel the connected
+        // Telegram account has joined, so without this guard signals from channels the
+        // user never added (e.g. "venkat trading signals") would be parsed and traded.
+        if (!IsMonitoredChannel(message.SenderName))
+        {
+            _logger.LogDebug(
+                "Ignoring message {MessageId} from unmonitored channel '{Channel}'.",
+                message.MessageId, message.SenderName);
+            return;
+        }
+
         if (!string.IsNullOrWhiteSpace(message.SenderName))
         {
             _lastSeenMessageIds.AddOrUpdate(
@@ -195,9 +251,169 @@ public sealed class TelegramListenerService : BackgroundService
         try
         {
             using var scope = _serviceProvider.CreateScope();
-            var parser = scope.ServiceProvider.GetRequiredService<ISignalParser>();
+            var resolver = scope.ServiceProvider.GetRequiredService<SignalParserResolver>();
+            var parser = resolver.Resolve(message.SenderName);
             var context = scope.ServiceProvider.GetRequiredService<TradingDbContext>();
             var settings = scope.ServiceProvider.GetRequiredService<ISettingsService>();
+
+            if (await TryHandleIntermediateSquareOffAsync(context, message, scope.ServiceProvider))
+                return;
+
+            // Channel-specific skip rule (e.g. ABC BTST TRADE positional "#BTST TRADE"
+            // calls). Only intraday signals (BUY above entry) are traded.
+            if (parser.ShouldSkip(message.Text) &&
+                !(parser.RequiresActivation && parser.IsActivationMessage(message.Text)))
+            {
+                _logger.LogInformation(
+                    "Skipping message {MessageId} from {Channel} — flagged by {Parser} as non-tradable.",
+                    message.MessageId, message.SenderName, parser.GetType().Name);
+                return;
+            }
+
+            // IGNORE command: cancel matching pending/accepted orders and block execution.
+            if (IsIgnoreMessage(message.Text))
+            {
+                var targetSignal = await FindIgnoreTargetSignalAsync(context, parser, message);
+                if (targetSignal is null)
+                {
+                    _logger.LogInformation(
+                        "IGNORE message {MessageId} received from {Channel}, but no matching active signal was found.",
+                        message.MessageId, message.SenderName);
+                    return;
+                }
+
+                var cancellableOrders = await context.Orders
+                    .Include(o => o.TradingAccount)
+                    .Where(o => o.SignalId == targetSignal.Id &&
+                                (o.Status == OrderStatus.Pending || o.Status == OrderStatus.Accepted))
+                    .ToListAsync();
+
+                foreach (var ord in cancellableOrders)
+                {
+                    var cancelled = false;
+                    try
+                    {
+                        if (ord.TradingAccount is null || ord.TradingAccount.IsPaperAccount || string.IsNullOrWhiteSpace(ord.BrokerId))
+                        {
+                            cancelled = true;
+                        }
+                        else
+                        {
+                            var broker = scope.ServiceProvider.GetRequiredKeyedService<IBroker>(ord.TradingAccount.BrokerType);
+                            cancelled = await broker.CancelOrderAsync(ord.BrokerId);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed cancelling order {OrderId} for IGNORE signal {SignalId}", ord.Id, targetSignal.Id);
+                    }
+
+                    if (cancelled)
+                    {
+                        ord.Status = OrderStatus.Cancelled;
+                        ord.ErrorMessage = "Cancelled due to IGNORE message";
+                    }
+                }
+
+                // Mark ignored unless trade already completed; this blocks any pending execution path.
+                if (targetSignal.Status != SignalStatus.Executed)
+                {
+                    targetSignal.Status = SignalStatus.Ignored;
+                }
+
+                await context.SaveChangesAsync();
+
+                await _hub.Clients.All.SendAsync(SignalStatusChangedEvent, new
+                {
+                    targetSignal.Id,
+                    Status = targetSignal.Status.ToString()
+                });
+
+                await _hub.Clients.All.SendAsync("OrderStatusChanged", new { Timestamp = DateTime.UtcNow });
+
+                _logger.LogInformation(
+                    "Signal {SignalId} ({Index} {Strike}{Type}) marked Ignored via message {MessageId}; cancelled {CancelledCount} pending/accepted order(s).",
+                    targetSignal.Id, targetSignal.Index, targetSignal.Strike, targetSignal.OptionType,
+                    message.MessageId, cancellableOrders.Count(o => o.Status == OrderStatus.Cancelled));
+                return;
+            }
+
+            if (parser.RequiresActivation && parser.IsActivationMessage(message.Text))
+            {
+                TradingSignal? targetSignal = null;
+                if (message.ReplyToMessageId.HasValue)
+                {
+                    targetSignal = await context.TradingSignals
+                        .FirstOrDefaultAsync(s => s.TelegramMessageId == message.ReplyToMessageId.Value && s.Status == SignalStatus.AwaitingActivation);
+                }
+
+                if (targetSignal is null && !string.IsNullOrWhiteSpace(message.SenderName))
+                {
+                    targetSignal = await context.TradingSignals
+                        .Where(s => s.ChannelName == message.SenderName && s.Status == SignalStatus.AwaitingActivation)
+                        .OrderByDescending(s => s.ReceivedTimestamp)
+                        .FirstOrDefaultAsync();
+                }
+
+                targetSignal ??= await context.TradingSignals
+                        .Where(s => s.Status == SignalStatus.AwaitingActivation)
+                        .OrderByDescending(s => s.ReceivedTimestamp)
+                        .FirstOrDefaultAsync();
+
+                if (targetSignal is not null && targetSignal.Status == SignalStatus.AwaitingActivation)
+                {
+                    _logger.LogInformation("Signal {SignalId} ({Channel}) activated by message {MessageId}", targetSignal.Id, targetSignal.ChannelName, message.MessageId);
+
+                    var tradingMode = (await settings.GetSettingAsync<string>("TradingMode") ?? "manual").ToLowerInvariant();
+                    var parsedSignal = await parser.ParseAsync(targetSignal.OriginalMessage, targetSignal.TelegramMessageId, targetSignal.TelegramTimestamp);
+                    if (parsedSignal is not null)
+                    {
+                        parsedSignal.SignalTime = targetSignal.TelegramTimestamp;
+                        parsedSignal.ChannelName = targetSignal.ChannelName;
+
+                        var crossingEnabled = await settings.GetSettingAsync<bool?>("EnableEntryPriceCrossingTrigger") ?? false;
+
+                        if (tradingMode == "auto" || tradingMode == "automatic")
+                        {
+                            if (crossingEnabled && parsedSignal.Action == SignalAction.Buy)
+                            {
+                                targetSignal.Status = SignalStatus.AwaitingEntry;
+                                _logger.LogInformation(
+                                    "Activated Signal {SignalId} set to AwaitingEntry — will execute when CMP crosses entry price {Entry}",
+                                    targetSignal.Id, targetSignal.EntryPrice);
+                            }
+                            else
+                            {
+                                var engine = scope.ServiceProvider.GetRequiredService<ITradingEngine>();
+                                var ok = await engine.ExecuteSignalAsync(parsedSignal);
+                                var fresh = await context.TradingSignals.FindAsync(targetSignal.Id);
+                                if (fresh != null)
+                                {
+                                    targetSignal.Status = (ok || fresh.Status == SignalStatus.Executed) ? SignalStatus.Executed : SignalStatus.Failed;
+                                }
+                                else
+                                {
+                                    targetSignal.Status = ok ? SignalStatus.Executed : SignalStatus.Failed;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // In manual mode, set signal to Parsed so it is unlocked and ready for manual execution
+                            targetSignal.Status = SignalStatus.Parsed;
+                        }
+
+                        await context.SaveChangesAsync();
+
+                        await _hub.Clients.All.SendAsync(SignalStatusChangedEvent, new
+                        {
+                            targetSignal.Id,
+                            Status = targetSignal.Status.ToString()
+                        });
+                    }
+                }
+                return;
+            }
 
             var receivedAt = DateTime.UtcNow;
             var parsed = await parser.ParseAsync(message.Text, message.MessageId, message.Timestamp);
@@ -216,9 +432,9 @@ public sealed class TelegramListenerService : BackgroundService
                     var shouldForward = isToday && isNewMessage && (!currentSettings.ForwardOnlySignals || (parsed is not null && parsed.IsValid));
                     if (shouldForward)
                     {
-                        _logger.LogInformation("Forwarding message {MessageId} from '{From}' to '{To}'...", 
+                        _logger.LogInformation("Forwarding message {MessageId} from '{From}' to '{To}'...",
                             message.MessageId, message.SenderName, destChannel);
-                        
+
                         _ = Task.Run(async () =>
                         {
                             try
@@ -232,7 +448,7 @@ public sealed class TelegramListenerService : BackgroundService
                             }
                             catch (Exception ex)
                             {
-                                _logger.LogError(ex, "Error forwarding message {MessageId} from '{From}' to '{To}'", 
+                                _logger.LogError(ex, "Error forwarding message {MessageId} from '{From}' to '{To}'",
                                     message.MessageId, message.SenderName, destChannel);
                             }
                         });
@@ -247,8 +463,7 @@ public sealed class TelegramListenerService : BackgroundService
                 return;
             }
 
-            var duplicate = await context.TradingSignals
-                .AsNoTracking()
+            var duplicate = await context.TradingSignals.AsNoTracking()
                 .AnyAsync(s => s.TelegramMessageId == message.MessageId);
             if (duplicate) return;
 
@@ -256,7 +471,7 @@ public sealed class TelegramListenerService : BackgroundService
             {
                 TelegramMessageId = message.MessageId,
                 OriginalMessage = message.Text,
-                TelegramTimestamp = message.Timestamp,
+                TelegramTimestamp = message.Timestamp.EnsureUtc(),
                 ReceivedTimestamp = receivedAt,
                 ProcessedTimestamp = DateTime.UtcNow,
                 Action = parsed.Action,
@@ -267,17 +482,19 @@ public sealed class TelegramListenerService : BackgroundService
                 StopLoss = parsed.StopLoss,
                 Targets = parsed.Targets,
                 ExpiryDate = parsed.ExpiryDate,
-                Status = SignalStatus.Parsed,
-                SignalDelayMs = (decimal)(receivedAt - message.Timestamp).TotalMilliseconds
+                Status = parser.RequiresActivation ? SignalStatus.AwaitingActivation : SignalStatus.Parsed,
+                SignalDelayMs = (decimal)(receivedAt - message.Timestamp.EnsureUtc()).TotalMilliseconds,
+                ChannelName = message.SenderName
             };
+            parsed.ChannelName = message.SenderName;
 
             context.TradingSignals.Add(signal);
             await context.SaveChangesAsync();
 
             _logger.LogInformation(
-                "Signal parsed: {Action} {Index} {Strike}{OptionType} entry={Entry} sl={Sl} delay={Delay}ms",
+                "Signal parsed: {Action} {Index} {Strike}{OptionType} entry={Entry} sl={Sl} delay={Delay}ms channel={Channel}",
                 signal.Action, signal.Index, signal.Strike, signal.OptionType,
-                signal.EntryPrice, signal.StopLoss, (int)signal.SignalDelayMs);
+                signal.EntryPrice, signal.StopLoss, (int)signal.SignalDelayMs, signal.ChannelName);
 
             await _hub.Clients.All.SendAsync("SignalReceived", new
             {
@@ -288,21 +505,56 @@ public sealed class TelegramListenerService : BackgroundService
                 signal.OptionType,
                 signal.EntryPrice,
                 signal.StopLoss,
-                Targets = signal.Targets,
+                signal.Targets,
                 signal.SignalDelayMs,
                 signal.OriginalMessage,
-                signal.ReceivedTimestamp
+                signal.ReceivedTimestamp,
+                signal.ChannelName
             });
 
             var mode = (await settings.GetSettingAsync<string>("TradingMode") ?? "manual").ToLowerInvariant();
+            if (signal.Status == SignalStatus.AwaitingActivation)
+            {
+                _logger.LogInformation("Signal {SignalId} from {Channel} is awaiting activation; holding execution until the channel's activation message is received.", signal.Id, signal.ChannelName);
+                return;
+            }
+
             if (mode == "auto" || mode == "automatic")
             {
+                // Entry Price Crossing Trigger: hold execution until CMP crosses entry price.
+                // The CmpStreamingService monitors prices every 1s and will trigger execution
+                // when CMP >= EntryPrice. The 10-minute staleness guard still applies.
+                var crossingEnabled = await settings.GetSettingAsync<bool?>("EnableEntryPriceCrossingTrigger") ?? false;
+                if (crossingEnabled && parsed.Action == SignalAction.Buy)
+                {
+                    signal.Status = SignalStatus.AwaitingEntry;
+                    await context.SaveChangesAsync();
+                    _logger.LogInformation(
+                        "Signal {SignalId} set to AwaitingEntry — will execute when CMP crosses entry price {Entry}",
+                        signal.Id, signal.EntryPrice);
+
+                    await _hub.Clients.All.SendAsync(SignalStatusChangedEvent, new
+                    {
+                        signal.Id,
+                        Status = signal.Status.ToString()
+                    });
+                    return;
+                }
+
                 var engine = scope.ServiceProvider.GetRequiredService<ITradingEngine>();
                 var ok = await engine.ExecuteSignalAsync(parsed);
-                signal.Status = ok ? SignalStatus.Executed : SignalStatus.Failed;
+                var fresh = await context.TradingSignals.FindAsync(signal.Id);
+                if (fresh != null)
+                {
+                    signal.Status = (ok || fresh.Status == SignalStatus.Executed) ? SignalStatus.Executed : SignalStatus.Failed;
+                }
+                else
+                {
+                    signal.Status = ok ? SignalStatus.Executed : SignalStatus.Failed;
+                }
                 await context.SaveChangesAsync();
 
-                await _hub.Clients.All.SendAsync("SignalStatusChanged", new
+                await _hub.Clients.All.SendAsync(SignalStatusChangedEvent, new
                 {
                     signal.Id,
                     Status = signal.Status.ToString()
@@ -315,8 +567,161 @@ public sealed class TelegramListenerService : BackgroundService
         }
     }
 
-    private static async Task SafeDelay(TimeSpan delay, CancellationToken token)
+    /// <summary>
+    /// Exit/profit-booking phrases that indicate a channel is instructing followers to close
+    /// an existing trade (as opposed to posting a new entry). Applied to EVERY monitored
+    /// channel, because exit wording varies from channel to channel.
+    ///
+    /// Safety: matching a keyword alone never closes anything. The message must ALSO name a
+    /// contract that maps to a currently-open position from the same channel (see
+    /// <see cref="BuildContractTag"/>). That contract requirement is what stops chatter like
+    /// "we booked profit yesterday" from triggering a live exit.
+    /// </summary>
+    private static readonly string[] ExitKeywords =
+    [
+        "CMP EXIT ALL",
+        "EXIT ALL",
+        "BOOK UR PROFIT",
+        "BOOK YOUR PROFIT",
+        "BOOK FULL PROFIT",
+        "BOOK PARTIAL PROFIT",
+        "BOOK PROFIT",
+        "PROFIT BOOK",
+        "SQUARE OFF",
+        "SQUAREOFF",
+        "EXIT NOW",
+        "EXIT THE TRADE",
+        "EXIT POSITION",
+        "CLOSE POSITION",
+        "CLOSE THE TRADE"
+    ];
+
+    private async Task<bool> TryHandleIntermediateSquareOffAsync(TradingDbContext context, TelegramMessage message, IServiceProvider services)
     {
-        try { await Task.Delay(delay, token); } catch (OperationCanceledException) { }
+        var channel = NormalizeTag(message.SenderName);
+        var text = message.Text ?? string.Empty;
+        var normalizedText = NormalizeTag(text);
+
+        var matchedKeyword = ExitKeywords.FirstOrDefault(k =>
+            text.Contains(k, StringComparison.OrdinalIgnoreCase));
+
+        if (matchedKeyword is null)
+            return false;
+
+        var positions = await context.Positions
+            .Include(p => p.Signal)
+            .Where(p => p.ClosedAt == null)
+            .ToListAsync();
+
+        var matchingPositions = positions
+            .Where(p => p.Signal is not null &&
+                        NormalizeTag(p.Signal.ChannelName) == channel &&
+                        normalizedText.Contains(BuildContractTag(p.Signal), StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (matchingPositions.Count == 0)
+        {
+            // Deliberate no-op: an exit instruction was recognised but could not be tied to a
+            // specific open position from this channel. We do NOT exit everything, because a
+            // vague message must never square off unrelated trades. Surfaced as a warning so
+            // the trade can be closed manually from the Positions page if it was genuine.
+            var openFromChannel = positions.Count(p =>
+                p.Signal is not null && NormalizeTag(p.Signal.ChannelName) == channel);
+
+            if (openFromChannel > 0)
+            {
+                _logger.LogWarning(
+                    "Exit keyword '{Keyword}' seen from {Channel} (message {MessageId}) but no contract in the text " +
+                    "matched any of the {OpenCount} open position(s) from that channel. No action taken - review manually. Text: {Text}",
+                    matchedKeyword, message.SenderName, message.MessageId, openFromChannel, text);
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "Exit keyword '{Keyword}' seen from {Channel} but there are no open positions from that channel.",
+                    matchedKeyword, message.SenderName);
+            }
+
+            return true;
+        }
+
+        _logger.LogInformation(
+            "Intermediate exit '{Keyword}' from {Channel} matched {Count} open position(s); squaring off.",
+            matchedKeyword, message.SenderName, matchingPositions.Count);
+
+        var engine = services.GetRequiredService<ITradingEngine>();
+        foreach (var position in matchingPositions)
+            await engine.SquareOffPositionAsync(position.Id);
+
+        return true;
+    }
+
+    private static string BuildContractTag(TradingSignal signal)
+    {
+        var strike = signal.Strike.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+        var optionType = signal.OptionType == OptionType.Ce ? "CE" : "PE";
+        return NormalizeTag($"{signal.Index}{strike}{optionType}");
+    }
+
+    private static string NormalizeTag(string? value) =>
+        new([.. (value ?? string.Empty)
+            .Where(char.IsLetterOrDigit)
+            .Select(char.ToUpperInvariant)]);
+
+    private static async Task SafeDelay(TimeSpan delay, CancellationToken token)
+        => await Task.Delay(delay, token);
+
+    private static bool IsIgnoreMessage(string text)
+        => !string.IsNullOrWhiteSpace(text) && 
+           IgnoreMessageRegex().IsMatch(text);
+
+    [GeneratedRegex(@"\bIGNORE\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex IgnoreMessageRegex();
+
+    private static async Task<TradingSignal?> FindIgnoreTargetSignalAsync(
+        TradingDbContext context,
+        ISignalParser parser,
+        TelegramMessage message)
+    {
+        // 1) Exact reply target (strongest signal linkage)
+        if (message.ReplyToMessageId.HasValue)
+        {
+            var byReply = await context.TradingSignals
+                .Where(s => s.TelegramMessageId == message.ReplyToMessageId.Value &&
+                            s.Status != SignalStatus.Executed &&
+                            s.Status != SignalStatus.Failed &&
+                            s.Status != SignalStatus.Ignored)
+                .OrderByDescending(s => s.ReceivedTimestamp)
+                .FirstOrDefaultAsync();
+            if (byReply is not null)
+                return byReply;
+        }
+
+        // 2) Try to parse contract details from the IGNORE-tagged message text
+        var parsed = await parser.ParseAsync(message.Text, message.MessageId, message.Timestamp);
+        if (parsed is not null && parsed.IsValid)
+        {
+            var byContract = await context.TradingSignals
+                .Where(s => s.Index == parsed.Index &&
+                            s.Strike == parsed.Strike &&
+                            s.OptionType == parsed.OptionType &&
+                            s.Status != SignalStatus.Executed &&
+                            s.Status != SignalStatus.Failed &&
+                            s.Status != SignalStatus.Ignored &&
+                            (string.IsNullOrWhiteSpace(message.SenderName) || s.ChannelName == message.SenderName))
+                .OrderByDescending(s => s.ReceivedTimestamp)
+                .FirstOrDefaultAsync();
+            if (byContract is not null)
+                return byContract;
+        }
+
+        // 3) Fallback: latest active signal in the same channel
+        return await context.TradingSignals
+            .Where(s => s.Status != SignalStatus.Executed &&
+                        s.Status != SignalStatus.Failed &&
+                        s.Status != SignalStatus.Ignored &&
+                        (string.IsNullOrWhiteSpace(message.SenderName) || s.ChannelName == message.SenderName))
+            .OrderByDescending(s => s.ReceivedTimestamp)
+            .FirstOrDefaultAsync();
     }
 }

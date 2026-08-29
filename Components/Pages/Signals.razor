@@ -9,44 +9,65 @@
 @inject IDbContextFactory<TradingDbContext> DbFactory
 @inject ISnackbar Snackbar
 
-<PageTitle>Signals</PageTitle>
+<PageTitle>NexusApp - Signals</PageTitle>
 
 <MudText Typo="Typo.h4" Class="mb-4">Signals</MudText>
 
-<MudStack Row="true" Class="mb-3" Spacing="2" AlignItems="AlignItems.Center">
-    <MudDatePicker @bind-Date="_selectedDate" Label="Date" Variant="Variant.Outlined" Margin="Margin.Dense" />
+<MudStack Row="true" Wrap="Wrap.Wrap" Class="mb-3" Spacing="2" AlignItems="AlignItems.Center">
+    <MudDatePicker @bind-Date="_selectedDate" Label="Date" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width: 180px;" />
     <MudButton OnClick="LoadAsync" Color="Color.Primary" Variant="Variant.Filled">Load</MudButton>
     <MudSpacer />
     <MudText Typo="Typo.body2">Total: @_signals.Count</MudText>
 </MudStack>
 
-<MudPaper Class="pa-4" Elevation="2">
-    <MudTable Items="_signals" Dense="true" Hover="true" Striped="true">
+<MudPaper Class="pa-2 pa-sm-4" Elevation="2">
+    <MudTable Items="SortedSignals" HorizontalScrollbar="true" Dense="true" Hover="true" Striped="true">
         <HeaderContent>
-            <MudTh>Time</MudTh>
-            <MudTh>Action</MudTh>
-            <MudTh>Symbol</MudTh>
-            <MudTh>Entry</MudTh>
-            <MudTh>SL</MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnTime)">Time @SortIndicator(_sortColumnTime)</MudButton></MudTh>
+            <MudTh Style="width:130px; max-width:145px;"><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnChannel)">Channel @SortIndicator(_sortColumnChannel)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnAction)">Action @SortIndicator(_sortColumnAction)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnSymbol)">Symbol @SortIndicator(_sortColumnSymbol)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnEntry)">Entry @SortIndicator(_sortColumnEntry)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnSl)">SL @SortIndicator(_sortColumnSl)</MudButton></MudTh>
             <MudTh>Targets</MudTh>
-            <MudTh>Delay</MudTh>
-            <MudTh>Status</MudTh>
-            <MudTh>Message</MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnDelay)">Delay @SortIndicator(_sortColumnDelay)</MudButton></MudTh>
+            <MudTh Style="min-width:130px;"><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnStatus)">Status @SortIndicator(_sortColumnStatus)</MudButton></MudTh>
+            <MudTh Style="min-width:350px; width:45%;">Message</MudTh>
         </HeaderContent>
         <RowTemplate>
-            <MudTd>@context.ReceivedTimestamp.ToLocalTime().ToString("HH:mm:ss")</MudTd>
+            <MudTd Style="white-space:nowrap;">@context.ReceivedTimestamp.ToIstString("hh:mm:ss tt")</MudTd>
+            <MudTd Style="width:130px; max-width:145px; overflow:hidden;">
+                @if (!string.IsNullOrWhiteSpace(context.ChannelName))
+                {
+                    <MudChip T="string" Class="channel-chip" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info" title="@context.ChannelName">@context.ChannelName</MudChip>
+                }
+                else
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">-</MudText>
+                }
+            </MudTd>
             <MudTd>
                 <MudChip T="string" Size="Size.Small" Color="@(context.Action == SignalAction.Buy ? Color.Success : Color.Error)">@context.Action</MudChip>
             </MudTd>
-            <MudTd>@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
+            <MudTd Style="white-space:nowrap;">@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
             <MudTd>@context.EntryPrice</MudTd>
             <MudTd>@context.StopLoss</MudTd>
-            <MudTd>@string.Join(" / ", context.Targets)</MudTd>
-            <MudTd>@FormatDelay(context.SignalDelayMs)</MudTd>
-            <MudTd>
+            <MudTd Style="white-space:nowrap;">@string.Join(" / ", context.Targets)</MudTd>
+            <MudTd Style="white-space:nowrap;">@FormatDelay(context.SignalDelayMs)</MudTd>
+            <MudTd Style="min-width:130px; white-space:nowrap;">
                 <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
+                @if (context.Status == SignalStatus.Failed)
+                {
+                    var errorMsg = context.Orders?.FirstOrDefault(o => !string.IsNullOrEmpty(o.ErrorMessage))?.ErrorMessage;
+                    if (!string.IsNullOrWhiteSpace(errorMsg))
+                    {
+                        <MudText Typo="Typo.caption" Color="Color.Error" Class="d-block mt-1" Style="max-width:100px;white-space:normal;line-height:1.2;font-weight:500">
+                            @errorMsg
+                        </MudText>
+                    }
+                }
             </MudTd>
-            <MudTd Style="max-width:400px;white-space:pre-wrap;font-size:0.75rem;color:#9aa0a6">@context.OriginalMessage</MudTd>
+            <MudTd Style="min-width:350px; width:45%; max-width:650px; white-space:pre-wrap; word-break:break-word; font-size:0.75rem; color:var(--mud-palette-text-secondary);">@context.OriginalMessage</MudTd>
         </RowTemplate>
     </MudTable>
 </MudPaper>
@@ -54,6 +75,65 @@
 @code {
     private DateTime? _selectedDate = DateTime.Today;
     private List<TradingSignal> _signals = new();
+
+    private const string _sortColumnTime = "time";
+    private const string _sortColumnChannel = "channel";
+    private const string _sortColumnAction = "action";
+    private const string _sortColumnSymbol = "symbol";
+    private const string _sortColumnEntry = "entry";
+    private const string _sortColumnSl = "sl";
+    private const string _sortColumnDelay = "delay";
+    private const string _sortColumnStatus = "status";
+
+    private string _sortColumn = _sortColumnTime;
+    private bool _sortDescending = true;
+
+    private IEnumerable<TradingSignal> SortedSignals =>
+        (_sortColumn, _sortDescending) switch
+        {
+            (_sortColumnChannel, true) => _signals.OrderByDescending(s => s.ChannelName ?? string.Empty),
+            (_sortColumnChannel, false) => _signals.OrderBy(s => s.ChannelName ?? string.Empty),
+
+            (_sortColumnAction, true) => _signals.OrderByDescending(s => s.Action),
+            (_sortColumnAction, false) => _signals.OrderBy(s => s.Action),
+
+            (_sortColumnSymbol, true) => _signals.OrderByDescending(s => s.Index)
+                                                 .ThenByDescending(s => s.Strike)
+                                                 .ThenByDescending(s => s.OptionType),
+            (_sortColumnSymbol, false) => _signals.OrderBy(s => s.Index)
+                                                  .ThenBy(s => s.Strike)
+                                                  .ThenBy(s => s.OptionType),
+
+            (_sortColumnEntry, true) => _signals.OrderByDescending(s => s.EntryPrice),
+            (_sortColumnEntry, false) => _signals.OrderBy(s => s.EntryPrice),
+
+            (_sortColumnSl, true) => _signals.OrderByDescending(s => s.StopLoss),
+            (_sortColumnSl, false) => _signals.OrderBy(s => s.StopLoss),
+
+            (_sortColumnDelay, true) => _signals.OrderByDescending(s => s.SignalDelayMs),
+            (_sortColumnDelay, false) => _signals.OrderBy(s => s.SignalDelayMs),
+
+            (_sortColumnStatus, true) => _signals.OrderByDescending(s => s.Status),
+            (_sortColumnStatus, false) => _signals.OrderBy(s => s.Status),
+
+            (_, true) => _signals.OrderByDescending(s => s.ReceivedTimestamp),
+            _ => _signals.OrderBy(s => s.ReceivedTimestamp)
+        };
+
+    private void ToggleSort(string column)
+    {
+        if (_sortColumn == column)
+        {
+            _sortDescending = !_sortDescending;
+            return;
+        }
+
+        _sortColumn = column;
+        _sortDescending = column == _sortColumnTime;
+    }
+
+    private string SortIndicator(string column) =>
+        _sortColumn == column ? (_sortDescending ? "↓" : "↑") : string.Empty;
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
 

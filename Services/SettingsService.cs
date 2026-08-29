@@ -33,7 +33,7 @@ public class SettingsService : ISettingsService
 
             if (setting == null)
             {
-                _logger.LogWarning("Setting not found: {Key}", key);
+                _logger.LogDebug("Setting not found: {Key} (using default)", key);
                 return default;
             }
 

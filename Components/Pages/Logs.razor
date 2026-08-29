@@ -2,12 +2,12 @@
 @using MudBlazor
 @inject ISnackbar Snackbar
 
-<PageTitle>Logs</PageTitle>
+<PageTitle>NexusApp - Logs</PageTitle>
 
-<MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-3">
+<MudStack Row="true" Wrap="Wrap.Wrap" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-3">
     <MudText Typo="Typo.h4">Application Logs</MudText>
-    <MudStack Row="true" Spacing="2">
-        <MudSelect T="string" @bind-Value="_selectedFile" Label="Log File" Variant="Variant.Outlined" Margin="Margin.Dense">
+    <MudStack Row="true" Wrap="Wrap.Wrap" Spacing="2" AlignItems="AlignItems.Center">
+        <MudSelect T="string" @bind-Value="_selectedFile" Label="Log File" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width: 180px;">
             @foreach (var f in _files)
             {
                 <MudSelectItem Value="@f">@System.IO.Path.GetFileName(f)</MudSelectItem>
@@ -18,7 +18,7 @@
 </MudStack>
 
 <MudPaper Class="pa-2" Elevation="2" Style="max-height: 70vh; overflow: auto;">
-    <pre style="font-family:Consolas, monospace; font-size: 0.8rem; color:#c9cbd0; white-space: pre-wrap;">@_content</pre>
+    <pre style="font-family:Consolas, monospace; font-size: 0.8rem; color:var(--mud-palette-text-primary); white-space: pre-wrap; word-break: break-all;">@_content</pre>
 </MudPaper>
 
 @code {

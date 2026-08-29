@@ -1,34 +1,26 @@
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 using NexusApp.Brokers.AngelOne;
+using NexusApp.Interfaces;
 using NexusApp.Services;
 
 namespace NexusApp.BackgroundServices;
 
 /// <summary>
-/// Runs a housekeeping pass every trading day just before market open (08:45 IST):
+/// Runs a housekeeping pass every trading day just before market open (08:30 IST):
 ///   1. Cleans previous-day artefacts (orders / positions / signals / audit logs / rolled log files).
 ///   2. Forces a fresh reload of Angel's instrument master so the day's new expiries are picked up.
 ///
 /// Uses IST (UTC+5:30) since the exchange operates in that timezone regardless of
 /// where the app is deployed.
 /// </summary>
-public sealed class DailyMaintenanceService : BackgroundService
+public sealed class DailyMaintenanceService(
+    ILogger<DailyMaintenanceService> logger,
+    IServiceProvider services) : BackgroundService
 {
-    private static readonly TimeSpan MaintenanceTimeIst = new(8, 45, 0);
+    private static readonly TimeSpan MaintenanceTimeIst = new(8, 30, 0);
     private static readonly TimeSpan IstOffset = TimeSpan.FromMinutes(330); // +05:30
 
-    private readonly ILogger<DailyMaintenanceService> _logger;
-    private readonly IServiceProvider _services;
-
-    public DailyMaintenanceService(
-        ILogger<DailyMaintenanceService> logger,
-        IServiceProvider services)
-    {
-        _logger = logger;
-        _services = services;
-    }
+    private readonly ILogger<DailyMaintenanceService> _logger = logger;
+    private readonly IServiceProvider _services = services;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -79,6 +71,21 @@ public sealed class DailyMaintenanceService : BackgroundService
             _logger.LogError(ex, "Cleanup step failed");
         }
 
+        // 1b. Purge durable P&L history beyond the configured retention window (default 90 days).
+        try
+        {
+            using var scope = _services.CreateScope();
+            var settings = scope.ServiceProvider.GetRequiredService<ISettingsService>();
+            var history = scope.ServiceProvider.GetRequiredService<TradeHistoryService>();
+            var retentionDays = await settings.GetSettingAsync<int?>("PnlHistoryRetentionDays") ?? 90;
+            var purged = await history.PurgeHistoryOlderThanAsync(retentionDays, ct);
+            _logger.LogInformation("P&L history retention purge removed {Count} row(s) (retention={Days}d)", purged, retentionDays);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "P&L history retention purge failed");
+        }
+
         // 2. Force a fresh reload of the Angel instrument master (bypasses today-cache).
         try
         {
@@ -98,6 +105,18 @@ public sealed class DailyMaintenanceService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Instrument master reload failed");
+        }
+
+        // 3. Clear the live WebSocket subscription set so the new trading day starts clean
+        //    and does not keep re-subscribing yesterday's (now expired) option tokens.
+        try
+        {
+            var ws = _services.GetService<AngelOneWebSocketClient>();
+            ws?.ResetSubscriptions();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to reset WebSocket subscriptions during daily maintenance");
         }
 
         _logger.LogInformation("=== Daily maintenance complete ===");

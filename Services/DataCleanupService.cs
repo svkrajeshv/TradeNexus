@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NexusApp.Data;
 using NexusApp.Interfaces;
+using NexusApp.Brokers.AngelOne;
 
 namespace NexusApp.Services;
 
@@ -16,17 +17,23 @@ public sealed class DataCleanupService
     private readonly ISettingsService _settings;
     private readonly ILogger<DataCleanupService> _logger;
     private readonly IWebHostEnvironment _env;
+    private readonly AngelInstrumentMaster _instrumentMaster;
+    private readonly TradeHistoryService _tradeHistory;
 
     public DataCleanupService(
         IDbContextFactory<TradingDbContext> dbFactory,
         ISettingsService settings,
         ILogger<DataCleanupService> logger,
-        IWebHostEnvironment env)
+        IWebHostEnvironment env,
+        AngelInstrumentMaster instrumentMaster,
+        TradeHistoryService tradeHistory)
     {
         _dbFactory = dbFactory;
         _settings = settings;
         _logger = logger;
         _env = env;
+        _instrumentMaster = instrumentMaster;
+        _tradeHistory = tradeHistory;
     }
 
     public sealed record CleanupResult(
@@ -54,12 +61,47 @@ public sealed class DataCleanupService
         int signalsRemoved;
         int auditsRemoved;
 
+        // Preserve P&L history before previous-day positions are deleted (idempotent).
+        // For a full "Clean ALL data" reset the history is intentionally wiped instead.
+        if (!allData)
+        {
+            try
+            {
+                var archived = await _tradeHistory.ArchiveClosedPositionsAsync(db, ct);
+                if (archived > 0)
+                {
+                    await db.SaveChangesAsync(ct);
+                    _logger.LogInformation("Archived {Count} closed trade(s) to history before cleanup", archived);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to archive closed trades before cleanup; continuing with deletion");
+            }
+        }
+
         if (allData)
         {
+            await db.ClosedTradeHistory.ExecuteDeleteAsync(ct);
             ordersRemoved    = await db.Orders.ExecuteDeleteAsync(ct);
             positionsRemoved = await db.Positions.ExecuteDeleteAsync(ct);
             signalsRemoved   = await db.TradingSignals.ExecuteDeleteAsync(ct);
             auditsRemoved    = await db.AuditLogs.ExecuteDeleteAsync(ct);
+
+            try
+            {
+                var cachePath = Path.Combine(AppContext.BaseDirectory, "Data", "angel-instrument-master.json");
+                if (File.Exists(cachePath))
+                {
+                    File.Delete(cachePath);
+                }
+                _instrumentMaster.ResetLoadState();
+                _logger.LogInformation("Deleted Angel instrument master cache file and reset in-memory index");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete instrument master cache file");
+            }
         }
         else
         {

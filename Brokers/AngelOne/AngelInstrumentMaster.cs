@@ -1,7 +1,8 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
-using Microsoft.Extensions.Logging;
 
 namespace NexusApp.Brokers.AngelOne;
 
@@ -28,33 +29,59 @@ namespace NexusApp.Brokers.AngelOne;
 /// </summary>
 public sealed class AngelInstrumentMaster
 {
-    private const string MasterUrl =
-        "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json";
+    /// <summary>
+    /// Generous timeout for the one-a-day master download (~25 MB). Deliberately longer
+    /// than the shared "AngelOne" client timeout, which is tuned for small API calls.
+    /// </summary>
+    private static readonly TimeSpan MasterDownloadTimeout = TimeSpan.FromMinutes(5);
 
-    private readonly HttpClient _httpClient;
+    /// <summary>Number of download attempts before falling back to the cached copy.</summary>
+    private const int MasterDownloadAttempts = 3;
+
+    /// <summary>
+    /// Dedicated client for the large master download. Its <see cref="HttpClient.Timeout"/> is
+    /// disabled (infinite) so the per-call <see cref="MasterDownloadTimeout"/> linked token is the
+    /// only timeout authority. The shared "AngelOne" client keeps its short 30s timeout, which would
+    /// otherwise abort this ~25 MB download mid-stream regardless of the linked token.
+    /// </summary>
+    private readonly HttpClient _downloadClient;
+
     private readonly ILogger<AngelInstrumentMaster> _logger;
+    private readonly string _masterUrl;
     private readonly string _cachePath;
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
 
     private ConcurrentDictionary<string, MasterEntry> _byTradingSymbol =
         new(StringComparer.OrdinalIgnoreCase);
-    private List<MasterEntry> _optionIndex = new();
+    private List<MasterEntry> _optionIndex = [];
     private DateTime _loadedAtUtc;
 
     public AngelInstrumentMaster(
         IHttpClientFactory httpFactory,
-        ILogger<AngelInstrumentMaster> logger)
+        ILogger<AngelInstrumentMaster> logger,
+        IConfiguration configuration)
     {
-        _httpClient = httpFactory.CreateClient("AngelOne");
+        _downloadClient = httpFactory.CreateClient("AngelOne");
+        // Disable the client-level timeout for the master download; the linked
+        // CancellationToken (MasterDownloadTimeout) governs the deadline instead.
+        _downloadClient.Timeout = Timeout.InfiniteTimeSpan;
         _logger = logger;
+        _masterUrl = configuration["AngelOne:InstrumentMasterUrl"]
+            ?? throw new InvalidOperationException("AngelOne:InstrumentMasterUrl is not configured.");
         var dir = Path.Combine(AppContext.BaseDirectory, "Data");
         Directory.CreateDirectory(dir);
         _cachePath = Path.Combine(dir, "angel-instrument-master.json");
     }
 
-    public bool IsLoaded => _byTradingSymbol.Count > 0;
+    public bool IsLoaded => !_byTradingSymbol.IsEmpty;
     public int Count => _byTradingSymbol.Count;
     public DateTime LoadedAtUtc => _loadedAtUtc;
+
+    /// <summary>
+    /// True when the master is loaded in-memory <b>and</b> that load happened on
+    /// today's (local) date. Used to decide whether a login-time refresh is needed.
+    /// </summary>
+    public bool IsLoadedToday => IsLoaded && _loadedAtUtc != default && _loadedAtUtc.ToLocalTime().Date == DateTime.Today;
 
     /// <summary>
     /// Clears the in-memory index and forces the next <see cref="EnsureLoadedAsync"/>
@@ -63,9 +90,56 @@ public sealed class AngelInstrumentMaster
     public void ResetLoadState()
     {
         _byTradingSymbol = new(StringComparer.OrdinalIgnoreCase);
-        _optionIndex = new();
+        _optionIndex = [];
         _loadedAtUtc = default;
     }
+
+    /// <summary>
+    /// Forces a clean, once-per-day refresh: if the in-memory index was not loaded
+    /// today, the on-disk cache is deleted and a fresh copy is downloaded and
+    /// re-indexed. If it was already loaded today, this is a no-op. Safe to call on
+    /// every login click — it only does real work once per calendar day. Returns the
+    /// number of contracts loaded (0 if the download/parse failed).
+    /// </summary>
+    public async Task<int> RefreshDailyAsync(CancellationToken ct = default)
+    {
+        if (IsLoadedToday)
+            return Count;
+
+        await _refreshLock.WaitAsync(ct);
+        try
+        {
+            if (IsLoadedToday)
+                return Count;
+
+            // Drop stale in-memory index and delete the disk cache so EnsureLoadedAsync
+            // is guaranteed to re-download a fresh copy rather than reuse yesterday's file.
+            _byTradingSymbol = new(StringComparer.OrdinalIgnoreCase);
+            _optionIndex = [];
+            _loadedAtUtc = default;
+
+            try
+            {
+                if (File.Exists(_cachePath))
+                {
+                    File.Delete(_cachePath);
+                    _logger.LogInformation("Deleted stale instrument master cache for daily refresh ({Path})", _cachePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not delete instrument master cache; will re-download anyway");
+            }
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
+
+        await EnsureLoadedAsync(ct);
+        return Count;
+    }
+
 
     /// <summary>
     /// Ensures the master file is loaded. If cached copy on disk is present and less than
@@ -105,16 +179,66 @@ public sealed class AngelInstrumentMaster
 
             if (string.IsNullOrWhiteSpace(json))
             {
-                _logger.LogInformation("Downloading Angel instrument master from {Url}", MasterUrl);
-                json = await _httpClient.GetStringAsync(MasterUrl, ct);
+                _logger.LogInformation("Downloading Angel instrument master from {Url}", _masterUrl);
                 try
                 {
-                    await File.WriteAllTextAsync(_cachePath, json, ct);
-                    _logger.LogInformation("Cached Angel instrument master to {Path} ({Bytes} bytes)", _cachePath, json.Length);
+                    // The master is a large (~25 MB) file. The shared "AngelOne" client
+                    // uses a short (30s) timeout tuned for normal API calls, which aborts
+                    // this download mid-stream — so nothing ever gets cached to reuse.
+                    // Use a dedicated client with no client-level timeout and a generous
+                    // per-call timeout via a linked token so a complete file lands on disk
+                    // once per day and can be reused thereafter. Retry a few times to ride
+                    // out transient network blips before falling back to the cache.
+                    for (var attempt = 1; attempt <= MasterDownloadAttempts; attempt++)
+                    {
+                        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        timeoutCts.CancelAfter(MasterDownloadTimeout);
+                        try
+                        {
+                            json = await DownloadMasterJsonAsync(timeoutCts.Token);
+                            break;
+                        }
+                        catch (Exception ex) when (!ct.IsCancellationRequested && attempt < MasterDownloadAttempts)
+                        {
+                            var delay = TimeSpan.FromSeconds(2 * attempt);
+                            _logger.LogWarning(ex,
+                                "Instrument master download attempt {Attempt}/{Max} failed; retrying in {Delay}s",
+                                attempt, MasterDownloadAttempts, delay.TotalSeconds);
+                            await Task.Delay(delay, ct);
+                        }
+                    }
+
+                    // Trim the ~36 MB payload down to only the underlyings we actually
+                    // trade before caching/parsing. The endpoint has no server-side filter,
+                    // so we filter the downloaded JSON here: the cached file and every
+                    // subsequent reparse shrink from ~36 MB to a few hundred KB.
+                    if (string.IsNullOrWhiteSpace(json))
+                        throw new InvalidOperationException("Angel instrument master download returned no data.");
+
+                    json = FilterToSupportedUnderlyings(json);
+
+                    try
+                    {
+                        await File.WriteAllTextAsync(_cachePath, json, ct);
+                        _logger.LogInformation("Cached Angel instrument master to {Path} ({Bytes} bytes)", _cachePath, json.Length);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Could not persist instrument master cache");
+                    }
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
-                    _logger.LogWarning(ex, "Could not persist instrument master cache");
+                    // Today's download failed (timeout, network blip, Angel outage). Fall
+                    // back to the last good cached file — even if it is from a previous day —
+                    // so the app has a usable instrument master instead of an empty index.
+                    json = TryReadLastGoodCache();
+                    if (string.IsNullOrWhiteSpace(json))
+                    {
+                        _logger.LogError(ex, "Failed to download Angel instrument master and no cached copy is available");
+                        return;
+                    }
+                    _logger.LogWarning(ex, "Download failed; falling back to last cached instrument master ({Path})", _cachePath);
                 }
             }
 
@@ -132,6 +256,48 @@ public sealed class AngelInstrumentMaster
     }
 
     /// <summary>
+    /// Downloads the complete Angel instrument master in one response.
+    /// A failed response is discarded in full; the caller retries a new download from byte zero.
+    /// </summary>
+    private async Task<string> DownloadMasterJsonAsync(CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, _masterUrl);
+        using var response = await _downloadClient.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(
+            stream,
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: true,
+            bufferSize: 81920,
+            leaveOpen: false);
+
+        return await reader.ReadToEndAsync(ct);
+    }
+
+    /// <summary>
+    /// Reads the last successfully-persisted master file from disk, regardless of its age.
+    /// Used as a resilience fallback when today's download fails so the app can still
+    /// resolve symbols using yesterday's contracts rather than an empty index.
+    /// Returns null if no cached file exists or it cannot be read.
+    /// </summary>
+    private string? TryReadLastGoodCache()
+    {
+        try
+        {
+            if (File.Exists(_cachePath))
+                return File.ReadAllText(_cachePath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not read fallback instrument master cache ({Path})", _cachePath);
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Underlyings we actually trade. Non-listed index/stock options are dropped
     /// from the in-memory index to save memory (~90% reduction).
     /// </summary>
@@ -140,11 +306,75 @@ public sealed class AngelInstrumentMaster
         "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"
     };
 
-    /// <summary>Number of strikes (per index / per expiry / per CE|PE side) to retain.</summary>
-    private const int StrikesPerSide = 100;   // → 200 per (index, expiry) counting CE+PE
+    /// <summary>
+    /// Number of strikes (per index / per expiry / per CE|PE side) to retain around ATM.
+    /// Directional Telegram signals are frequently far-OTM, so this window must be wide
+    /// enough that a legitimate signal strike is never pruned away — otherwise the exact
+    /// expiry match fails and the fallback silently rolls the order onto a farther/monthly
+    /// contract. 100 strikes/side ≈ ±2,400 pts (NIFTY) / ±4,800 pts (BANKNIFTY), which
+    /// comfortably covers realistic signal strikes while staying memory-bounded (index
+    /// underlyings only, ≤ MaxExpiryDays).
+    /// </summary>
+    private const int StrikesPerSide = 100;  // → 200 per (index, expiry) counting CE+PE
 
     /// <summary>Expiries beyond this many days are dropped — we don't trade far-dated series.</summary>
     private const int MaxExpiryDays = 60;
+
+    /// <summary>
+    /// Filters the raw instrument-master JSON array down to only rows for the
+    /// <see cref="SupportedUnderlyings"/> we trade. The Angel endpoint cannot filter
+    /// server-side, so we do it here immediately after download: the cached file and
+    /// every subsequent parse shrink from ~36 MB (~100k rows) to a few hundred KB.
+    /// On any error the original JSON is returned unchanged so behaviour is never worse
+    /// than before.
+    /// </summary>
+    private string FilterToSupportedUnderlyings(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return json;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                return json;
+
+            var buffer = new ArrayBufferWriter<byte>(1 << 20);
+            using (var writer = new Utf8JsonWriter(buffer))
+            {
+                writer.WriteStartArray();
+                var kept = 0;
+                var total = 0;
+                foreach (var el in doc.RootElement.EnumerateArray())
+                {
+                    total++;
+                    if (el.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    var name = el.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String
+                        ? n.GetString()
+                        : null;
+                    if (string.IsNullOrWhiteSpace(name) || !SupportedUnderlyings.Contains(name))
+                        continue;
+
+                    el.WriteTo(writer);
+                    kept++;
+                }
+                writer.WriteEndArray();
+
+                _logger.LogInformation(
+                    "Filtered instrument master to supported underlyings: kept {Kept} of {Total} rows",
+                    kept, total);
+            }
+
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to pre-filter instrument master; caching full payload instead");
+            return json;
+        }
+    }
 
     private void LoadFromJson(string json)
     {
@@ -188,7 +418,14 @@ public sealed class AngelInstrumentMaster
             }
             else
             {
-                // Non-option (FUT / EQ / CDS / MCX) — keep for tradingsymbol lookups.
+                // Non-option (FUT / EQ / CDS / MCX). We only trade the supported index
+                // options, so retain non-options ONLY for those same underlyings
+                // (e.g. index FUTIDX / index spot used for CMP/LTP lookups). Everything
+                // else — the ~28k equities, stock F&O, currency and commodity rows — is
+                // dropped to save memory and speed up load/indexing.
+                if (!SupportedUnderlyings.Contains(entry.Name))
+                    continue;
+
                 byTs[entry.TradingSymbol] = entry;
             }
         }
@@ -258,6 +495,42 @@ public sealed class AngelInstrumentMaster
         if (string.IsNullOrWhiteSpace(tradingSymbol))
             return null;
         return _byTradingSymbol.TryGetValue(tradingSymbol, out var e) ? e : null;
+    }
+
+    /// <summary>
+    /// Returns the nearest listed (future) expiry date for the given underlying
+    /// straight from the loaded instrument master. This is the authoritative
+    /// source of truth — it already reflects weekly/monthly cadence, exchange
+    /// weekday rules and holiday shifts, so callers should prefer this over any
+    /// computed weekday heuristic. Returns <c>null</c> if the master isn't loaded
+    /// or the underlying has no listed contracts.
+    /// </summary>
+    /// <param name="underlying">Index/underlying name, e.g. NIFTY, SENSEX, BANKNIFTY.</param>
+    /// <param name="from">Only expiries on/after this date are considered (defaults to today).</param>
+    public DateTime? NearestExpiry(string underlying, DateTime? from = null)
+    {
+        if (_optionIndex.Count == 0)
+            return null;
+
+        var name = (underlying ?? string.Empty).Trim().ToUpperInvariant();
+        if (name.Length == 0)
+            return null;
+
+        var floor = (from ?? DateTime.Today).Date;
+
+        DateTime? nearest = null;
+        for (var i = 0; i < _optionIndex.Count; i++)
+        {
+            var e = _optionIndex[i];
+            if (!e.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (e.ExpiryDate == default || e.ExpiryDate.Date < floor)
+                continue;
+            if (nearest is null || e.ExpiryDate.Date < nearest.Value)
+                nearest = e.ExpiryDate.Date;
+        }
+
+        return nearest;
     }
 
     /// <summary>

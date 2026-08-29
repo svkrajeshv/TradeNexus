@@ -1,83 +1,346 @@
 @page "/positions"
+@using System.Text.Json
 @using Microsoft.EntityFrameworkCore
 @using MudBlazor
 @using NexusApp.Data
+@using NexusApp.Helpers
 @using NexusApp.Models
 @inject IDbContextFactory<TradingDbContext> DbFactory
 @inject ISnackbar Snackbar
+@inject ITradingEngine TradingEngine
+@inject IJSRuntime JS
+@using NexusApp.Interfaces
 
-<PageTitle>Positions</PageTitle>
+@using Microsoft.AspNetCore.SignalR.Client
+@inject NavigationManager Nav
+@implements IAsyncDisposable
+
+<PageTitle>NexusApp - Positions</PageTitle>
 
 <MudText Typo="Typo.h4" Class="mb-4">Positions</MudText>
 
-<MudTabs Elevation="2" ApplyEffectsToContainer="true" Rounded="true" PanelClass="pa-4">
-    <MudTabPanel Text="Open" Icon="@Icons.Material.Filled.OpenInNew">
-        <MudTable Items="_open" Dense="true" Hover="true" Striped="true">
-            <HeaderContent>
-                <MudTh>Opened</MudTh>
-                <MudTh>Symbol</MudTh>
-                <MudTh>Qty</MudTh>
-                <MudTh>Entry</MudTh>
-                <MudTh>LTP</MudTh>
-                <MudTh>SL</MudTh>
-                <MudTh>Targets</MudTh>
-                <MudTh>P&amp;L</MudTh>
-                <MudTh>P&amp;L %</MudTh>
-            </HeaderContent>
-            <RowTemplate>
-                <MudTd>@context.OpenedAt.ToLocalTime().ToString("HH:mm:ss")</MudTd>
-                <MudTd>@context.Symbol</MudTd>
-                <MudTd>@context.Quantity</MudTd>
-                <MudTd>@context.EntryPrice</MudTd>
-                <MudTd>@context.CurrentPrice</MudTd>
-                <MudTd>@(context.StopLoss?.ToString() ?? "-")</MudTd>
-                <MudTd>@string.Join(" / ", context.Targets)</MudTd>
-                <MudTd><MudText Color="@(context.UnrealizedPnL >= 0 ? Color.Success : Color.Error)">@context.UnrealizedPnL.ToString("N2")</MudText></MudTd>
-                <MudTd>@context.UnrealizedPnLPercentage.ToString("N2")%</MudTd>
-            </RowTemplate>
-        </MudTable>
-    </MudTabPanel>
-    <MudTabPanel Text="Closed" Icon="@Icons.Material.Filled.CheckCircleOutline">
-        <MudTable Items="_closed" Dense="true" Hover="true" Striped="true">
-            <HeaderContent>
-                <MudTh>Closed</MudTh>
-                <MudTh>Symbol</MudTh>
-                <MudTh>Qty</MudTh>
-                <MudTh>Entry</MudTh>
-                <MudTh>Exit</MudTh>
-                <MudTh>Realised P&amp;L</MudTh>
-            </HeaderContent>
-            <RowTemplate>
-                <MudTd>@context.ClosedAt?.ToLocalTime().ToString("HH:mm:ss")</MudTd>
-                <MudTd>@context.Symbol</MudTd>
-                <MudTd>@context.Quantity</MudTd>
-                <MudTd>@context.EntryPrice</MudTd>
-                <MudTd>@(context.ClosingPrice?.ToString() ?? "-")</MudTd>
-                <MudTd><MudText Color="@((context.RealizedPnL ?? 0) >= 0 ? Color.Success : Color.Error)">@((context.RealizedPnL ?? 0).ToString("N2"))</MudText></MudTd>
-            </RowTemplate>
-        </MudTable>
-    </MudTabPanel>
-</MudTabs>
+<MudPaper Elevation="2" Class="pa-2 pa-sm-4 rounded-lg">
+    <MudGrid Spacing="2" Class="mb-3">
+        <MudItem xs="12" sm="4">
+            <MudPaper Class="pa-3" Outlined="true">
+                <MudText Typo="Typo.caption" Color="Color.Secondary">Open Unrealised P&amp;L</MudText>
+                <MudText Typo="Typo.h6" Color="@PnlColor(OpenUnrealizedPnl)">
+                    ₹@OpenUnrealizedPnl.ToString("N2")
+                </MudText>
+            </MudPaper>
+        </MudItem>
+        <MudItem xs="12" sm="4">
+            <MudPaper Class="pa-3" Outlined="true">
+                <MudText Typo="Typo.caption" Color="Color.Secondary">Closed Realised P&amp;L</MudText>
+                <MudText Typo="Typo.h6" Color="@PnlColor(ClosedRealizedPnl)">
+                    ₹@ClosedRealizedPnl.ToString("N2")
+                </MudText>
+            </MudPaper>
+        </MudItem>
+        <MudItem xs="12" sm="4">
+            <MudPaper Class="pa-3" Outlined="true">
+                <MudText Typo="Typo.caption" Color="Color.Secondary">Overall P&amp;L</MudText>
+                <MudText Typo="Typo.h6" Color="@PnlColor(OverallPnl)">
+                    ₹@OverallPnl.ToString("N2")
+                </MudText>
+            </MudPaper>
+        </MudItem>
+    </MudGrid>
+    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-3" Wrap="Wrap.Wrap">
+        <MudToggleGroup T="StatusFilter" @bind-Value="_filter" Color="Color.Primary" Size="Size.Small" CheckMark="true" Outlined="true">
+            <MudToggleItem Value="StatusFilter.All">All (@_all.Count)</MudToggleItem>
+            <MudToggleItem Value="StatusFilter.Open">Open (@_all.Count(p => p.ClosedAt == null))</MudToggleItem>
+            <MudToggleItem Value="StatusFilter.Closed">Closed (@_all.Count(p => p.ClosedAt != null))</MudToggleItem>
+        </MudToggleGroup>
+        @if (_selectedPositions.Count > 0)
+        {
+            <MudButton Variant="Variant.Filled" Color="Color.Error" StartIcon="@Icons.Material.Filled.Close" OnClick="SquareOffSelectedAsync" Size="Size.Small">
+                Square Off Selected (@_selectedPositions.Count)
+            </MudButton>
+        }
+    </MudStack>
+
+    <MudTable Items="FilteredPositions" MultiSelection="true" @bind-SelectedItems="_selectedPositions"
+              HorizontalScrollbar="true" Dense="true" Hover="true" Striped="true"
+              GroupBy="_groupDefinition" GroupHeaderStyle="background-color:var(--mud-palette-background-grey)">
+        <ColGroup>
+            <col style="width:40px;" />
+        </ColGroup>
+        <HeaderContent>
+            <MudTh>Status</MudTh>
+            <MudTh>Entry Time</MudTh>
+            <MudTh>Exit Time</MudTh>
+            <MudTh>Channel</MudTh>
+            <MudTh>Symbol</MudTh>
+            <MudTh>Qty</MudTh>
+            <MudTh>Entry</MudTh>
+            <MudTh>LTP / Exit</MudTh>
+            <MudTh>SL</MudTh>
+            <MudTh>Targets</MudTh>
+            <MudTh>P&amp;L</MudTh>
+            <MudTh>P&amp;L %</MudTh>
+        </HeaderContent>
+        <GroupHeaderTemplate>
+            <MudTh Class="mud-table-cell-custom-group" colspan="12">
+                <MudText Typo="Typo.subtitle2"><b>@context.Key</b> (@context.Items.Count())</MudText>
+            </MudTh>
+        </GroupHeaderTemplate>
+        <RowTemplate>
+            <MudTd DataLabel="Status">
+                @if (context.ClosedAt == null)
+                {
+                    <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Filled">Open</MudChip>
+                }
+                else
+                {
+                    <MudChip T="string" Size="Size.Small" Color="Color.Default" Variant="Variant.Outlined">Closed</MudChip>
+                }
+            </MudTd>
+            <MudTd DataLabel="Entry Time">
+                @context.OpenedAt.ToIstString("hh:mm:ss tt")
+            </MudTd>
+            <MudTd DataLabel="Exit Time">
+                @(context.ClosedAt.HasValue ? context.ClosedAt.Value.ToIstString("hh:mm:ss tt") : "-")
+            </MudTd>
+            <MudTd DataLabel="Channel">
+                @if (!string.IsNullOrWhiteSpace(context.Signal?.ChannelName))
+                {
+                    <MudTooltip Text="@context.Signal.ChannelName">
+                        <MudAvatar Class="channel-monogram" Size="Size.Small" Color="Color.Info">
+                            @GetChannelMonogram(context.Signal.ChannelName)
+                        </MudAvatar>
+                    </MudTooltip>
+                }
+                else
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">-</MudText>
+                }
+            </MudTd>
+            <MudTd DataLabel="Symbol">@context.Symbol</MudTd>
+            <MudTd DataLabel="Qty">@context.Quantity</MudTd>
+            <MudTd DataLabel="Entry">@context.EntryPrice</MudTd>
+            <MudTd DataLabel="LTP / Exit">
+                @(context.ClosedAt == null ? context.CurrentPrice.ToString("N2") : (context.ClosingPrice?.ToString("N2") ?? "-"))
+            </MudTd>
+            <MudTd DataLabel="SL">@(context.StopLoss?.ToString() ?? "-")</MudTd>
+            <MudTd DataLabel="Targets">@(context.Targets.Count > 0 ? string.Join(" / ", context.Targets) : "-")</MudTd>
+            <MudTd DataLabel="P&L">
+                @{
+                    var pnl = context.ClosedAt == null ? context.UnrealizedPnL : (context.RealizedPnL ?? 0);
+                }
+                <MudText Color="@(pnl >= 0 ? Color.Success : Color.Error)">@pnl.ToString("N2")</MudText>
+            </MudTd>
+            <MudTd DataLabel="P&L %">
+                @(context.ClosedAt == null ? context.UnrealizedPnLPercentage.ToString("N2") + "%" : "-")
+            </MudTd>
+        </RowTemplate>
+    </MudTable>
+</MudPaper>
 
 @code {
-    private List<NexusApp.Models.Position> _open = new();
-    private List<NexusApp.Models.Position> _closed = new();
+    private List<NexusApp.Models.Position> _all = new();
+    private HashSet<NexusApp.Models.Position> _selectedPositions = new();
+    private HubConnection? _hub;
+    private StatusFilter _filter = StatusFilter.All;
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    private enum StatusFilter { All, Open, Closed }
+
+    private IEnumerable<NexusApp.Models.Position> FilteredPositions => _filter switch
+    {
+        StatusFilter.Open => _all.Where(p => p.ClosedAt == null),
+        StatusFilter.Closed => _all.Where(p => p.ClosedAt != null),
+        _ => _all
+    };
+
+    private decimal OpenUnrealizedPnl => _all
+        .Where(p => p.ClosedAt == null)
+        .Sum(p => p.UnrealizedPnL);
+
+    private decimal ClosedRealizedPnl => _all
+        .Where(p => p.ClosedAt != null)
+        .Sum(p => p.RealizedPnL ?? 0m);
+
+    private decimal OverallPnl => OpenUnrealizedPnl + ClosedRealizedPnl;
+
+    private static Color PnlColor(decimal pnl) => pnl >= 0 ? Color.Success : Color.Error;
+
+    // Groups the consolidated grid into "Open" / "Closed" sections.
+    private readonly TableGroupDefinition<NexusApp.Models.Position> _groupDefinition = new()
+    {
+        Selector = p => p.ClosedAt == null ? "Open Positions" : "Closed Positions",
+        Indentation = false,
+        Expandable = false
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        try
+        {
+            _hub = new HubConnectionBuilder()
+                .WithUrl(Nav.ToAbsoluteUri("/tradingHub"))
+                .WithAutomaticReconnect()
+                .Build();
+
+            _hub.On("PositionChanged", async () =>
+            {
+                await InvokeAsync(async () =>
+                {
+                    await LoadAsync();
+                    StateHasChanged();
+                });
+            });
+
+            _hub.On<JsonElement>("CmpTick", payload =>
+            {
+                _ = InvokeAsync(() =>
+                {
+                    if (payload.ValueKind != JsonValueKind.Array)
+                        return;
+
+                    var changed = false;
+                    foreach (var item in payload.EnumerateArray())
+                    {
+                        if (!TryGetProp(item, out var symbolProp, "Symbol", "symbol") ||
+                            !TryGetProp(item, out var cmpProp, "Cmp", "cmp") ||
+                            symbolProp.ValueKind != JsonValueKind.String ||
+                            !TryGetDecimal(cmpProp, out var cmp) || cmp <= 0)
+                        {
+                            continue;
+                        }
+
+                        var symbol = symbolProp.GetString();
+                        if (string.IsNullOrWhiteSpace(symbol))
+                            continue;
+
+                        foreach (var position in _all.Where(p =>
+                                     p.ClosedAt == null &&
+                                     string.Equals(p.Symbol, symbol, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            position.CurrentPrice = cmp;
+                            var isShort = position.Signal?.Action == SignalAction.Sell;
+                            position.UnrealizedPnL = PnlCalculator.UnrealizedPnl(
+                                position.EntryPrice, cmp, position.Quantity, isShort);
+                            position.UnrealizedPnLPercentage = position.EntryPrice > 0
+                                ? position.UnrealizedPnL / (position.EntryPrice * position.Quantity) * 100m
+                                : 0m;
+                            changed = true;
+                        }
+                    }
+
+                    if (changed)
+                        StateHasChanged();
+                });
+            });
+
+            _hub.On("OrderStatusChanged", async () =>
+            {
+                await InvokeAsync(async () =>
+                {
+                    await LoadAsync();
+                    StateHasChanged();
+                });
+            });
+
+            await _hub.StartAsync();
+        }
+        catch { /* hub is best-effort */ }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_hub is not null)
+        {
+            try { await _hub.DisposeAsync(); } catch { }
+        }
+    }
+
+    private static bool TryGetProp(JsonElement element, out JsonElement value, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (element.TryGetProperty(name, out value))
+                return true;
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static bool TryGetDecimal(JsonElement element, out decimal value)
+    {
+        if (element.ValueKind == JsonValueKind.Number && element.TryGetDecimal(out value))
+            return true;
+
+        if (element.ValueKind == JsonValueKind.String &&
+            decimal.TryParse(element.GetString(), out value))
+            return true;
+
+        value = 0m;
+        return false;
+    }
 
     private async Task LoadAsync()
     {
         try
         {
             using var db = await DbFactory.CreateDbContextAsync();
-            _open = await db.Positions.AsNoTracking().Where(p => p.ClosedAt == null)
+            var selectedIds = _selectedPositions.Select(p => p.Id).ToHashSet();
+
+            var open = await db.Positions.AsNoTracking().Include(p => p.Signal).Where(p => p.ClosedAt == null)
                 .OrderByDescending(p => p.OpenedAt).ToListAsync();
-            _closed = await db.Positions.AsNoTracking().Where(p => p.ClosedAt != null)
+            var closed = await db.Positions.AsNoTracking().Include(p => p.Signal).Where(p => p.ClosedAt != null)
                 .OrderByDescending(p => p.ClosedAt).Take(100).ToListAsync();
+
+            // Consolidated list: open positions first, then most-recent closed.
+            _all = open.Concat(closed).ToList();
+
+            if (selectedIds.Count > 0)
+            {
+                // Only open positions remain selectable for square-off.
+                _selectedPositions = _all.Where(p => p.ClosedAt == null && selectedIds.Contains(p.Id)).ToHashSet();
+            }
         }
         catch (Exception ex)
         {
             Snackbar.Add($"Load failed: {ex.Message}", Severity.Error);
         }
+    }
+
+    private async Task SquareOffSelectedAsync()
+    {
+        if (_selectedPositions.Count == 0) return;
+
+        var confirmed = await JS.InvokeAsync<bool>("confirm", $"Are you sure you want to square off {_selectedPositions.Count} position(s) at Market price?");
+        if (!confirmed) return;
+
+        var successCount = 0;
+        foreach (var pos in _selectedPositions.ToList())
+        {
+            var ok = await TradingEngine.SquareOffPositionAsync(pos.Id);
+            if (ok) successCount++;
+        }
+
+        if (successCount > 0)
+        {
+            Snackbar.Add($"Successfully squared off {successCount} position(s).", Severity.Success);
+            _selectedPositions.Clear();
+            await LoadAsync();
+        }
+        else
+        {
+            Snackbar.Add("Failed to square off selected positions.", Severity.Error);
+        }
+    }
+
+    private static string GetChannelMonogram(string? channelName)
+    {
+        if (string.IsNullOrWhiteSpace(channelName))
+            return "-";
+
+        var words = channelName.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return words.Length == 1
+            ? words[0][..Math.Min(2, words[0].Length)].ToUpperInvariant()
+            : string.Concat(words.Take(2).Select(word => char.ToUpperInvariant(word[0])));
     }
 }

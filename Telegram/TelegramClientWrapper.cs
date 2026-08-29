@@ -165,7 +165,8 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
                         MessageId = msg.id,
                         Text = msg.message,
                         Timestamp = msg.date,
-                        SenderName = channelName
+                        SenderName = channelName,
+                        ReplyToMessageId = msg.reply_to is MessageReplyHeader header ? (long?)header.reply_to_msg_id : null
                     });
                 }
             }
@@ -269,6 +270,39 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Sends a text message to a specific Telegram channel/chat, or to "Saved Messages" (Self) if targetChannel is null/empty.
+    /// </summary>
+    public async Task<bool> SendTextMessageAsync(string text, string? targetChannel = null)
+    {
+        if (_client is null || !IsConnected)
+        {
+            _logger.LogWarning("Cannot send Telegram message: Client is not initialized or not connected.");
+            return false;
+        }
+
+        try
+        {
+            InputPeer? peer = null;
+            if (!string.IsNullOrWhiteSpace(targetChannel))
+            {
+                peer = ResolveChannelPeer(targetChannel.Trim());
+            }
+
+            peer ??= new InputPeerSelf();
+
+            await _client.SendMessageAsync(peer, text);
+            _logger.LogInformation("Successfully sent Telegram notification to {Target}", string.IsNullOrWhiteSpace(targetChannel) ? "Saved Messages (Self)" : targetChannel);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send Telegram text message");
+            return false;
+        }
+    }
+
+
     public ValueTask DisposeAsync()
     {
         _ = DisconnectAsync();
@@ -315,12 +349,14 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
                 if (msg is null || string.IsNullOrWhiteSpace(msg.message)) continue;
 
                 var senderName = ResolveSenderName(msg);
+                var replyToId = msg.reply_to is MessageReplyHeader header ? (long?)header.reply_to_msg_id : null;
                 var tm = new TelegramMessage
                 {
                     MessageId = msg.id,
                     Text = msg.message,
                     Timestamp = msg.date,
-                    SenderName = senderName
+                    SenderName = senderName,
+                    ReplyToMessageId = replyToId
                 };
 
                 if (MessageReceived is not null)
@@ -402,19 +438,39 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
             return normalized;
         }
 
-        var instanceId = Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID");
-        var isAzureAppService = !string.IsNullOrWhiteSpace(instanceId);
+        // On Azure App Service the %HOME% directory (D:\home) is durable, shared
+        // network storage that survives app restarts, idle unloads and scaling.
+        // Path.GetTempPath() (D:\local\Temp) is per-instance scratch storage that is
+        // wiped on every recycle, which deletes the authorized Telegram session and
+        // forces a fresh OTP login. Persist the session under %HOME% so the login
+        // remains valid once the OTP is verified.
+        var homeDir = Environment.GetEnvironmentVariable("HOME");
+        var isAzureAppService = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID"))
+            && !string.IsNullOrWhiteSpace(homeDir);
 
         string resolvedPath;
         if (isAzureAppService)
         {
-            // Use per-instance local temp storage to avoid cross-instance/session lock contention.
-            resolvedPath = Path.Combine(Path.GetTempPath(), "nexusapp", "telegram", instanceId!, normalized);
+            // Durable, cross-instance persistent storage on Azure App Service.
+            resolvedPath = Path.Combine(homeDir!, "data", "nexusapp", "telegram", normalized);
         }
         else
         {
             var appDataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NexusApp", "telegram");
             resolvedPath = Path.Combine(appDataRoot, normalized);
+
+            // If a session file exists in the current working directory / app base directory,
+            // copy it to the persistent appDataRoot if appDataRoot doesn't have one yet.
+            try
+            {
+                var localFile = Path.Combine(AppContext.BaseDirectory, normalized);
+                if (File.Exists(localFile) && !File.Exists(resolvedPath))
+                {
+                    EnsureSessionDirectoryExists(resolvedPath);
+                    File.Copy(localFile, resolvedPath, overwrite: false);
+                }
+            }
+            catch { }
         }
 
         EnsureSessionDirectoryExists(resolvedPath);
@@ -423,29 +479,42 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
 
     private Client CreateClientWithSessionFallback()
     {
-        try
+        const int maxRetries = 5;
+        for (var attempt = 1; attempt <= maxRetries; attempt++)
         {
-            return new Client(ConfigProvider);
-        }
-        catch (IOException ex) when (IsSessionFileLocked(ex))
-        {
-            var fallbackSessionPath = CreateProcessScopedSessionPath(_sessionPath);
-            _logger.LogWarning(ex,
-                "Telegram session file is locked: {SessionPath}. Retrying with process session file {FallbackSessionPath}",
-                _sessionPath,
-                fallbackSessionPath);
-            _sessionPath = fallbackSessionPath;
-            return new Client(ConfigProvider);
-        }
-        catch (FormatException ex)
-        {
-            _logger.LogWarning(ex,
-                "Telegram session file is invalid at {SessionPath}. Deleting it and retrying with a fresh session file.",
-                _sessionPath);
+            try
+            {
+                return new Client(ConfigProvider);
+            }
+            catch (IOException ex) when (IsSessionFileLocked(ex))
+            {
+                if (attempt < maxRetries)
+                {
+                    _logger.LogWarning(ex,
+                        "Telegram session file is locked: {SessionPath}. Retrying connection (attempt {Attempt}/{MaxRetries})...",
+                        _sessionPath, attempt, maxRetries);
+                    Thread.Sleep(1000);
+                }
+                else
+                {
+                    _logger.LogError(ex,
+                        "Telegram session file is locked by another process: {SessionPath}. Could not acquire session file after {MaxRetries} retries.",
+                        _sessionPath, maxRetries);
+                    throw;
+                }
+            }
+            catch (FormatException ex)
+            {
+                _logger.LogWarning(ex,
+                    "Telegram session file is invalid at {SessionPath}. Deleting it and retrying with a fresh session file.",
+                    _sessionPath);
 
-            TryDeleteSessionFile(_sessionPath);
-            return new Client(ConfigProvider);
+                TryDeleteSessionFile(_sessionPath);
+                return new Client(ConfigProvider);
+            }
         }
+
+        return new Client(ConfigProvider);
     }
 
     private void TryDeleteSessionFile(string sessionPath)
@@ -469,25 +538,6 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
         return win32Code == errorSharingViolation || win32Code == errorLockViolation;
     }
 
-    private static string CreateProcessScopedSessionPath(string basePath)
-    {
-        var directory = Path.GetDirectoryName(basePath);
-        var fileName = Path.GetFileNameWithoutExtension(basePath);
-        var extension = Path.GetExtension(basePath);
-        var pid = Environment.ProcessId;
-
-        var scopedName = string.IsNullOrEmpty(extension)
-            ? $"{fileName}.{pid}"
-            : $"{fileName}.{pid}{extension}";
-
-        var scopedPath = string.IsNullOrWhiteSpace(directory)
-            ? scopedName
-            : Path.Combine(directory, scopedName);
-
-        EnsureSessionDirectoryExists(scopedPath);
-        return scopedPath;
-    }
-
     private static void EnsureSessionDirectoryExists(string sessionFilePath)
     {
         var directory = Path.GetDirectoryName(sessionFilePath);
@@ -508,6 +558,7 @@ public sealed class TelegramMessage
     public string Text { get; set; } = string.Empty;
     public DateTime Timestamp { get; set; }
     public string SenderName { get; set; } = string.Empty;
+    public long? ReplyToMessageId { get; set; }
 }
 
 public sealed class AvailableChannel

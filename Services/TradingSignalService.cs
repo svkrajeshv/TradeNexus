@@ -22,7 +22,7 @@ public class TradingSignalService
     /// <summary>
     /// Creates a new trading signal from parsed signal data
     /// </summary>
-    public async Task<int?> CreateSignalAsync(ParsedSignal parsedSignal, long telegramMessageId, DateTime telegramTimestamp)
+    public async Task<int?> CreateSignalAsync(ParsedSignal parsedSignal, long telegramMessageId, DateTime telegramTimestamp, string? channelName = null)
     {
         try
         {
@@ -42,7 +42,8 @@ public class TradingSignalService
                 Targets = parsedSignal.Targets,
                 ExpiryDate = parsedSignal.ExpiryDate,
                 Status = SignalStatus.Parsed,
-                SignalDelayMs = (decimal)(DateTime.UtcNow - telegramTimestamp).TotalMilliseconds
+                SignalDelayMs = (decimal)(DateTime.UtcNow - telegramTimestamp).TotalMilliseconds,
+                ChannelName = channelName ?? parsedSignal.ChannelName
             };
 
             _context.TradingSignals.Add(signal);
@@ -88,6 +89,7 @@ public class TradingSignalService
         {
             return await _context.TradingSignals
                 .AsNoTracking()
+                .Include(s => s.Orders)
                 .OrderByDescending(s => s.ReceivedTimestamp)
                 .Take(count)
                 .ToListAsync();
@@ -155,6 +157,7 @@ public class TradingSignalService
         try
         {
             return await _context.TradingSignals
+                .AsNoTracking()
                 .AnyAsync(s => s.TelegramMessageId == telegramMessageId);
         }
         catch (Exception ex)
@@ -176,6 +179,7 @@ public class TradingSignalService
 
             return await _context.TradingSignals
                 .AsNoTracking()
+                .Include(s => s.Orders)
                 .Where(s => s.ReceivedTimestamp >= startOfDay && s.ReceivedTimestamp < endOfDay)
                 .OrderByDescending(s => s.ReceivedTimestamp)
                 .ToListAsync();

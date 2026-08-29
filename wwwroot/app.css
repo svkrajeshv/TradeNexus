@@ -58,3 +58,227 @@ h1:focus {
 .form-floating > .form-control-plaintext:focus::placeholder, .form-floating > .form-control:focus::placeholder {
     text-align: start;
 }
+
+/* Mobile Responsiveness Utilities */
+.table-responsive {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+}
+
+.mud-table-container {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 600px) {
+    .mud-table-cell {
+        padding: 6px 8px !important;
+        font-size: 0.78rem !important;
+    }
+    .mud-chip-content {
+        font-size: 0.72rem !important;
+    }
+    .mud-typography-h4 {
+        font-size: 1.5rem !important;
+    }
+    .mud-typography-h6 {
+        font-size: 1.1rem !important;
+    }
+}
+
+/* Stat & Settings Cards Color Accents */
+.stat-card-blue, .settings-card-blue { border-top: 4px solid #2563eb !important; }
+.stat-card-purple, .settings-card-purple { border-top: 4px solid #7c3aed !important; }
+.stat-card-cyan, .settings-card-cyan { border-top: 4px solid #0891b2 !important; }
+.stat-card-green, .settings-card-green { border-top: 4px solid #16a34a !important; }
+.stat-card-red, .settings-card-red { border-top: 4px solid #dc2626 !important; }
+.settings-card-amber { border-top: 4px solid #d97706 !important; }
+
+/* ==========================================================================
+   Light Theme Rules (.mud-theme-light)
+   ========================================================================== */
+.mud-theme-light,
+.mud-theme-light body,
+.mud-theme-light .mud-layout,
+.mud-theme-light .mud-main-content {
+    background-color: #e2e8f0 !important;
+}
+
+.mud-theme-light .mud-paper {
+    background-color: #ffffff !important;
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 4px 12px 0 rgba(15, 23, 42, 0.08), 0 2px 4px -1px rgba(15, 23, 42, 0.04) !important;
+}
+
+.mud-theme-light .mud-input-outlined,
+.mud-theme-light .mud-select,
+.mud-theme-light .mud-picker {
+    background-color: #ffffff !important;
+    border-radius: 6px !important;
+}
+
+.mud-theme-light .mud-input-outlined .mud-input-slot {
+    background-color: #ffffff !important;
+}
+
+.mud-theme-light .mud-table-root {
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 8px !important;
+}
+
+.mud-theme-light .mud-table-head,
+.mud-theme-light .mud-table-head tr,
+.mud-theme-light .mud-table-head th,
+.mud-theme-light th.mud-table-cell {
+    background-color: #cbd5e1 !important;
+    border-bottom: 2px solid #64748b !important;
+}
+
+.mud-theme-light .mud-table-head .mud-table-cell,
+.mud-theme-light th.mud-table-cell {
+    color: #0f172a !important;
+    font-weight: 700 !important;
+    font-size: 0.82rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    border-right: 1px solid #94a3b8 !important;
+    padding: 10px 12px !important;
+}
+
+.mud-theme-light .mud-table-cell {
+    border-bottom: 1px solid #cbd5e1 !important;
+    border-right: 1px solid #e2e8f0 !important;
+    color: #1e293b !important;
+}
+
+.mud-theme-light .mud-table-striped tbody tr:nth-of-type(odd) {
+    background-color: #f8fafc !important;
+}
+
+.mud-theme-light .mud-table-hover tbody tr:hover {
+    background-color: #e0f2fe !important;
+}
+
+.mud-theme-light .mud-appbar {
+    background-color: #0f172a !important;
+    color: #f8fafc !important;
+    border-bottom: 1px solid #1e293b !important;
+}
+
+.mud-theme-light .mud-drawer {
+    background-color: #ffffff !important;
+    border-right: 1px solid #cbd5e1 !important;
+}
+
+/* ==========================================================================
+   Dark Theme Rules (.mud-theme-dark)
+   ========================================================================== */
+.mud-theme-dark,
+.mud-theme-dark body,
+.mud-theme-dark .mud-layout,
+.mud-theme-dark .mud-main-content {
+    background-color: #0f172a !important;
+}
+
+.mud-theme-dark .mud-paper {
+    background-color: #1e293b !important;
+    border: 1px solid #334155 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 4px 12px 0 rgba(0, 0, 0, 0.35) !important;
+}
+
+.mud-theme-dark .mud-appbar {
+    background-color: #0f172a !important;
+    color: #f8fafc !important;
+    border-bottom: 1px solid #334155 !important;
+}
+
+.mud-theme-dark .mud-drawer {
+    background-color: #1e293b !important;
+    border-right: 1px solid #334155 !important;
+}
+
+.mud-theme-dark .mud-table-root {
+    border: 1px solid #334155 !important;
+    border-radius: 8px !important;
+}
+
+.mud-theme-dark .mud-table-head,
+.mud-theme-dark .mud-table-head tr,
+.mud-theme-dark .mud-table-head th,
+.mud-theme-dark th.mud-table-cell {
+    background-color: #334155 !important;
+    border-bottom: 2px solid #475569 !important;
+}
+
+.mud-theme-dark .mud-table-head .mud-table-cell,
+.mud-theme-dark th.mud-table-cell {
+    color: #f8fafc !important;
+    font-weight: 700 !important;
+    font-size: 0.82rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    border-right: 1px solid #475569 !important;
+    padding: 10px 12px !important;
+}
+
+.mud-theme-dark .mud-table-cell {
+    border-bottom: 1px solid #334155 !important;
+    border-right: 1px solid #273548 !important;
+    color: #f8fafc !important;
+}
+
+.mud-theme-dark .mud-table-striped tbody tr:nth-of-type(odd) {
+    background-color: #172234 !important;
+}
+
+.mud-theme-dark .mud-table-hover tbody tr:hover {
+    background-color: #26354a !important;
+}
+
+.mud-theme-dark .mud-input-outlined,
+.mud-theme-dark .mud-select,
+.mud-theme-dark .mud-picker {
+    background-color: #1e293b !important;
+    border-radius: 6px !important;
+}
+
+.mud-theme-dark .mud-input-outlined .mud-input-slot {
+    background-color: #1e293b !important;
+    color: #f8fafc !important;
+}
+
+/* ==========================================================================
+   Channel & Status Chip Custom Formatting
+   ========================================================================== */
+.channel-chip {
+    max-width: 145px !important;
+    font-size: 0.70rem !important;
+    font-weight: 500 !important;
+    height: 22px !important;
+    line-height: 22px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+}
+
+.channel-chip .mud-chip-content {
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    font-size: 0.70rem !important;
+}
+
+.remarks-cell {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.25;
+}

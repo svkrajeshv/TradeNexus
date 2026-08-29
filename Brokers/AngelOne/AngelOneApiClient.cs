@@ -4,7 +4,6 @@ using System.Net.NetworkInformation;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Extensions.Logging;
 
 namespace NexusApp.Brokers.AngelOne;
 
@@ -15,25 +14,26 @@ namespace NexusApp.Brokers.AngelOne;
 /// Secured: /rest/secure/angelbroking/{service}/v1/{action}
 /// Reference: github.com/angel-one/smartapi-python
 /// </summary>
-public class AngelOneApiClient
+public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient> logger, string apiUrl)
 {
     // Correct production endpoints from official Angel One SDK
-    private const string DefaultBaseUrl  = "https://apiconnect.angelone.in";
-    private const string LoginPath       = "/rest/auth/angelbroking/user/v1/loginByPassword";
-    private const string RefreshPath     = "/rest/auth/angelbroking/jwt/v1/generateTokens";
-    private const string ProfilePath     = "/rest/secure/angelbroking/user/v1/getProfile";
-    private const string PlaceOrderPath  = "/rest/secure/angelbroking/order/v1/placeOrder";
+    private const string DefaultBaseUrl = "https://apiconnect.angelone.in";
+    private const string PublicIpLookupUrl = "https://api.ipify.org";
+    private const string LoginPath = "/rest/auth/angelbroking/user/v1/loginByPassword";
+    private const string RefreshPath = "/rest/auth/angelbroking/jwt/v1/generateTokens";
+    private const string ProfilePath = "/rest/secure/angelbroking/user/v1/getProfile";
+    private const string PlaceOrderPath = "/rest/secure/angelbroking/order/v1/placeOrder";
     private const string ModifyOrderPath = "/rest/secure/angelbroking/order/v1/modifyOrder";
     private const string CancelOrderPath = "/rest/secure/angelbroking/order/v1/cancelOrder";
-    private const string OrderBookPath   = "/rest/secure/angelbroking/order/v1/getOrderBook";
-    private const string TradeBookPath   = "/rest/secure/angelbroking/order/v1/getTradeBook";
-    private const string PositionPath    = "/rest/secure/angelbroking/order/v1/getPosition";
-    private const string LtpDataPath     = "/rest/secure/angelbroking/order/v1/getLtpData";
-    private const string SearchPath      = "/rest/secure/angelbroking/order/v1/searchScrip";
+    private const string OrderBookPath = "/rest/secure/angelbroking/order/v1/getOrderBook";
+    private const string TradeBookPath = "/rest/secure/angelbroking/order/v1/getTradeBook";
+    private const string PositionPath = "/rest/secure/angelbroking/order/v1/getPosition";
+    private const string LtpDataPath = "/rest/secure/angelbroking/order/v1/getLtpData";
+    private const string SearchPath = "/rest/secure/angelbroking/order/v1/searchScrip";
 
-    private readonly HttpClient _httpClient;
-    private readonly ILogger<AngelOneApiClient> _logger;
-    private readonly string _baseUrl;
+    private readonly HttpClient _httpClient = httpClient;
+    private readonly ILogger<AngelOneApiClient> _logger = logger;
+    private readonly string _baseUrl = string.IsNullOrWhiteSpace(apiUrl) ? DefaultBaseUrl : apiUrl.TrimEnd('/');
 
     private string? _apiKey;
     private string? _jwtToken;
@@ -42,17 +42,20 @@ public class AngelOneApiClient
     private string? _clientCode;
     private DateTime _tokenExpiresAt;
 
+    // In-memory credential cache for emergency re-login when refresh-token flow fails.
+    private string? _lastLoginClientId;
+    private string? _lastLoginPassword;
+    private string? _lastLoginTwoFactor;
+    private string? _lastLoginApiUrl;
+
+    // Serialises token refreshes so concurrent AG8001 ("Invalid Token") failures
+    // trigger a single re-auth instead of a stampede of refresh calls.
+    private readonly SemaphoreSlim _reauthLock = new(1, 1);
+
     private static readonly string _localIp = GetLocalIp();
     private static readonly string _macAddr = GetMacAddress();
     private static string _publicIp = string.Empty;
     private static bool _publicIpResolved;
-
-    public AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient> logger, string apiUrl)
-    {
-        _httpClient = httpClient;
-        _logger     = logger;
-        _baseUrl    = string.IsNullOrWhiteSpace(apiUrl) ? DefaultBaseUrl : apiUrl.TrimEnd('/');
-    }
 
     /// <summary>
     /// Pre-configures API key and optional URL override before calling AuthenticateAsync via IBroker.
@@ -70,10 +73,10 @@ public class AngelOneApiClient
     private string? _pendingApiUrlOverride;
 
     public bool IsAuthenticated => !string.IsNullOrEmpty(_jwtToken) && DateTime.UtcNow < _tokenExpiresAt;
-    public string? JwtToken     => _jwtToken;
-    public string? FeedToken    => _feedToken;
-    public string? ClientCode   => _clientCode;
-    public string? ApiKey       => _apiKey;
+    public string? JwtToken => _jwtToken;
+    public string? FeedToken => _feedToken;
+    public string? ClientCode => _clientCode;
+    public string? ApiKey => _apiKey;
 
     /// <summary>
     /// Authenticates with Angel One SmartAPI.
@@ -98,6 +101,12 @@ public class AngelOneApiClient
                 : (_pendingApiUrlOverride ?? _baseUrl);
             _apiKey = apiKey ?? _apiKey;
 
+            // Cache latest login inputs for fallback re-login if JWT refresh fails later.
+            _lastLoginClientId = clientId;
+            _lastLoginPassword = password;
+            _lastLoginTwoFactor = twoFactorCode;
+            _lastLoginApiUrl = baseUrl;
+
             var requestBody = new
             {
                 clientcode = clientId,
@@ -106,7 +115,7 @@ public class AngelOneApiClient
             };
 
             using var msg = BuildRequest(HttpMethod.Post, $"{baseUrl}{LoginPath}", requestBody);
-            var response  = await _httpClient.SendAsync(msg);
+            var response = await _httpClient.SendAsync(msg);
 
             var body = await response.Content.ReadAsStringAsync();
             _logger.LogDebug("Login response {StatusCode}: {Body}", (int)response.StatusCode, body);
@@ -128,10 +137,10 @@ public class AngelOneApiClient
 
             if (json.TryGetProperty("data", out var data) && data.ValueKind != JsonValueKind.Null)
             {
-                _jwtToken     = data.TryGetString("jwtToken");
+                _jwtToken = data.TryGetString("jwtToken");
                 _refreshToken = data.TryGetString("refreshToken");
-                _feedToken    = data.TryGetString("feedToken");
-                _clientCode   = clientId;
+                _feedToken = data.TryGetString("feedToken");
+                _clientCode = clientId;
                 _tokenExpiresAt = DateTime.UtcNow.AddHours(23);
                 _logger.LogInformation("Angel One login successful for {ClientId} (feedToken={HasFeed})", clientId, !string.IsNullOrEmpty(_feedToken));
                 return !string.IsNullOrEmpty(_jwtToken);
@@ -152,27 +161,37 @@ public class AngelOneApiClient
         try
         {
             if (string.IsNullOrEmpty(_refreshToken))
+            {
+                _logger.LogWarning("Token refresh skipped: refresh token is missing.");
                 return false;
+            }
 
             var requestBody = new { refreshToken = _refreshToken };
             using var msg = BuildRequest(HttpMethod.Post, $"{_baseUrl}{RefreshPath}", requestBody, authorize: true);
-            var response  = await _httpClient.SendAsync(msg);
+            var response = await _httpClient.SendAsync(msg);
 
             if (!response.IsSuccessStatusCode)
+            {
+                var failBody = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Token refresh failed HTTP {StatusCode}: {Body}", (int)response.StatusCode, Truncate(failBody, 400));
                 return false;
+            }
 
-            var json = JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
+            var raw = await response.Content.ReadAsStringAsync();
+            var json = JsonSerializer.Deserialize<JsonElement>(raw);
             if (json.TryGetProperty("data", out var data))
             {
                 var newToken = data.TryGetString("jwtToken");
                 if (!string.IsNullOrEmpty(newToken))
                 {
-                    _jwtToken       = newToken;
+                    _jwtToken = newToken;
                     _tokenExpiresAt = DateTime.UtcNow.AddHours(23);
                     _logger.LogInformation("Token refreshed successfully");
                     return true;
                 }
             }
+
+            _logger.LogWarning("Token refresh returned no jwtToken. Body: {Body}", Truncate(raw, 400));
             return false;
         }
         catch (Exception ex)
@@ -190,8 +209,9 @@ public class AngelOneApiClient
         try
         {
             var requestBody = new { exchange, tradingsymbol, symboltoken };
-            using var msg = BuildRequest(HttpMethod.Post, $"{_baseUrl}{LtpDataPath}", requestBody, authorize: true);
-            var response  = await _httpClient.SendAsync(msg);
+            using var response = await SendWithRetryAsync(
+                () => BuildRequest(HttpMethod.Post, $"{_baseUrl}{LtpDataPath}", requestBody, authorize: true),
+                $"GetLtp({tradingsymbol})", allowAmbiguousRetry: true);
             if (!response.IsSuccessStatusCode)
                 return null;
             return JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
@@ -208,8 +228,9 @@ public class AngelOneApiClient
         try
         {
             var requestBody = new { exchange, searchscrip };
-            using var msg = BuildRequest(HttpMethod.Post, $"{_baseUrl}{SearchPath}", requestBody, authorize: true);
-            var response  = await _httpClient.SendAsync(msg);
+            using var response = await SendWithRetryAsync(
+                () => BuildRequest(HttpMethod.Post, $"{_baseUrl}{SearchPath}", requestBody, authorize: true),
+                $"SearchScrip({searchscrip})", allowAmbiguousRetry: true);
             if (!response.IsSuccessStatusCode)
                 return null;
             return JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
@@ -225,8 +246,15 @@ public class AngelOneApiClient
     {
         try
         {
-            using var msg = BuildRequest(HttpMethod.Post, $"{_baseUrl}{PlaceOrderPath}", orderRequest, authorize: true);
-            var response  = await _httpClient.SendAsync(msg);
+            // Order placement is NOT idempotent. Only retry connection-level
+            // failures that provably never reached the exchange; a timeout or
+            // 5xx after send is ambiguous and must not be retried (duplicate risk).
+            // Stale-token (AG8001) recovery is safe here: such responses are
+            // rejections that never reached the exchange (no orderid), so the
+            // single re-auth + replay inside SendWithRetryAsync cannot double-fill.
+            using var response = await SendWithRetryAsync(
+                () => BuildRequest(HttpMethod.Post, $"{_baseUrl}{PlaceOrderPath}", orderRequest, authorize: true),
+                "PlaceOrder", allowAmbiguousRetry: false);
             var body = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
             {
@@ -254,21 +282,105 @@ public class AngelOneApiClient
         }
     }
 
-    public async Task<JsonElement?> GetOrderBookAsync()    => await GetSecureAsync(OrderBookPath);
+    /// <summary>
+    /// True when an Angel One response body reports an invalid/expired session token
+    /// (errorCode AG8001 or message "Invalid Token") despite an HTTP 200.
+    /// </summary>
+    private static bool IsInvalidTokenResponse(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return false;
+        try
+        {
+            var json = JsonSerializer.Deserialize<JsonElement>(body);
+            if (json.ValueKind != JsonValueKind.Object)
+                return false;
+
+            if (json.TryGetProperty("errorCode", out var code)
+                && string.Equals(code.GetString(), "AG8001", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (json.TryGetProperty("message", out var msg)
+                && string.Equals(msg.GetString(), "Invalid Token", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        catch
+        {
+            // Not JSON we understand — treat as not-an-invalid-token response.
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Ensures a valid session token after an AG8001 ("Invalid Token") response.
+    /// Serialised via <see cref="_reauthLock"/> so concurrent failures cause a
+    /// single refresh; late arrivals see the freshly-minted token and skip re-auth.
+    /// </summary>
+    private async Task<bool> EnsureFreshTokenAsync(string? tokenAtFailure)
+    {
+        await _reauthLock.WaitAsync();
+        try
+        {
+            // Another caller already refreshed while we waited — reuse their token.
+            if (!string.Equals(tokenAtFailure, _jwtToken, StringComparison.Ordinal)
+                && !string.IsNullOrEmpty(_jwtToken))
+            {
+                return true;
+            }
+
+            if (await RefreshTokenAsync())
+                return true;
+
+            // Refresh token can expire server-side; fall back to full login using
+            // the latest successful login credentials cached in-memory.
+            if (string.IsNullOrWhiteSpace(_lastLoginClientId) ||
+                string.IsNullOrWhiteSpace(_lastLoginPassword) ||
+                string.IsNullOrWhiteSpace(_lastLoginTwoFactor))
+            {
+                _logger.LogError("Session re-login failed: cached login credentials unavailable.");
+                return false;
+            }
+
+            _logger.LogWarning("Refresh-token flow failed; attempting full Angel One re-login.");
+            var reloginOk = await LoginAsync(
+                _lastLoginClientId,
+                _lastLoginPassword,
+                _lastLoginTwoFactor,
+                _apiKey,
+                _lastLoginApiUrl);
+
+            if (!reloginOk)
+            {
+                _logger.LogError("Full re-login failed after refresh-token failure.");
+                return false;
+            }
+
+            _logger.LogInformation("Session recovered via full re-login.");
+            return true;
+        }
+        finally
+        {
+            _reauthLock.Release();
+        }
+    }
+
+    public async Task<JsonElement?> GetOrderBookAsync() => await GetSecureAsync(OrderBookPath);
     public async Task<JsonElement?> GetPositionBookAsync() => await GetSecureAsync(PositionPath);
-    public async Task<JsonElement?> GetTradeBookAsync()    => await GetSecureAsync(TradeBookPath);
+    public async Task<JsonElement?> GetTradeBookAsync() => await GetSecureAsync(TradeBookPath);
 
     public async Task<bool> ModifyOrderAsync(object modifyRequest)
     {
-        using var msg = BuildRequest(HttpMethod.Post, $"{_baseUrl}{ModifyOrderPath}", modifyRequest, authorize: true);
-        var response  = await _httpClient.SendAsync(msg);
+        using var response = await SendWithRetryAsync(
+            () => BuildRequest(HttpMethod.Post, $"{_baseUrl}{ModifyOrderPath}", modifyRequest, authorize: true),
+            "ModifyOrder", allowAmbiguousRetry: false);
         return response.IsSuccessStatusCode;
     }
 
     public async Task<(bool Success, string? Message)> CancelOrderAsync(object cancelRequest)
     {
-        using var msg = BuildRequest(HttpMethod.Post, $"{_baseUrl}{CancelOrderPath}", cancelRequest, authorize: true);
-        var response = await _httpClient.SendAsync(msg);
+        using var response = await SendWithRetryAsync(
+            () => BuildRequest(HttpMethod.Post, $"{_baseUrl}{CancelOrderPath}", cancelRequest, authorize: true),
+            "CancelOrder", allowAmbiguousRetry: false);
         var body = await response.Content.ReadAsStringAsync();
 
         if (!response.IsSuccessStatusCode)
@@ -312,8 +424,9 @@ public class AngelOneApiClient
     {
         try
         {
-            using var msg = BuildRequest(HttpMethod.Get, $"{_baseUrl}{path}", body: null, authorize: true);
-            var response  = await _httpClient.SendAsync(msg);
+            using var response = await SendWithRetryAsync(
+                () => BuildRequest(HttpMethod.Get, $"{_baseUrl}{path}", body: null, authorize: true),
+                $"GET {path}", allowAmbiguousRetry: true);
             if (!response.IsSuccessStatusCode)
                 return null;
             return JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
@@ -322,6 +435,106 @@ public class AngelOneApiClient
         {
             _logger.LogError(ex, "Error calling {Path}", path);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Sends an HTTP request with bounded retry-with-backoff for transient failures.
+    /// A fresh <see cref="HttpRequestMessage"/> is built per attempt via
+    /// <paramref name="requestFactory"/> (messages cannot be resent).
+    /// </summary>
+    /// <param name="allowAmbiguousRetry">
+    /// When <c>true</c> (idempotent reads), ambiguous transients — timeouts and
+    /// HTTP 5xx/429 after the request was sent — are also retried. When
+    /// <c>false</c> (non-idempotent writes such as order placement), only
+    /// connection-level failures that provably never reached the exchange are
+    /// retried, to avoid duplicate submissions.
+    /// </param>
+    private async Task<HttpResponseMessage> SendWithRetryAsync(
+        Func<HttpRequestMessage> requestFactory,
+        string operation,
+        bool allowAmbiguousRetry,
+        int maxAttempts = TransientRetry.DefaultMaxAttempts)
+    {
+        var reauthAttempted = false;
+        for (int attempt = 0; ; attempt++)
+        {
+            var isLastAttempt = attempt >= maxAttempts - 1;
+
+            FailureKind kind;
+            HttpResponseMessage? response = null;
+            Exception? failure = null;
+
+            // Capture the token this attempt will send, so re-auth can detect
+            // whether another caller already refreshed concurrently.
+            var tokenSent = _jwtToken;
+
+            using var msg = requestFactory();
+            var authorized = msg.Headers.Contains("Authorization");
+            try
+            {
+                response = await _httpClient.SendAsync(msg);
+                kind = TransientRetry.Classify(response.StatusCode);
+                if (kind == FailureKind.Success)
+                {
+                    // Angel returns HTTP 200 with errorCode AG8001 ("Invalid Token")
+                    // when the REST JWT has gone stale. Re-authenticate once and replay.
+                    // Buffering the body here lets callers still read it afterwards.
+                    if (authorized && !reauthAttempted)
+                    {
+                        var body = await response.Content.ReadAsStringAsync();
+                        if (IsInvalidTokenResponse(body))
+                        {
+                            reauthAttempted = true;
+                            _logger.LogWarning(
+                                "{Operation} rejected with Invalid Token (AG8001); refreshing session and replaying once.",
+                                operation);
+                            response.Dispose();
+                            if (await EnsureFreshTokenAsync(tokenSent))
+                            {
+                                attempt--; // replay doesn't count against transient budget
+                                continue;
+                            }
+                            _logger.LogError("{Operation}: token refresh failed after Invalid Token.", operation);
+                            throw new InvalidOperationException("Angel One session expired and could not be refreshed.");
+                        }
+                    }
+                    return response;
+                }
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+                kind = TransientRetry.Classify(ex);
+            }
+
+            // Decide whether this failure kind is retryable for this operation.
+            var retryable = kind switch
+            {
+                FailureKind.ConnectFailure => true,
+                FailureKind.Transient => allowAmbiguousRetry,
+                _ => false
+            };
+
+            if (!retryable || isLastAttempt)
+            {
+                if (failure is not null)
+                {
+                    if (retryable)
+                        _logger.LogWarning(failure,
+                            "{Operation} failed after {Attempts} attempt(s) ({Kind}); giving up",
+                            operation, attempt + 1, kind);
+                    throw failure;
+                }
+                return response!;
+            }
+
+            response?.Dispose();
+            var delay = TransientRetry.BackoffFor(attempt);
+            _logger.LogWarning(
+                "{Operation} transient failure ({Kind}) on attempt {Attempt}/{Max}; retrying in {Delay}ms",
+                operation, kind, attempt + 1, maxAttempts, (int)delay.TotalMilliseconds);
+            await Task.Delay(delay);
         }
     }
 
@@ -335,12 +548,12 @@ public class AngelOneApiClient
         if (!string.IsNullOrWhiteSpace(_apiKey))
             req.Headers.TryAddWithoutValidation("X-PrivateKey", _apiKey);
 
-        req.Headers.TryAddWithoutValidation("X-UserType",       "USER");
-        req.Headers.TryAddWithoutValidation("X-SourceID",       "WEB");
-        req.Headers.TryAddWithoutValidation("X-ClientLocalIP",  _localIp);
+        req.Headers.TryAddWithoutValidation("X-UserType", "USER");
+        req.Headers.TryAddWithoutValidation("X-SourceID", "WEB");
+        req.Headers.TryAddWithoutValidation("X-ClientLocalIP", _localIp);
         req.Headers.TryAddWithoutValidation("X-ClientPublicIP", string.IsNullOrEmpty(_publicIp) ? _localIp : _publicIp);
-        req.Headers.TryAddWithoutValidation("X-MACAddress",     _macAddr);
-        req.Headers.TryAddWithoutValidation("Accept",           "application/json");
+        req.Headers.TryAddWithoutValidation("X-MACAddress", _macAddr);
+        req.Headers.TryAddWithoutValidation("Accept", "application/json");
 
         if (authorize && !string.IsNullOrEmpty(_jwtToken))
             req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_jwtToken}");
@@ -364,9 +577,9 @@ public class AngelOneApiClient
             return;
         try
         {
-            using var cts      = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            var ip             = await _httpClient.GetStringAsync("https://api.ipify.org", cts.Token);
-            _publicIp          = ip.Trim();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var ip = await _httpClient.GetStringAsync(PublicIpLookupUrl, cts.Token);
+            _publicIp = ip.Trim();
             _logger.LogDebug("Resolved public IP: {Ip}", _publicIp);
         }
         catch
@@ -445,7 +658,7 @@ public class AngelOneApiClient
 
             using var hmac = new HMACSHA1(key);
             var hash = hmac.ComputeHash(counter.ToArray());
-            var offset = hash[hash.Length - 1] & 0x0F;
+            var offset = hash[^1] & 0x0F;
             var binary =
                 ((hash[offset] & 0x7F) << 24) |
                 ((hash[offset + 1] & 0xFF) << 16) |
@@ -464,7 +677,7 @@ public class AngelOneApiClient
     private static byte[] DecodeBase32(string input)
     {
         if (string.IsNullOrWhiteSpace(input))
-            return Array.Empty<byte>();
+            return [];
 
         var cleaned = input.Trim().TrimEnd('=').ToUpperInvariant();
         var bytes = new List<byte>((cleaned.Length * 5) / 8);
@@ -492,7 +705,7 @@ public class AngelOneApiClient
             }
         }
 
-        return bytes.ToArray();
+        return [.. bytes];
     }
 }
 

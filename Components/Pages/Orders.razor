@@ -11,16 +11,22 @@
 @inject NavigationManager Nav
 @implements IAsyncDisposable
 
-<PageTitle>Orders</PageTitle>
+<PageTitle>NexusApp - Orders</PageTitle>
 
 <MudText Typo="Typo.h4" Class="mb-4">Orders</MudText>
 
-<MudStack Row="true" Class="mb-3" Spacing="2" AlignItems="AlignItems.Center">
-    <MudSelect T="string" @bind-Value="_filter" Label="Status" Dense="true" Variant="Variant.Outlined" Margin="Margin.Dense">
+<MudStack Row="true" Wrap="Wrap.Wrap" Class="mb-3" Spacing="2" AlignItems="AlignItems.Center">
+    <MudSelect T="string" Value="_tradeFilter" ValueChanged="OnTradeFilterChanged" Label="Trade Type" Dense="true" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width: 120px;">
+        <MudSelectItem Value="@("paper")">Paper</MudSelectItem>
+        <MudSelectItem Value="@("both")">Both</MudSelectItem>
+        <MudSelectItem Value="@("real")">Real</MudSelectItem>
+    </MudSelect>
+    <MudSelect T="string" Value="_filter" ValueChanged="OnStatusFilterChanged" Label="Status" Dense="true" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width: 120px;">
         <MudSelectItem Value="@("all")">All</MudSelectItem>
         <MudSelectItem Value="@("pending")">Pending</MudSelectItem>
         <MudSelectItem Value="@("executed")">Executed</MudSelectItem>
         <MudSelectItem Value="@("rejected")">Rejected</MudSelectItem>
+        <MudSelectItem Value="@("failed")">Failed</MudSelectItem>
         <MudSelectItem Value="@("cancelled")">Cancelled</MudSelectItem>
     </MudSelect>
     <MudButton OnClick="LoadAsync" Color="Color.Primary" Variant="Variant.Filled">Refresh</MudButton>
@@ -34,24 +40,43 @@
     </MudButton>
 </MudStack>
 
-<MudPaper Class="pa-4" Elevation="2">
-    <MudTable Items="_orders" Dense="true" Hover="true" Striped="true">
+<MudPaper Class="pa-2 pa-sm-4" Elevation="2">
+    <MudTable Items="SortedOrders" HorizontalScrollbar="true" Dense="true" Hover="true" Striped="true">
         <HeaderContent>
-            <MudTh>Time</MudTh>
-            <MudTh>Broker Id</MudTh>
-            <MudTh>Symbol</MudTh>
-            <MudTh>Side</MudTh>
-            <MudTh>Qty</MudTh>
-            <MudTh>Price</MudTh>
-            <MudTh>Filled</MudTh>
-            <MudTh>Status</MudTh>
-            <MudTh>Remarks</MudTh>
+            <MudTh Style="white-space:nowrap;"><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnTime)">Time @SortIndicator(_sortColumnTime)</MudButton></MudTh>
+            <MudTh Style="width:130px; max-width:145px;"><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnChannel)">Channel @SortIndicator(_sortColumnChannel)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnAccount)">Account @SortIndicator(_sortColumnAccount)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnBrokerId)">Broker Id @SortIndicator(_sortColumnBrokerId)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnSymbol)">Symbol @SortIndicator(_sortColumnSymbol)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnSide)">Side @SortIndicator(_sortColumnSide)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnQty)">Qty @SortIndicator(_sortColumnQty)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnPrice)">Price @SortIndicator(_sortColumnPrice)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnFilled)">Filled @SortIndicator(_sortColumnFilled)</MudButton></MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnStatus)">Status @SortIndicator(_sortColumnStatus)</MudButton></MudTh>
+            <MudTh Style="min-width:200px; max-width:260px;">Remarks</MudTh>
             <MudTh>Actions</MudTh>
         </HeaderContent>
         <RowTemplate>
-            <MudTd>@context.CreatedAt.ToLocalTime().ToString("HH:mm:ss")</MudTd>
-            <MudTd>@(string.IsNullOrWhiteSpace(context.BrokerId) ? "-" : context.BrokerId)</MudTd>
-            <MudTd>@context.Symbol</MudTd>
+            <MudTd Style="white-space:nowrap;">@context.CreatedAt.ToIstString("hh:mm:ss tt")</MudTd>
+            <MudTd Style="width:130px; max-width:145px; overflow:hidden;">
+                @if (!string.IsNullOrWhiteSpace(context.Signal?.ChannelName))
+                {
+                    <MudChip T="string" Class="channel-chip" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info" title="@context.Signal.ChannelName">@context.Signal.ChannelName</MudChip>
+                }
+                else
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">-</MudText>
+                }
+            </MudTd>
+            <MudTd Style="white-space:nowrap;">
+                <MudText Typo="Typo.body2" Style="font-weight:500; white-space:nowrap;">@(context.TradingAccount?.Name ?? "Default")</MudText>
+                @if (!string.IsNullOrWhiteSpace(context.TradingAccount?.BrokerType))
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">@context.TradingAccount.BrokerType</MudText>
+                }
+            </MudTd>
+            <MudTd>@(FormatBrokerId(context.BrokerId))</MudTd>
+            <MudTd Style="white-space:nowrap;">@context.Symbol</MudTd>
             <MudTd>
                 <MudChip T="string" Size="Size.Small" Color="@(context.Side == OrderSide.Buy ? Color.Success : Color.Error)">@context.Side</MudChip>
             </MudTd>
@@ -61,7 +86,7 @@
             <MudTd>
                 <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
             </MudTd>
-            <MudTd Style="max-width:280px; white-space:normal; word-break:break-word;">
+            <MudTd Style="min-width:200px; max-width:260px;">
                 @if (string.IsNullOrWhiteSpace(context.ErrorMessage))
                 {
                     <MudText Typo="Typo.body2" Color="Color.Secondary">-</MudText>
@@ -69,8 +94,10 @@
                 else
                 {
                     <MudTooltip Text="@context.ErrorMessage">
-                        <MudText Typo="Typo.body2" Color="@(IsFailureStatus(context.Status) ? Color.Error : Color.Default)">
-                            @Truncate(context.ErrorMessage, 80)
+                        <MudText Typo="Typo.body2"
+                                 Class="remarks-cell"
+                                 Color="@(IsFailureStatus(context.Status) ? Color.Error : Color.Default)">
+                            @context.ErrorMessage
                         </MudText>
                     </MudTooltip>
                 }
@@ -91,10 +118,74 @@
 </MudPaper>
 
 @code {
+    private string _tradeFilter = "both";
     private string _filter = "all";
     private List<Order> _orders = new();
     private bool _cancelling;
     private HubConnection? _hub;
+
+    private const string _sortColumnTime = "time";
+    private const string _sortColumnChannel = "channel";
+    private const string _sortColumnAccount = "account";
+    private const string _sortColumnBrokerId = "brokerid";
+    private const string _sortColumnSymbol = "symbol";
+    private const string _sortColumnSide = "side";
+    private const string _sortColumnQty = "qty";
+    private const string _sortColumnPrice = "price";
+    private const string _sortColumnFilled = "filled";
+    private const string _sortColumnStatus = "status";
+
+    private string _sortColumn = _sortColumnTime;
+    private bool _sortDescending = true;
+
+    private IEnumerable<Order> SortedOrders =>
+        (_sortColumn, _sortDescending) switch
+        {
+            (_sortColumnChannel, true) => _orders.OrderByDescending(o => o.Signal?.ChannelName ?? string.Empty),
+            (_sortColumnChannel, false) => _orders.OrderBy(o => o.Signal?.ChannelName ?? string.Empty),
+
+            (_sortColumnAccount, true) => _orders.OrderByDescending(o => o.TradingAccount?.Name ?? string.Empty),
+            (_sortColumnAccount, false) => _orders.OrderBy(o => o.TradingAccount?.Name ?? string.Empty),
+
+            (_sortColumnBrokerId, true) => _orders.OrderByDescending(o => o.BrokerId ?? string.Empty),
+            (_sortColumnBrokerId, false) => _orders.OrderBy(o => o.BrokerId ?? string.Empty),
+
+            (_sortColumnSymbol, true) => _orders.OrderByDescending(o => o.Symbol ?? string.Empty),
+            (_sortColumnSymbol, false) => _orders.OrderBy(o => o.Symbol ?? string.Empty),
+
+            (_sortColumnSide, true) => _orders.OrderByDescending(o => o.Side),
+            (_sortColumnSide, false) => _orders.OrderBy(o => o.Side),
+
+            (_sortColumnQty, true) => _orders.OrderByDescending(o => o.Quantity),
+            (_sortColumnQty, false) => _orders.OrderBy(o => o.Quantity),
+
+            (_sortColumnPrice, true) => _orders.OrderByDescending(o => o.Price),
+            (_sortColumnPrice, false) => _orders.OrderBy(o => o.Price),
+
+            (_sortColumnFilled, true) => _orders.OrderByDescending(o => o.ExecutedPrice ?? decimal.MinValue),
+            (_sortColumnFilled, false) => _orders.OrderBy(o => o.ExecutedPrice ?? decimal.MinValue),
+
+            (_sortColumnStatus, true) => _orders.OrderByDescending(o => o.Status),
+            (_sortColumnStatus, false) => _orders.OrderBy(o => o.Status),
+
+            (_, true) => _orders.OrderByDescending(o => o.CreatedAt),
+            _ => _orders.OrderBy(o => o.CreatedAt)
+        };
+
+    private void ToggleSort(string column)
+    {
+        if (_sortColumn == column)
+        {
+            _sortDescending = !_sortDescending;
+            return;
+        }
+
+        _sortColumn = column;
+        _sortDescending = column == _sortColumnTime;
+    }
+
+    private string SortIndicator(string column) =>
+        _sortColumn == column ? (_sortDescending ? "↓" : "↑") : string.Empty;
 
     private int OpenOrderCount => _orders.Count(IsCancellable);
 
@@ -133,12 +224,19 @@
         try
         {
             using var db = await DbFactory.CreateDbContextAsync();
-            var q = db.Orders.AsNoTracking().OrderByDescending(o => o.CreatedAt).AsQueryable();
+            var q = db.Orders.AsNoTracking().Include(o => o.TradingAccount).Include(o => o.Signal).OrderByDescending(o => o.CreatedAt).AsQueryable();
+            q = _tradeFilter switch
+            {
+                "paper" => q.Where(o => o.TradingAccount != null && o.TradingAccount.ClientId.ToUpper() == "PAPER"),
+                "real" => q.Where(o => o.TradingAccount != null && o.TradingAccount.ClientId.ToUpper() != "PAPER"),
+                _ => q
+            };
             q = _filter switch
             {
                 "pending" => q.Where(o => o.Status == OrderStatus.Pending || o.Status == OrderStatus.Accepted),
                 "executed" => q.Where(o => o.Status == OrderStatus.Executed),
-                "rejected" => q.Where(o => o.Status == OrderStatus.Rejected || o.Status == OrderStatus.Failed),
+                 "rejected" => q.Where(o => o.Status == OrderStatus.Rejected),
+                 "failed" => q.Where(o => o.Status == OrderStatus.Failed),
                 "cancelled" => q.Where(o => o.Status == OrderStatus.Cancelled),
                 _ => q
             };
@@ -148,6 +246,18 @@
         {
             Snackbar.Add($"Load failed: {ex.Message}", Severity.Error);
         }
+    }
+
+    private async Task OnTradeFilterChanged(string value)
+    {
+        _tradeFilter = value;
+        await LoadAsync();
+    }
+
+    private async Task OnStatusFilterChanged(string value)
+    {
+        _filter = value;
+        await LoadAsync();
     }
 
     private async Task CancelOneAsync(Order order)
@@ -241,9 +351,6 @@
     private static bool IsFailureStatus(OrderStatus s) =>
         s == OrderStatus.Rejected || s == OrderStatus.Failed || s == OrderStatus.Cancelled;
 
-    private static string Truncate(string s, int max) =>
-        s.Length <= max ? s : s.Substring(0, max) + "…";
-
     private Color StatusColor(OrderStatus s) => s switch
     {
         OrderStatus.Executed => Color.Success,
@@ -252,4 +359,12 @@
         OrderStatus.Accepted => Color.Info,
         _ => Color.Warning
     };
+
+    private static string FormatBrokerId(string? brokerId)
+    {
+        if (string.IsNullOrWhiteSpace(brokerId)) return "-";
+        if (brokerId.StartsWith("PAPER-", StringComparison.OrdinalIgnoreCase) || brokerId.Equals("Paper Account", StringComparison.OrdinalIgnoreCase))
+            return "Paper Account";
+        return brokerId;
+    }
 }

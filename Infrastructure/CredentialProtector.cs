@@ -23,19 +23,33 @@ public static class CredentialProtector
         if (string.IsNullOrEmpty(plaintext))
             return string.Empty;
 
-        if (OperatingSystem.IsWindows())
+        // DPAPI CurrentUser only works on Windows when a real user profile is loaded.
+        // On Azure App Service (and other hosted Windows) the worker runs without a
+        // loaded profile, so ProtectedData.Protect throws "data protection operation
+        // was unsuccessful". DPAPI ciphertext is also machine/user-bound and cannot be
+        // decrypted after a restart or on another instance. In those environments use
+        // the portable AES scheme instead.
+        if (OperatingSystem.IsWindows() && CanUseDpapi())
         {
-            var bytes = Encoding.UTF8.GetBytes(plaintext);
-            var enc = ProtectedData.Protect(bytes, null, DataProtectionScope.CurrentUser);
-            return DpapiPrefix + Convert.ToBase64String(enc);
+            try
+            {
+                var bytes = Encoding.UTF8.GetBytes(plaintext);
+                var enc = ProtectedData.Protect(bytes, null, DataProtectionScope.CurrentUser);
+                return DpapiPrefix + Convert.ToBase64String(enc);
+            }
+            catch (CryptographicException)
+            {
+                // Profile/impersonation issue at runtime — fall back to AES.
+            }
         }
 
-        var key = DeriveKey(passphrase ?? "trading-app-default");
+        var key = DeriveKey(passphrase ?? DefaultPassphrase);
         using var aes = Aes.Create();
         aes.Key = key;
         aes.GenerateIV();
         using var enc2 = aes.CreateEncryptor();
-        var cipher = enc2.TransformFinalBlock(Encoding.UTF8.GetBytes(plaintext), 0, plaintext.Length);
+        var plainBytes = Encoding.UTF8.GetBytes(plaintext);
+        var cipher = enc2.TransformFinalBlock(plainBytes, 0, plainBytes.Length);
         var combined = new byte[aes.IV.Length + cipher.Length];
         Buffer.BlockCopy(aes.IV, 0, combined, 0, aes.IV.Length);
         Buffer.BlockCopy(cipher, 0, combined, aes.IV.Length, cipher.Length);
@@ -67,7 +81,7 @@ public static class CredentialProtector
             {
                 var combined = Convert.FromBase64String(cipher[AesPrefix.Length..]);
                 using var aes = Aes.Create();
-                aes.Key = DeriveKey(passphrase ?? "trading-app-default");
+                aes.Key = DeriveKey(passphrase ?? DefaultPassphrase);
                 var iv = new byte[16];
                 Buffer.BlockCopy(combined, 0, iv, 0, iv.Length);
                 aes.IV = iv;
@@ -86,7 +100,29 @@ public static class CredentialProtector
 
     private static byte[] DeriveKey(string passphrase)
     {
-        using var derive = new Rfc2898DeriveBytes(passphrase, Encoding.UTF8.GetBytes("trading-app-salt-v1"), 100_000, HashAlgorithmName.SHA256);
-        return derive.GetBytes(32);
+        return Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(passphrase), Encoding.UTF8.GetBytes("trading-app-salt-v1"), 100_000, HashAlgorithmName.SHA256, 32);
+    }
+
+    /// <summary>
+    /// The passphrase used for the portable AES scheme. Prefer an app setting /
+    /// environment variable (<c>NEXUSAPP_CRED_KEY</c>) so ciphertext stays decryptable
+    /// across restarts and instances; falls back to a fixed default for local dev.
+    /// </summary>
+    private static string DefaultPassphrase =>
+        Environment.GetEnvironmentVariable("NEXUSAPP_CRED_KEY") is { Length: > 0 } key
+            ? key
+            : "trading-app-default";
+
+    /// <summary>
+    /// DPAPI CurrentUser requires a loaded Windows user profile. On Azure App Service
+    /// the worker typically runs without one, so we avoid DPAPI there and use AES.
+    /// </summary>
+    private static bool CanUseDpapi()
+    {
+        // Azure App Service / Functions set these; when present, skip DPAPI.
+        var isAppService =
+            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID")) ||
+            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WEBSITE_SITE_NAME"));
+        return !isAppService;
     }
 }

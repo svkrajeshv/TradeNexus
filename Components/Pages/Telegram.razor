@@ -5,7 +5,7 @@
 @inject ISnackbar Snackbar
 @implements IDisposable
 
-<PageTitle>Telegram</PageTitle>
+<PageTitle>NexusApp - Telegram</PageTitle>
 
 <MudText Typo="Typo.h4" Class="mb-4">Telegram Integration</MudText>
 
@@ -13,18 +13,18 @@
 
     <!-- Connection status card -->
     <MudItem xs="12">
-        <MudPaper Class="pa-4" Elevation="2">
-            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="3">
-                <MudIcon Icon="@Icons.Material.Filled.Send" Size="Size.Large" />
+        <MudPaper Class="pa-3 pa-sm-4" Elevation="2">
+            <MudStack Row="true" Wrap="Wrap.Wrap" AlignItems="AlignItems.Center" Spacing="2">
+                <MudIcon Icon="@Icons.Material.Filled.Send" Size="Size.Large" Color="Color.Primary" />
                 <MudStack Spacing="0">
                     <MudText Typo="Typo.h6">Status</MudText>
                     <MudText Typo="Typo.caption" Color="Color.Secondary">@_statusDescription</MudText>
                 </MudStack>
                 <MudSpacer />
-                <MudChip T="string" Color="@StateColor(_state)" Variant="Variant.Filled">@_state.ToString()</MudChip>
+                <MudChip T="string" Color="@StateColor(_state)" Variant="Variant.Filled" Size="Size.Small">@_state.ToString()</MudChip>
                 @if (Manager.IsConnected)
                 {
-                    <MudChip T="string" Color="Color.Info" Variant="Variant.Outlined">
+                    <MudChip T="string" Color="Color.Info" Variant="Variant.Outlined" Size="Size.Small">
                         @($"{Manager.Client.MeUsername} · {Manager.Client.ChatCount} chats")
                     </MudChip>
                 }
@@ -34,7 +34,7 @@
             {
                 <MudDivider Class="my-3" />
                 <MudText Typo="Typo.subtitle2" Class="mb-2">Telegram sent a verification code. Enter it below:</MudText>
-                <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
+                <MudStack Row="true" Wrap="Wrap.Wrap" Spacing="2" AlignItems="AlignItems.Center">
                     <MudTextField T="string" @bind-Value="_code" Label="Verification code" Variant="Variant.Outlined"
                                   InputMode="InputMode.numeric" Class="flex-grow-1" />
                     <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="SubmitCode"
@@ -45,7 +45,7 @@
             {
                 <MudDivider Class="my-3" />
                 <MudText Typo="Typo.subtitle2" Class="mb-2">Two-factor authentication is enabled. Enter your Telegram cloud password:</MudText>
-                <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
+                <MudStack Row="true" Wrap="Wrap.Wrap" Spacing="2" AlignItems="AlignItems.Center">
                     <MudTextField T="string" @bind-Value="_password" Label="2FA password" InputType="InputType.Password"
                                   Variant="Variant.Outlined" Class="flex-grow-1" />
                     <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="SubmitPassword"
@@ -55,8 +55,7 @@
         </MudPaper>
     </MudItem>
 
-    <!-- Credentials -->
-    <!-- Credentials & Forwarding -->
+    <!-- Left Column: Authentication, Trade Order Notifications & Signal Forwarding -->
     <MudItem xs="12" md="6">
         <MudStack Spacing="3">
             <MudPaper Class="pa-4" Elevation="2">
@@ -82,13 +81,24 @@
             </MudPaper>
 
             <MudPaper Class="pa-4" Elevation="2">
-                <MudText Typo="Typo.h6" Class="mb-3">Message Forwarding / Copying</MudText>
-                <MudTextField T="string" @bind-Value="_settings.DestinationChannel" Label="Destination Channel (title or username)"
-                              Placeholder="My Telegram Channel" Variant="Variant.Outlined" Class="mt-2" />
+                <MudText Typo="Typo.h6" Class="mb-3">Trade Order Notifications</MudText>
+                <MudTextField T="string" @bind-Value="_settings.OrderNotificationChannel" Label="Order Notifications Target Channel / Chat"
+                              Placeholder="Leave blank for Saved Messages (to me), or enter channel title or username" HelperText="Notifications for Placed Orders &amp; Square-Offs will be sent here. Leave blank for 'Saved Messages'." Variant="Variant.Outlined" Class="mt-2" />
+                <MudAlert Severity="Severity.Info" Class="mt-3" Dense="true">
+                    Trade order notifications (Placed Orders and Square-Offs with P&amp;L) will be sent to this destination (or Saved Messages if blank).
+                </MudAlert>
+                <MudButton Color="Color.Primary" Variant="Variant.Filled" StartIcon="@Icons.Material.Filled.Save"
+                           OnClick="SaveAsync" Class="mt-3">Save Notification Settings</MudButton>
+            </MudPaper>
+
+            <MudPaper Class="pa-4" Elevation="2">
+                <MudText Typo="Typo.h6" Class="mb-3">Signal Message Forwarding / Copying</MudText>
+                <MudTextField T="string" @bind-Value="_settings.DestinationChannel" Label="Signal Forwarding Destination Channel"
+                              Placeholder="e.g. My Signal Copy Channel" HelperText="Channel where incoming signal messages are copied/forwarded." Variant="Variant.Outlined" Class="mt-2" />
                 <MudSwitch T="bool" @bind-Value="_settings.ForwardOnlySignals" Color="Color.Primary" Label="Forward Only Valid Signals" Class="mt-2" />
                 <MudSwitch T="bool" @bind-Value="_settings.ForwardAsCopy" Color="Color.Primary" Label="Forward as Clean Copy (Hide original author)" Class="mt-2" />
                 <MudAlert Severity="Severity.Info" Class="mt-3" Dense="true">
-                    If configured, messages from monitored channels will be copied/forwarded to the destination channel. Ensure the account has post permissions in that channel.
+                    If configured, raw trading signals received from monitored channels will be copied to this destination channel.
                 </MudAlert>
                 <MudButton Color="Color.Primary" Variant="Variant.Filled" StartIcon="@Icons.Material.Filled.Save"
                            OnClick="SaveAsync" Class="mt-3">Save Forwarding Settings</MudButton>
@@ -96,78 +106,81 @@
         </MudStack>
     </MudItem>
 
-    <!-- Channels -->
+    <!-- Right Column: Channels to Monitor -->
     <MudItem xs="12" md="6">
-        <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.h6" Class="mb-3">Channels to Monitor</MudText>
-            <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
-                Add channels by their exact title (e.g. <em>Trade with Logic</em>) or @@username.
-                The bot only receives messages from channels your Telegram account has already joined.
-            </MudText>
+        <MudStack Spacing="3">
+            <MudPaper Class="pa-4" Elevation="2">
+                <MudText Typo="Typo.h6" Class="mb-3">Channels to Monitor</MudText>
+                <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
+                    Add channels by their exact title (e.g. <em>Trade with Logic</em>) or @@username.
+                    The bot only receives messages from channels your Telegram account has already joined.
+                </MudText>
 
-            <MudStack Row="true" Spacing="2" Class="mb-3">
-                <MudTextField T="string" @bind-Value="_newChannel" Label="Channel title or username"
-                              Placeholder="Trade with Logic"
-                              Variant="Variant.Outlined" Class="flex-grow-1"
-                              OnKeyDown="@((KeyboardEventArgs e) => { if (e.Key == "Enter") AddChannel(); })" />
-                <MudButton Color="Color.Primary" Variant="Variant.Filled" StartIcon="@Icons.Material.Filled.Add"
-                           OnClick="AddChannel">Add</MudButton>
-            </MudStack>
-
-            @if (_settings.Channels.Count == 0)
-            {
-                <MudAlert Severity="Severity.Warning" Dense="true">No channels configured. The listener will not receive any signals.</MudAlert>
-            }
-            else
-            {
-                <MudList T="string" Dense="true">
-                    @foreach (var ch in _settings.Channels)
-                    {
-                        <MudListItem T="string">
-                            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
-                                <MudIcon Icon="@Icons.Material.Filled.Tag" Size="Size.Small" />
-                                <MudText Typo="Typo.body2" Class="flex-grow-1">@ch</MudText>
-                                <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error"
-                                               OnClick="@(() => RemoveChannel(ch))" />
-                            </MudStack>
-                        </MudListItem>
-                    }
-                </MudList>
-            }
-
-            @if (Manager.IsConnected)
-            {
-                <MudDivider Class="my-3" />
-                <MudText Typo="Typo.subtitle2" Class="mb-2">Or pick from channels you've joined:</MudText>
-                <MudStack Row="true" Spacing="2" Class="mb-2">
-                    <MudButton Variant="Variant.Outlined" Size="Size.Small" StartIcon="@Icons.Material.Filled.Refresh"
-                               OnClick="RefreshAvailable">Refresh list</MudButton>
+                <MudStack Row="true" Spacing="2" Class="mb-3">
+                    <MudTextField T="string" @bind-Value="_newChannel" Label="Channel title or username"
+                                  Placeholder="Trade with Logic"
+                                  Variant="Variant.Outlined" Class="flex-grow-1"
+                                  OnKeyDown="@(async (KeyboardEventArgs e) => { if (e.Key == "Enter") await AddChannel(); })" />
+                    <MudButton Color="Color.Primary" Variant="Variant.Filled" StartIcon="@Icons.Material.Filled.Add"
+                               OnClick="AddChannel">Add</MudButton>
                 </MudStack>
-                @if (_available.Count == 0)
+
+                @if (_settings.Channels.Count == 0)
                 {
-                    <MudText Typo="Typo.caption" Color="Color.Secondary">No broadcast channels found.</MudText>
+                    <MudAlert Severity="Severity.Warning" Dense="true">No channels configured. The listener will not receive any signals.</MudAlert>
                 }
                 else
                 {
-                    <MudList T="string" Dense="true" Class="mud-elevation-1">
-                        @foreach (var ac in _available)
+                    <MudList T="string" Dense="true">
+                        @foreach (var ch in _settings.Channels)
                         {
                             <MudListItem T="string">
                                 <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
-                                    <MudText Typo="Typo.body2" Class="flex-grow-1">
-                                        @ac.Title @(string.IsNullOrEmpty(ac.Username) ? "" : $"({ac.Username})")
-                                    </MudText>
-                                    <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Primary"
-                                               StartIcon="@Icons.Material.Filled.AddCircleOutline"
-                                               OnClick="@(() => AddChannelDirect(ac.Title))">Add</MudButton>
+                                    <MudIcon Icon="@Icons.Material.Filled.Tag" Size="Size.Small" />
+                                    <MudText Typo="Typo.body2" Class="flex-grow-1">@ch</MudText>
+                                    <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error"
+                                                   OnClick="@(() => RemoveChannel(ch))" />
                                 </MudStack>
                             </MudListItem>
                         }
                     </MudList>
                 }
-            }
-        </MudPaper>
+
+                @if (Manager.IsConnected)
+                {
+                    <MudDivider Class="my-3" />
+                    <MudText Typo="Typo.subtitle2" Class="mb-2">Or pick from channels you've joined:</MudText>
+                    <MudStack Row="true" Spacing="2" Class="mb-2">
+                        <MudButton Variant="Variant.Outlined" Size="Size.Small" StartIcon="@Icons.Material.Filled.Refresh"
+                                   OnClick="RefreshAvailable">Refresh list</MudButton>
+                    </MudStack>
+                    @if (!AvailableToAdd.Any())
+                    {
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">No broadcast channels found.</MudText>
+                    }
+                    else
+                    {
+                        <MudList T="string" Dense="true" Class="mud-elevation-1">
+                            @foreach (var ac in AvailableToAdd)
+                            {
+                                <MudListItem T="string">
+                                    <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
+                                        <MudText Typo="Typo.body2" Class="flex-grow-1">
+                                            @ac.Title @(string.IsNullOrEmpty(ac.Username) ? "" : $"({ac.Username})")
+                                        </MudText>
+                                        <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Primary"
+                                                   StartIcon="@Icons.Material.Filled.AddCircleOutline"
+                                                   OnClick="@(() => AddChannelDirect(ac.Title))">Add</MudButton>
+                                    </MudStack>
+                                </MudListItem>
+                            }
+                        </MudList>
+                    }
+                }
+            </MudPaper>
+        </MudStack>
     </MudItem>
+
 </MudGrid>
 
 @code {
@@ -178,6 +191,14 @@
     private string _password = string.Empty;
     private string _newChannel = string.Empty;
     private IReadOnlyList<AvailableChannel> _available = Array.Empty<AvailableChannel>();
+
+    // Only show joined channels that are NOT already in the "Channels to Monitor" list.
+    // A monitored entry (stored as a title or @username) matches an available channel by
+    // either its Title or Username (case-insensitive).
+    private IEnumerable<AvailableChannel> AvailableToAdd =>
+        _available.Where(ac => !_settings.Channels.Any(c =>
+            string.Equals(c, ac.Title, StringComparison.OrdinalIgnoreCase) ||
+            (!string.IsNullOrEmpty(ac.Username) && string.Equals(c, ac.Username, StringComparison.OrdinalIgnoreCase))));
 
     protected override async Task OnInitializedAsync()
     {
@@ -283,7 +304,7 @@
         _password = string.Empty;
     }
 
-    private void AddChannel()
+    private async Task AddChannel()
     {
         var name = _newChannel?.Trim().TrimStart('@');
         if (string.IsNullOrWhiteSpace(name)) return;
@@ -292,23 +313,60 @@
             Snackbar.Add("Channel already added.", Severity.Info);
             return;
         }
-        _settings.Channels.Add(name);
-        _newChannel = string.Empty;
+        if (await PersistAddChannelAsync(name))
+            _newChannel = string.Empty;
     }
 
-    private void AddChannelDirect(string name)
+    private async Task AddChannelDirect(string name)
     {
         if (_settings.Channels.Any(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase)))
         {
             Snackbar.Add("Channel already added.", Severity.Info);
             return;
         }
-        _settings.Channels.Add(name);
+        await PersistAddChannelAsync(name);
     }
 
-    private void RemoveChannel(string name)
+    // Adds a channel to the monitored list and persists immediately so the listener
+    // starts monitoring it and the change is saved to the DB (consistent with removal).
+    private async Task<bool> PersistAddChannelAsync(string name)
     {
-        _settings.Channels.RemoveAll(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase));
+        _settings.Channels.Add(name);
+        try
+        {
+            await Manager.SaveAsync(_settings);
+            Snackbar.Add($"Now monitoring '{name}'.", Severity.Success);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // Roll back the in-memory add so the UI stays consistent with the DB.
+            _settings.Channels.RemoveAll(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase));
+            Snackbar.Add($"Could not add channel: {ex.Message}", Severity.Error);
+            return false;
+        }
+    }
+
+    private async Task RemoveChannel(string name)
+    {
+        var removed = _settings.Channels.RemoveAll(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase));
+        if (removed == 0)
+            return;
+
+        try
+        {
+            // Persist immediately so the listener stops monitoring this channel and the
+            // change is removed from the DB. It reappears under "channels you've joined"
+            // automatically via the AvailableToAdd filter.
+            await Manager.SaveAsync(_settings);
+            Snackbar.Add($"Stopped monitoring '{name}'.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            // Roll back the in-memory removal so the UI stays consistent with the DB.
+            _settings.Channels.Add(name);
+            Snackbar.Add($"Could not remove channel: {ex.Message}", Severity.Error);
+        }
     }
 
     private void RefreshAvailable()
