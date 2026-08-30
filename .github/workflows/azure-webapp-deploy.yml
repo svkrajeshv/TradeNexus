@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: 'NexusApp' # Replace with your Azure App Service name
+  AZURE_WEBAPP_NAME: 'nexusio' # Replace with your Azure App Service name
   DOTNET_VERSION: '10.0.x'
 
 jobs:
