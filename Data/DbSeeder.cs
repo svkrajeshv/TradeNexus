@@ -33,6 +33,7 @@ internal static class DbSeeder
         ("AutoSquareOffEnabled", defaultvalue, SettingType.Boolean, "Automatically square off all open positions at a set time before market close"),
         ("AutoSquareOffTime", "14:50", SettingType.String, "Time (HH:mm IST) at which open positions are auto squared off"),
         ("EnableEntryPriceCrossingTrigger", defaultvalue, SettingType.Boolean, "Hold execution until CMP crosses entry price"),
+        ("RequireEntryCrossFromBelow", "true", SettingType.Boolean, "Only trigger entry after the contract has traded below the entry price and then crosses up (prevents chasing when the signal arrives above entry)"),
         ("DuplicateSignalCooldownMinutes", "2", SettingType.Integer, "Block repeat executions of the same contract from the same channel for this many minutes (0 = disabled)"),
         ("PendingOrderTimeoutMinutes", "5", SettingType.Integer, "Cancel real broker orders pending longer than this many minutes (0 = disabled)"),
         ("SignalTimeWindowEnabled", defaultvalue, SettingType.Boolean, "Only execute signals received within the configured IST time window"),

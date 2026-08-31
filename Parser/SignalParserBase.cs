@@ -209,7 +209,7 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
         return normalized.ToUpperInvariant();
     }
 
-    protected static bool ParseAction(string message, ParsedSignal signal)
+    protected virtual bool ParseAction(string message, ParsedSignal signal)
     {
         var match = Regex.Match(message, ActionPattern);
         if (match.Success)

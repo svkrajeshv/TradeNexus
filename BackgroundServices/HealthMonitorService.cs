@@ -231,6 +231,15 @@ public sealed class CmpStreamingService(
     // over, the running High/Low are cleared so each day starts fresh.
     private DateTime _highLowDateIst = DateTime.MinValue;
 
+    // Signal ids whose CMP has been observed strictly BELOW the entry trigger at
+    // least once. A "BUY ABOVE 90" signal is only armed once the contract actually
+    // trades below 90; only then may an upward cross through 90 fire the order.
+    // This prevents instant execution when the signal arrives while the contract is
+    // already trading far above the stated entry. In-memory by design: entries are
+    // short-lived (they expire via PendingOrderTimeoutMinutes) and losing the armed
+    // state on restart fails safe (the signal simply does not fire).
+    private readonly ConcurrentDictionary<int, byte> _entryArmedSignals = new();
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("CMP streaming service started (Angel SmartStream WS, cadence {Seconds}s)", Cadence.TotalSeconds);
@@ -400,11 +409,22 @@ public sealed class CmpStreamingService(
                     var isMarketOrder = string.Equals(orderVariety, "Market", StringComparison.OrdinalIgnoreCase);
                     // Staleness cutoff follows the same setting used for pending order auto-cancel.
                     var stalenessMinutes = await settings.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
+                    // When enabled, a signal must first be seen trading BELOW the trigger
+                    // before an upward cross can fire it (true breakout confirmation).
+                    var requireCrossFromBelow = await settings.GetSettingAsync<bool?>("RequireEntryCrossFromBelow") ?? true;
 
                     // Use a tracked query so we can update status directly
                     var awaitingSignals = await db.TradingSignals
                         .Where(s => s.Status == SignalStatus.AwaitingEntry)
                         .ToListAsync(stoppingToken);
+
+                    // Drop armed state for signals that are no longer awaiting entry.
+                    var awaitingIds = awaitingSignals.Select(s => s.Id).ToHashSet();
+                    foreach (var armedId in _entryArmedSignals.Keys)
+                    {
+                        if (!awaitingIds.Contains(armedId))
+                            _entryArmedSignals.TryRemove(armedId, out _);
+                    }
 
                     foreach (var sig in awaitingSignals)
                     {
@@ -471,6 +491,30 @@ public sealed class CmpStreamingService(
 
                         var crossed = PriceComparison.IsGreaterThanOrEqual(cmp, triggerPrice);
 
+                        if (crossed && requireCrossFromBelow && !_entryArmedSignals.ContainsKey(sig.Id))
+                        {
+                            // CMP is at/above the trigger but the contract was never observed
+                            // below it, i.e. the entry level was already gone when the signal
+                            // arrived. Chasing it would enter far away from the stated entry,
+                            // so hold the signal (it expires via the staleness guard above).
+                            _logger.LogInformation(
+                                "Entry crossing suppressed for signal {Id}: CMP {Cmp} is already at/above Trigger {Trigger} without ever trading below it (raw entry {Entry}). Waiting for a genuine cross from below.",
+                                sig.Id, cmp, triggerPrice, sig.EntryPrice);
+                            continue;
+                        }
+
+                        if (!crossed)
+                        {
+                            // Contract is trading below the trigger — arm the signal so the
+                            // next upward cross through the trigger executes it.
+                            if (_entryArmedSignals.TryAdd(sig.Id, 0))
+                            {
+                                _logger.LogInformation(
+                                    "Entry armed for signal {Id}: CMP {Cmp} is below Trigger {Trigger} (raw entry {Entry}).",
+                                    sig.Id, cmp, triggerPrice, sig.EntryPrice);
+                            }
+                        }
+
                         if (crossed)
                         {
                             _logger.LogInformation(
@@ -496,6 +540,8 @@ public sealed class CmpStreamingService(
 
                             sig.Status = SignalStatus.Pending;
                             await db.SaveChangesAsync(stoppingToken);
+
+                            _entryArmedSignals.TryRemove(sig.Id, out _);
 
                             var engine = scope.ServiceProvider.GetRequiredService<ITradingEngine>();
                             var ok = await engine.ExecuteSignalAsync(parsed);

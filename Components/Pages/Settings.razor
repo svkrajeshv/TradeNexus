@@ -86,8 +86,25 @@
                 <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
                     Update your application login credentials.
                 </MudText>
-                <MudTextField T="string" @bind-Value="_adminUsername" Label="Admin Username" Variant="Variant.Outlined" Class="mb-3" />
-                <MudTextField T="string" @bind-Value="_adminPassword" Label="New Admin Password" Variant="Variant.Outlined" InputType="InputType.Password" HelperText="Leave blank to keep current password" />
+                <MudTextField T="string" @bind-Value="_adminUsername" Label="Admin Username" Variant="Variant.Outlined" Class="mb-3" Immediate="true" />
+                <MudTextField T="string"
+                              @bind-Value="_adminPassword"
+                              Label="New Admin Password"
+                              Variant="Variant.Outlined"
+                              InputType="@(_showAdminPassword ? InputType.Text : InputType.Password)"
+                              Adornment="Adornment.End"
+                              AdornmentIcon="@(_showAdminPassword ? Icons.Material.Filled.Visibility : Icons.Material.Filled.VisibilityOff)"
+                              OnAdornmentClick="@(() => _showAdminPassword = !_showAdminPassword)"
+                              HelperText="Leave blank to keep current password"
+                              Class="mb-3"
+                              Immediate="true" />
+                <MudTextField T="string"
+                              @bind-Value="_confirmAdminPassword"
+                              Label="Confirm New Password"
+                              Variant="Variant.Outlined"
+                              InputType="@(_showAdminPassword ? InputType.Text : InputType.Password)"
+                              HelperText="Re-enter new password to confirm"
+                              Immediate="true" />
             </MudPaper>
 
             <!-- Data Retention -->
@@ -180,6 +197,7 @@
                     <MudSelectItem Value="@("Market")">Market Order (immediate execution at live CMP)</MudSelectItem>
                 </MudSelect>
                 <MudSwitch T="bool" @bind-Value="_enableEntryCrossingTrigger" Color="Color.Primary" Label="Enable Entry Price Crossing Trigger" Class="mb-3" />
+                <MudSwitch T="bool" @bind-Value="_requireEntryCrossFromBelow" Color="Color.Primary" Label="Require Cross From Below" Class="mb-3" />
                 <MudNumericField T="decimal"
                                   @bind-Value="_entryPriceOffset"
                                   Label="Entry Price Offset (pts)"
@@ -271,6 +289,7 @@
     private bool _slippageGuardEnabled = false;
     private decimal _maxSlippagePercent = 1.0m;
     private bool _enableEntryCrossingTrigger = true;
+    private bool _requireEntryCrossFromBelow = true;
     private decimal _entryPriceOffset = 10.0m;
     private decimal _targetPriceOffset = 10.0m;
     private decimal _defaultTargetPoints = 20.0m;
@@ -283,6 +302,8 @@
     private decimal _trailingStopLossPoints = 0m;
     private string _adminUsername = "admin";
     private string _adminPassword = "";
+    private string _confirmAdminPassword = "";
+    private bool _showAdminPassword = false;
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
 
@@ -324,6 +345,8 @@
 
             var eect = await SettingsService.GetSettingAsync<bool?>("EnableEntryPriceCrossingTrigger");
             if (eect.HasValue) _enableEntryCrossingTrigger = eect.Value;
+            var recfb = await SettingsService.GetSettingAsync<bool?>("RequireEntryCrossFromBelow");
+            if (recfb.HasValue) _requireEntryCrossFromBelow = recfb.Value;
             var epo = await SettingsService.GetSettingAsync<decimal?>("EntryPriceOffset");
             if (epo.HasValue) _entryPriceOffset = epo.Value;
             var tpo = await SettingsService.GetSettingAsync<decimal?>("TargetPriceOffset");
@@ -346,6 +369,7 @@
 
             _adminUsername = await Auth.GetAdminUsernameAsync();
             _adminPassword = "";
+            _confirmAdminPassword = "";
         }
         catch (Exception ex)
         {
@@ -386,6 +410,7 @@
             await SettingsService.SetSettingAsync("MaxSlippagePercent", _maxSlippagePercent);
 
             await SettingsService.SetSettingAsync("EnableEntryPriceCrossingTrigger", _enableEntryCrossingTrigger);
+            await SettingsService.SetSettingAsync("RequireEntryCrossFromBelow", _requireEntryCrossFromBelow);
             await SettingsService.SetSettingAsync("EntryPriceOffset", _entryPriceOffset);
             await SettingsService.SetSettingAsync("TargetPriceOffset", _targetPriceOffset);
             await SettingsService.SetSettingAsync("DefaultTargetPoints", _defaultTargetPoints);
@@ -399,10 +424,26 @@
 
             if (!string.IsNullOrWhiteSpace(_adminUsername))
             {
-                var currentPwd = await SettingsService.GetSettingAsync<string>("Admin.Password") ?? "admin123";
-                var pwdToSave = string.IsNullOrWhiteSpace(_adminPassword) ? currentPwd : _adminPassword;
-                await Auth.UpdateCredentialsAsync(_adminUsername, pwdToSave);
-                _adminPassword = "";
+                var currentUsername = await Auth.GetAdminUsernameAsync();
+                if (!string.Equals(_adminUsername.Trim(), currentUsername, StringComparison.OrdinalIgnoreCase))
+                {
+                    await Auth.UpdateUsernameAsync(_adminUsername.Trim());
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(_adminPassword))
+            {
+                if (!string.IsNullOrWhiteSpace(_confirmAdminPassword) && !string.Equals(_adminPassword, _confirmAdminPassword))
+                {
+                    Snackbar.Add("Warning: New password and confirm password did not match, password was not updated.", Severity.Warning);
+                }
+                else
+                {
+                    await Auth.UpdatePasswordAsync(_adminPassword);
+                    _adminPassword = "";
+                    _confirmAdminPassword = "";
+                    Snackbar.Add("Admin password updated successfully!", Severity.Success);
+                }
             }
 
             Snackbar.Add("Settings saved", Severity.Success);

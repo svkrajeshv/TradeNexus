@@ -102,6 +102,8 @@ internal static class ServiceCollectionExtensions
         services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.IntradayNiftyParser>();
         services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.TradeWithPihuParser>();
         services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.TradeWithMohitAgrawalParser>();
+        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.BankniftyExpressParser>();
+        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.GujaratiTraderParser>();
         services.AddScoped<SignalParserResolver>();
         services.AddScoped<RiskManager>();
         services.AddScoped<PaperTradingEngine>();

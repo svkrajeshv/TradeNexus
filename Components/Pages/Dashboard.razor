@@ -577,6 +577,16 @@
                     if (changed)
                     {
                         _totalPnL = _positions.Sum(p => p.UnrealizedPnL);
+
+                        // Keep the MTM (Live) card in sync with the CMP stream instead of
+                        // waiting for the next 30s HealthTick. Mirrors the server-side
+                        // formula (NetPnL = unrealised MTM + realised today). The card's
+                        // visibility still comes from HealthTick (broker connectivity /
+                        // open-position count), so only refresh the stamp once it is live.
+                        _mtmNet = _totalPnL + _realizedPnL;
+                        if (_mtmAtIst.HasValue)
+                            _mtmAtIst = DateTime.UtcNow.ToIst();
+
                         StateHasChanged();
                     }
                 });
@@ -641,6 +651,9 @@
             _realizedPnL = await db.Positions
                 .Where(p => p.ClosedAt >= todayStart && p.ClosedAt < todayStart.AddDays(1))
                 .SumAsync(p => p.RealizedPnL ?? 0m);
+            // Keep MTM (Live) consistent after position/signal changes too, so the card
+            // never shows a stale figure between HealthTicks.
+            _mtmNet = _totalPnL + _realizedPnL;
             SyncEdits();
             StateHasChanged();
         }

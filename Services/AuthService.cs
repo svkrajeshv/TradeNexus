@@ -57,4 +57,24 @@ public class AuthService
         _logger.LogInformation("Admin credentials updated for user '{Username}'", newUsername);
         return true;
     }
+
+    public async Task<bool> UpdateUsernameAsync(string newUsername)
+    {
+        if (string.IsNullOrWhiteSpace(newUsername))
+            return false;
+
+        await _settingsService.SetSettingAsync(KeyUsername, newUsername.Trim());
+        _logger.LogInformation("Admin username updated to '{Username}'", newUsername);
+        return true;
+    }
+
+    public async Task<bool> UpdatePasswordAsync(string newPassword)
+    {
+        if (string.IsNullOrWhiteSpace(newPassword))
+            return false;
+
+        await _settingsService.SetSettingAsync(KeyPassword, newPassword);
+        _logger.LogInformation("Admin password updated successfully");
+        return true;
+    }
 }
