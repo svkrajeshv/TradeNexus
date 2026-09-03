@@ -23,7 +23,13 @@ public sealed class HealthMonitorService(
     IHubContext<TradingHub> hub,
     NexusApp.Services.HealthSnapshotCache healthSnapshots) : BackgroundService
 {
-    private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(30);
+    // Reduced from 30s -> 10s. Safe to do because ReadBrokerPnlAsync now prefers the
+    // BrokerPnlTracker cache (fed continuously by SmartStream ticks) over a direct
+    // broker getPosition call - the comment on that call site notes the previous
+    // 30s-cadence direct call is what previously tripped Angel One's rate limit.
+    // The health tick itself is otherwise a local DB read + in-memory broadcast, so
+    // a tighter cadence only costs a bit more DB/CPU work, not extra broker calls.
+    private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(10);
     private DateTime? _lastSquareOffDateLocal;
 
     private readonly ILogger<HealthMonitorService> _logger = logger;

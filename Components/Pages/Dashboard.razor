@@ -8,6 +8,7 @@
 @using NexusApp.Helpers
 @using NexusApp.Interfaces
 @using NexusApp.Models
+@using NexusApp.Components.Shared
 @using NexusApp.Services
 @inject TradingSignalService SignalService
 @inject IDbContextFactory<TradingDbContext> DbFactory
@@ -309,65 +310,19 @@
                         <MudTh>Actions</MudTh>
                     </HeaderContent>
                     <RowTemplate>
-                        <MudTd DataLabel="Time">@context.ReceivedTimestamp.EnsureUtc().ToIstString("HH:mm:ss")</MudTd>
-                        <MudTd DataLabel="Channel">
-                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
-                                @(string.IsNullOrWhiteSpace(context.ChannelName) ? "-" : context.ChannelName)
-                            </MudChip>
-                        </MudTd>
-                        <MudTd DataLabel="Signal">
-                            @context.Action @context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()
-                        </MudTd>
-                        <MudTd DataLabel="Signal Values">
-                            <MudStack Row="true" Spacing="1" Wrap="Wrap.Wrap">
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">Entry: @context.EntryPrice.ToString("0.##")</MudChip>
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">SL: @context.StopLoss.ToString("0.##")</MudChip>
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">T: @string.Join(" / ", context.Targets.Select(t => t.ToString("0.##")))</MudChip>
-                            </MudStack>
-                        </MudTd>
-                        <MudTd DataLabel="CMP">
-                            <MudChip T="string"
-                                     Color="@(HasCmpCrossedEntry(context) ? Color.Success : Color.Info)"
-                                     Variant="Variant.Filled"
-                                     Size="Size.Small"
-                                     Class="@GetCmpBlinkClass(context)">
-                                CMP: @GetCmpDisplay(context)
-                            </MudChip>
-                        </MudTd>
-                        <MudTd DataLabel="Delay">
-                            @FormatDelay(context.SignalDelayMs)
-                            @{
-                                var staleness = GetSignalStaleness(context);
-                            }
-                            @if (staleness is { } s)
-                            {
-                                <br />
-                                <MudText Typo="Typo.caption" Color="s.Color" Style="white-space:nowrap;">
-                                    ⏱ @s.Text
-                                </MudText>
-                            }
-                        </MudTd>
-                        <MudTd DataLabel="Status">
-                            <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
-                        </MudTd>
-                        <MudTd DataLabel="Actions">
-                            @if (IsEditable(context))
-                            {
-                                <MudStack Row="true" Spacing="1" Wrap="Wrap.Wrap">
-                                    <MudButton Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined"
-                                               Style="min-width:56px" OnClick="@(() => SaveAsync(context))">Save</MudButton>
-                                    <MudButton Size="Size.Small" Color="Color.Success" Variant="Variant.Filled"
-                                               Style="min-width:52px" OnClick="@(() => BuyAsync(context))">BUY</MudButton>
-                                    <MudButton Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined"
-                                               Style="min-width:64px" OnClick="@(() => IgnoreAsync(context))">Ignore</MudButton>
-                                </MudStack>
-                            }
-                            else if (IsPendingAutoExecution(context))
-                            {
-                                <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Outlined"
-                                           Style="min-width:64px" OnClick="@(() => CancelPendingAutoAsync(context))">Cancel</MudButton>
-                            }
-                        </MudTd>
+                        <LiveSignalRow Signal="context"
+                                       CmpDisplay="@GetCmpDisplay(context)"
+                                       HasCrossed="@HasCmpCrossedEntry(context)"
+                                       BlinkClass="@GetCmpBlinkClass(context)"
+                                       DelayText="@FormatDelay(context.SignalDelayMs)"
+                                       Staleness="@ToTuple(GetSignalStaleness(context))"
+                                       StatusColor="@StatusColor(context.Status)"
+                                       IsEditable="@IsEditable(context)"
+                                       IsPendingAutoExecution="@IsPendingAutoExecution(context)"
+                                       OnSave="@(s => SaveAsync(s))"
+                                       OnBuy="@(s => BuyAsync(s))"
+                                       OnIgnore="@(s => IgnoreAsync(s))"
+                                       OnCancelPendingAuto="@(s => CancelPendingAutoAsync(s))" />
                     </RowTemplate>
                 </MudTable>
                 </div>
@@ -1425,6 +1380,9 @@
             return $"{(int)remaining.TotalMinutes}m {remaining.Seconds}s";
         return $"{Math.Max(0, remaining.Seconds)}s";
     }
+
+    private static (string Text, Color Color)? ToTuple(SignalStalenessInfo? info) =>
+        info is { } i ? (i.Text, i.Color) : null;
 
     private static string BuildDefaultTargetText(TradingSignal signal)
     {
