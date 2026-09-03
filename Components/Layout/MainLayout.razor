@@ -61,7 +61,13 @@
         <NavMenu />
     </MudDrawer>
 
-    <MudMainContent Class="pa-3 pa-sm-5" Style="padding-top: 84px !important;">
+    @* Horizontal/bottom padding only: the all-sides "pa-*" utilities would override the
+       padding-top MudMainContent derives from the app bar height, letting page titles
+       slide under the header. Top spacing is set explicitly from the same variable plus
+       breathing room. NOTE: calc() requires whitespace around '+' - "+16px" is a parse
+       error that silently drops the whole declaration. *@
+    <MudMainContent Class="px-3 px-sm-5 pb-3 pb-sm-5"
+                    Style="padding-top: calc(var(--mud-appbar-height) + 16px);">
         @Body
     </MudMainContent>
 </MudLayout>
@@ -135,6 +141,20 @@
                 // Best-effort browser notification + beep.
                 try { await JS.InvokeVoidAsync("NexusApp.notify", title, body); } catch { }
                 try { await JS.InvokeVoidAsync("NexusApp.beep"); } catch { }
+            });
+
+            // Trade-specific audio cues (paper vs live entry/exit, square-off, SL hit).
+            _hub.On<JsonElement>("TradeSound", async payload =>
+            {
+                var sound = payload.ValueKind == JsonValueKind.Object &&
+                            (payload.TryGetProperty("Sound", out var v) || payload.TryGetProperty("sound", out v))
+                    ? v.GetString()
+                    : null;
+
+                if (string.IsNullOrWhiteSpace(sound))
+                    return;
+
+                try { await JS.InvokeVoidAsync("NexusApp.playSound", sound); } catch { }
             });
 
             await _hub.StartAsync();

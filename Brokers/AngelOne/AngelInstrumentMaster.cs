@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using NexusApp.Helpers;
 
 namespace NexusApp.Brokers.AngelOne;
 
@@ -79,9 +80,9 @@ public sealed class AngelInstrumentMaster
 
     /// <summary>
     /// True when the master is loaded in-memory <b>and</b> that load happened on
-    /// today's (local) date. Used to decide whether a login-time refresh is needed.
+    /// today's (IST) date. Used to decide whether a login-time refresh is needed.
     /// </summary>
-    public bool IsLoadedToday => IsLoaded && _loadedAtUtc != default && _loadedAtUtc.ToLocalTime().Date == DateTime.Today;
+    public bool IsLoadedToday => IsLoaded && _loadedAtUtc != default && _loadedAtUtc.ToIst().Date == DateTimeExtensions.IstToday();
 
     /// <summary>
     /// Clears the in-memory index and forces the next <see cref="EnsureLoadedAsync"/>
@@ -149,18 +150,18 @@ public sealed class AngelInstrumentMaster
     {
         // Load at most once per calendar day (IST). If already loaded and the
         // last load happened on today's date, nothing to do.
-        if (IsLoaded && _loadedAtUtc.ToLocalTime().Date == DateTime.Today)
+        if (IsLoadedToday)
             return;
 
         await _refreshLock.WaitAsync(ct);
         try
         {
-            if (IsLoaded && _loadedAtUtc.ToLocalTime().Date == DateTime.Today)
+            if (IsLoadedToday)
                 return;
 
-            // Cache is considered fresh if it was written on today's local date.
+            // Cache is considered fresh if it was written on today's IST date.
             var cacheFresh = File.Exists(_cachePath)
-                && File.GetLastWriteTime(_cachePath).Date == DateTime.Today;
+                && File.GetLastWriteTimeUtc(_cachePath).ToIst().Date == DateTimeExtensions.IstToday();
 
             string? json = null;
             if (cacheFresh)
@@ -384,7 +385,7 @@ public sealed class AngelInstrumentMaster
         //   * optionsSupported: OPTIDX for our supported underlyings within MaxExpiryDays — kept & pruned by strike window.
         //   * nonOptions:       everything else (FUT, EQ, etc.) — kept as-is for tradingsymbol lookups but not indexed.
         var optionsSupported = new List<MasterEntry>(capacity: 20_000);
-        var today = DateTime.Today;
+        var today = DateTimeExtensions.IstToday();
         var maxExpiryDate = today.AddDays(MaxExpiryDays);
 
         using var doc = JsonDocument.Parse(json);
@@ -516,7 +517,7 @@ public sealed class AngelInstrumentMaster
         if (name.Length == 0)
             return null;
 
-        var floor = (from ?? DateTime.Today).Date;
+        var floor = (from ?? DateTimeExtensions.IstToday()).Date;
 
         DateTime? nearest = null;
         for (var i = 0; i < _optionIndex.Count; i++)
@@ -554,6 +555,7 @@ public sealed class AngelInstrumentMaster
         // Angel stores strike as (strike * 100) rounded — e.g. 57000 → 5700000.
         var strikeScaled = (long)Math.Round(strike * 100m, MidpointRounding.AwayFromZero);
         var expiryUpper = FormatExpiry(expiry);
+        var istToday = DateTimeExtensions.IstToday();
 
         MasterEntry? exactMatch = null;
         MasterEntry? nameOnlyFallback = null;
@@ -575,10 +577,10 @@ public sealed class AngelInstrumentMaster
             }
 
             // Fallback: same underlying+strike+type, closest future expiry
-            if (nameOnlyFallback is null && e.ExpiryDate >= DateTime.Today)
+            if (nameOnlyFallback is null && e.ExpiryDate >= istToday)
                 nameOnlyFallback = e;
             else if (nameOnlyFallback is not null
-                     && e.ExpiryDate >= DateTime.Today
+                     && e.ExpiryDate >= istToday
                      && e.ExpiryDate < nameOnlyFallback.ExpiryDate)
                 nameOnlyFallback = e;
         }
@@ -612,6 +614,7 @@ public sealed class AngelInstrumentMaster
         var toleranceScaled = (long)Math.Round(tolerance * 100m);
         var wantScaled = (long)Math.Round(strike * 100m);
         var expiryUpper = FormatExpiry(expiry);
+        var istToday = DateTimeExtensions.IstToday();
 
         MasterEntry? bestSameExpiry = null;
         long bestSameExpiryDelta = long.MaxValue;
@@ -625,7 +628,7 @@ public sealed class AngelInstrumentMaster
                 continue;
             if (!e.TradingSymbol.EndsWith(opt, StringComparison.OrdinalIgnoreCase))
                 continue;
-            if (e.ExpiryDate < DateTime.Today)
+            if (e.ExpiryDate < istToday)
                 continue;
 
             var delta = Math.Abs(e.StrikeScaled - wantScaled);
@@ -643,7 +646,7 @@ public sealed class AngelInstrumentMaster
             else
             {
                 // Prefer closer strike, break ties by nearer expiry.
-                var daysAhead = (e.ExpiryDate - DateTime.Today).Days;
+                var daysAhead = (e.ExpiryDate - istToday).Days;
                 var score = delta * 1000 + Math.Max(0, daysAhead);
                 if (score < bestOtherExpiryScore)
                 {

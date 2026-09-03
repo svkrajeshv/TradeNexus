@@ -65,6 +65,18 @@ public static class DateTimeExtensions
     }
 
     /// <summary>
+    /// The current instant expressed as Indian Standard Time (IST) wall-clock time.
+    /// Use this instead of <c>DateTime.Now</c> so behaviour is identical on non-IST hosts.
+    /// </summary>
+    public static DateTime IstNow() => DateTime.UtcNow.ToIst();
+
+    /// <summary>
+    /// The current IST calendar date (the trading day). Use this instead of
+    /// <c>DateTime.Today</c>, which returns the host machine's date.
+    /// </summary>
+    public static DateTime IstToday() => IstNow().Date;
+
+    /// <summary>
     /// Converts a DateTime expressed in Indian Standard Time (IST) to UTC.
     /// The input Kind is ignored and the value is treated as IST wall-clock time.
     /// </summary>

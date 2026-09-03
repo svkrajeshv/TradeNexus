@@ -16,11 +16,26 @@
 @inject IJSRuntime JS
 @inject ITradingEngine TradingEngine
 @inject ISettingsService SettingsService
+@inject NexusApp.Services.HealthSnapshotCache HealthSnapshots
+@inject ILogger<Dashboard> Logger
 @implements IAsyncDisposable
 
 <PageTitle>Trading Dashboard</PageTitle>
 
 <MudText Typo="Typo.h4" Class="mb-4">Trading Dashboard</MudText>
+@if (_refreshError is not null)
+{
+    <MudAlert Severity="Severity.Error" Class="mb-3">
+        Dashboard data could not be loaded, so the figures below are not live: @_refreshError
+    </MudAlert>
+}
+@if (_hubError is not null)
+{
+    <MudAlert Severity="Severity.Warning" Class="mb-3">
+        Live feed is not connected, so Unrealised / Realised / MTM are unavailable from the
+        broker terminal: @_hubError
+    </MudAlert>
+}
 <style>
     .cmp-blink-up {
         animation: cmp-up 0.7s ease-in-out 1;
@@ -39,6 +54,66 @@
     .live-signals-table .mud-chip {
         font-size: 0.68rem;
         height: 22px;
+    }
+    /* Wide tables scroll horizontally instead of squeezing columns on desktop/tablet. */
+    .table-scroll {
+        width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    /* Mobile card grid used by the Open Positions list. */
+    .position-card {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 12px;
+        width: 100%;
+        padding: 12px;
+        margin-bottom: 10px;
+        border: 1px solid var(--mud-palette-lines-default);
+        border-radius: 8px;
+        background-color: var(--mud-palette-surface);
+    }
+    .watchlist-card-full {
+        grid-column: 1 / -1;
+    }
+    .watchlist-card-label {
+        font-size: 0.68rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--mud-palette-text-secondary);
+    }
+    .watchlist-card-value {
+        font-size: 0.9rem;
+        word-break: break-word;
+    }
+    @@media (max-width: 599.98px) {
+        /* MudTable switches to stacked rows below its breakpoint; DataLabel drives
+           the "Label   Value" pairs so the rows stay readable on phones. */
+        .live-signals-table,
+        .watchlist-table {
+            font-size: 0.8rem;
+        }
+        .live-signals-table td,
+        .watchlist-table td {
+            white-space: normal !important;
+            padding: 4px 8px !important;
+        }
+        .live-signals-table .mud-table-cell-align-right,
+        .watchlist-table .mud-table-cell-align-right {
+            text-align: right;
+        }
+        .live-signals-table .mud-table-row,
+        .watchlist-table .mud-table-row {
+            border-bottom: 1px solid var(--mud-palette-lines-default);
+        }
+        .live-signals-table .mud-table-cell-mobile:before,
+        .watchlist-table .mud-table-cell-mobile:before {
+            font-weight: 600;
+            font-size: 0.68rem;
+            text-transform: uppercase;
+            color: var(--mud-palette-text-secondary);
+        }
     }
     /* Stat cards always share a single row - 5 normally, 6 when the MTM card is live.
        Applies at every breakpoint so mobile shows one compact row instead of a
@@ -91,6 +166,13 @@
     }
 </style>
 
+<MudToggleGroup T="PnlMode" Value="_pnlMode" ValueChanged="OnPnlModeChanged" Color="Color.Primary"
+                Size="Size.Small" CheckMark="false" SelectionMode="SelectionMode.SingleSelection" Class="mb-3">
+    <MudToggleItem Value="PnlMode.All" Text="All" />
+    <MudToggleItem Value="PnlMode.Live" Text="Live" />
+    <MudToggleItem Value="PnlMode.Paper" Text="Paper" />
+</MudToggleGroup>
+
 <MudGrid Class="@($"dashboard-grid{(_isMtmLive ? " has-mtm" : string.Empty)}")" Spacing="3">
     <MudItem xs="12" sm="6" md="3" Class="stat-card">
         <MudPaper Class="pa-4" Elevation="2">
@@ -125,9 +207,16 @@
                 <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Unrealised P&amp;L</MudText>
                 <MudIcon Icon="@Icons.Material.Filled.AccountBalanceWallet" Color="Color.Error" />
             </MudStack>
-            <MudText Typo="Typo.h4" Color="@(_totalPnL >= 0 ? Color.Success : Color.Error)">
-                ₹@_totalPnL.ToString("N2")
-            </MudText>
+            @if (FiguresKnown)
+            {
+                <MudText Typo="Typo.h4" Color="@(_totalPnL >= 0 ? Color.Success : Color.Error)">
+                    ₹@_totalPnL.ToString("N2")
+                </MudText>
+            }
+            else
+            {
+                <MudText Typo="Typo.h4" Color="Color.Secondary">₹0.00</MudText>
+            }
         </MudPaper>
     </MudItem>
     <MudItem xs="12" sm="6" md="3" Class="stat-card">
@@ -136,12 +225,19 @@
                 <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Realised P&amp;L</MudText>
                 <MudIcon Icon="@Icons.Material.Filled.Payments" Color="Color.Success" />
             </MudStack>
-            <MudText Typo="Typo.h4" Color="@(_realizedPnL >= 0 ? Color.Success : Color.Error)">
-                ₹@_realizedPnL.ToString("N2")
-            </MudText>
+            @if (FiguresKnown)
+            {
+                <MudText Typo="Typo.h4" Color="@(_realizedPnL >= 0 ? Color.Success : Color.Error)">
+                    ₹@_realizedPnL.ToString("N2")
+                </MudText>
+            }
+            else
+            {
+                <MudText Typo="Typo.h4" Color="Color.Secondary">₹0.00</MudText>
+            }
         </MudPaper>
     </MudItem>
-    @if (_isMtmLive)
+    @if (_isMtmLive && FiguresKnown)
     {
         <MudItem xs="12" sm="6" md="3" Class="stat-card">
             <MudPaper Class="pa-4" Elevation="2">
@@ -173,7 +269,8 @@
             }
             else
             {
-                <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" RowStyleFunc="GetSignalRowStyle">
+                <div class="table-scroll">
+                <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" Breakpoint="Breakpoint.Sm" RowStyleFunc="GetSignalRowStyle">
                     <HeaderContent>
                         <MudTh>Time</MudTh>
                         <MudTh>Channel</MudTh>
@@ -185,23 +282,23 @@
                         <MudTh>Actions</MudTh>
                     </HeaderContent>
                     <RowTemplate>
-                        <MudTd>@context.ReceivedTimestamp.ToLocalTime().ToString("HH:mm:ss")</MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="Time">@context.ReceivedTimestamp.EnsureUtc().ToIstString("HH:mm:ss")</MudTd>
+                        <MudTd DataLabel="Channel">
                             <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
                                 @(string.IsNullOrWhiteSpace(context.ChannelName) ? "-" : context.ChannelName)
                             </MudChip>
                         </MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="Signal">
                             @context.Action @context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()
                         </MudTd>
-                        <MudTd>
-                            <MudStack Row="true" Spacing="1">
+                        <MudTd DataLabel="Signal Values">
+                            <MudStack Row="true" Spacing="1" Wrap="Wrap.Wrap">
                                 <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">Entry: @context.EntryPrice.ToString("0.##")</MudChip>
                                 <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">SL: @context.StopLoss.ToString("0.##")</MudChip>
                                 <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">T: @string.Join(" / ", context.Targets.Select(t => t.ToString("0.##")))</MudChip>
                             </MudStack>
                         </MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="CMP">
                             <MudChip T="string"
                                      Color="@(HasCmpCrossedEntry(context) ? Color.Success : Color.Info)"
                                      Variant="Variant.Filled"
@@ -210,14 +307,14 @@
                                 CMP: @GetCmpDisplay(context)
                             </MudChip>
                         </MudTd>
-                        <MudTd>@FormatDelay(context.SignalDelayMs)</MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="Delay">@FormatDelay(context.SignalDelayMs)</MudTd>
+                        <MudTd DataLabel="Status">
                             <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
                         </MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="Actions">
                             @if (IsEditable(context))
                             {
-                                <MudStack Row="true" Spacing="1">
+                                <MudStack Row="true" Spacing="1" Wrap="Wrap.Wrap">
                                     <MudButton Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined"
                                                Style="min-width:56px" OnClick="@(() => SaveAsync(context))">Save</MudButton>
                                     <MudButton Size="Size.Small" Color="Color.Success" Variant="Variant.Filled"
@@ -229,6 +326,7 @@
                         </MudTd>
                     </RowTemplate>
                 </MudTable>
+                </div>
             }
         </MudPaper>
     </MudItem>
@@ -249,7 +347,8 @@
             }
             else
             {
-                <MudTable Items="_watchlist" Dense="true" Hover="true" Bordered="false">
+                <div class="table-scroll">
+                <MudTable Class="watchlist-table" Items="_watchlist" Dense="true" Hover="true" Bordered="false" Breakpoint="Breakpoint.Sm">
                     <HeaderContent>
                         <MudTh>Time</MudTh>
                         <MudTh>Channel</MudTh>
@@ -263,15 +362,15 @@
                         <MudTh>Actions</MudTh>
                     </HeaderContent>
                     <RowTemplate>
-                        <MudTd>@context.ReceivedTimestamp.ToLocalTime().ToString("HH:mm:ss")</MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="Time">@context.ReceivedTimestamp.EnsureUtc().ToIstString("HH:mm:ss")</MudTd>
+                        <MudTd DataLabel="Channel">
                             <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
                                 @(string.IsNullOrWhiteSpace(context.ChannelName) ? "-" : context.ChannelName)
                             </MudChip>
                         </MudTd>
-                        <MudTd>@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
-                        <MudTd>@GetEdit(context).EntryPrice.ToString("0.##")</MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="Signal">@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
+                        <MudTd DataLabel="Entry">@GetEdit(context).EntryPrice.ToString("0.##")</MudTd>
+                        <MudTd DataLabel="CMP">
                             <MudChip T="string"
                                      Color="@(HasCmpCrossedEntry(context) ? Color.Success : Color.Info)"
                                      Variant="Variant.Filled"
@@ -280,11 +379,11 @@
                                 @GetCmpDisplay(context)
                             </MudChip>
                         </MudTd>
-                        <MudTd>@GetTickValueDisplay(_lowBySignal, context.Id)</MudTd>
-                        <MudTd>@GetTickValueDisplay(_highBySignal, context.Id)</MudTd>
-                        <MudTd>@GetExitDisplay(context.Id)</MudTd>
-                        <MudTd><MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip></MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="Low">@GetTickValueDisplay(_lowBySignal, context.Id)</MudTd>
+                        <MudTd DataLabel="High">@GetTickValueDisplay(_highBySignal, context.Id)</MudTd>
+                        <MudTd DataLabel="Exit">@GetExitDisplay(context.Id)</MudTd>
+                        <MudTd DataLabel="Status"><MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip></MudTd>
+                        <MudTd DataLabel="Actions">
                             <MudButton Size="Size.Small"
                                        Color="Color.Default"
                                        Variant="Variant.Outlined"
@@ -294,6 +393,7 @@
                         </MudTd>
                     </RowTemplate>
                 </MudTable>
+                </div>
             }
         </MudPaper>
     </MudItem>
@@ -301,7 +401,7 @@
     <MudItem xs="12">
         <MudPaper Class="pa-4" Elevation="2">
             <MudText Typo="Typo.h6" Class="mb-2">Open Positions</MudText>
-            @if (_positions.Count == 0)
+            @if (_openPositions == 0)
             {
                 <MudText Typo="Typo.body2" Color="Color.Secondary">No open positions.</MudText>
             }
@@ -309,8 +409,8 @@
             {
                 <!-- Desktop Table View (hidden on mobile) -->
                 <div class="d-none d-sm-flex flex-column">
-                    <div class="grid-height-box">
-                    <MudTable Items="_positions" Dense="true" Hover="true">
+                    <div class="grid-height-box table-scroll">
+                    <MudTable Items="DisplayPositions" Dense="true" Hover="true">
                         <HeaderContent>
                             <MudTh>Symbol</MudTh>
                             <MudTh>Channel</MudTh>
@@ -354,7 +454,7 @@
                 <!-- Mobile Card View (shown on mobile only) -->
                 <div class="d-flex d-sm-none">
                     <MudStack Class="w-100">
-                        @foreach (var position in _positions)
+                        @foreach (var position in DisplayPositions)
                         {
                             <div class="position-card">
                                 <div class="watchlist-card-full">
@@ -431,34 +531,184 @@
     private readonly Dictionary<int, DateTime> _cmpTickAtBySignal = new();
     private readonly HashSet<int> _hiddenWatchlistSignalIds = new();
     private int _todaySignals;
-    private int _openPositions;
-    private int _executedToday;
-    private decimal _totalPnL;
-    private decimal _realizedPnL;
+    private string? _refreshError;
+    private string? _hubError;
+
+    /// <summary>Rows rendered in the Open Positions table; the stat cards always
+    /// count the full <see cref="_positions"/> list so the two can never disagree.</summary>
+    private const int DisplayPositionLimit = 20;
+
+    /// <summary>Which book the stat cards report on.</summary>
+    public enum PnlMode { All, Live, Paper }
+    private PnlMode _pnlMode = PnlMode.All;
+
+    // Realised P&L is booked history, so it is queried per book in RefreshAsync
+    // rather than derived from the in-memory open-position list.
+    private decimal _realizedLive;
+    private decimal _realizedPaper;
+
+    // "Executed today" is per book, so it is counted from the Orders table (the only
+    // entity that carries a TradingAccount link). TradingSignal has no account, which
+    // is why the old signal-based count could never respond to the Live/Paper toggle.
+    private int _executedLive;
+    private int _executedPaper;
+    private int _executedAll;
 
     // Live MTM card state, fed by the HealthMonitorService "HealthTick" broadcast.
     private bool _brokerConnected;
-    private decimal _mtmNet;
-    private int _mtmOpenCount;
     private DateTime? _mtmAtIst;
 
+    // Broker-truth live figures from the same HealthTick. The broker position book
+    // reports realised P&L for legs that are fully squared off (netqty 0) and have no
+    // matching local Position row, so it is a better absolute level than our DB
+    // aggregate for the live book.
+    private bool _hasBrokerTick;
+    private decimal _liveUnrealizedTick;
+    private decimal _liveRealizedTick;
+
+    private static bool IsPaperPosition(NexusApp.Models.Position p) => BookScope.IsPaper(p);
+
+    private IEnumerable<NexusApp.Models.Position> ScopedPositions => _pnlMode switch
+    {
+        PnlMode.Live => _positions.Where(BookScope.IsLive),
+        PnlMode.Paper => _positions.Where(IsPaperPosition),
+        _ => _positions
+    };
+
+    private IEnumerable<NexusApp.Models.Position> DisplayPositions =>
+        ScopedPositions.Take(DisplayPositionLimit);
+
+    private int _openPositions => ScopedPositions.Count();
+
+    private int _executedToday => _pnlMode switch
+    {
+        PnlMode.Live => _executedLive,
+        PnlMode.Paper => _executedPaper,
+        _ => _executedAll
+    };
+
+    private decimal PaperUnrealized => _positions.Where(IsPaperPosition).Sum(p => p.UnrealizedPnL);
+
+    private decimal LocalLiveUnrealized => _positions.Where(BookScope.IsLive).Sum(p => p.UnrealizedPnL);
+
     /// <summary>
-    /// The MTM figure is only meaningful once the broker feed is up AND at least
-    /// one order has actually filled into a position; the card is hidden otherwise.
+    /// Broker figures are only trusted while the broker is actually connected. The
+    /// health tick always carries a LiveUnrealized value (it falls back to a local or
+    /// zero figure when offline), so latching on its mere presence would pin the live
+    /// book to a stale - often zero - number for the rest of the session.
     /// </summary>
-    private bool _isMtmLive => _brokerConnected && _mtmAtIst.HasValue && _mtmOpenCount > 0;
+    private bool UseBrokerTruth => _brokerConnected && _hasBrokerTick;
+
+    // Do not adjust a terminal P&L total with locally marked CMP movement, and never
+    // substitute a locally derived figure for it. The local rows need not contain every
+    // terminal leg (carry-forward, manual and non-app orders are invisible to us), so a
+    // DB-derived number silently contradicts the AngelOne "Total G/L" the user reads as
+    // truth. When the terminal is unreadable the cards render "--" instead.
+    private decimal LiveUnrealized => UseBrokerTruth ? _liveUnrealizedTick : 0m;
+
+    private decimal LiveRealized => UseBrokerTruth ? _liveRealizedTick : 0m;
+
+    /// <summary>
+    /// Paper figures are computed entirely in-process and are always known. Live (and
+    /// therefore "All") figures are only known while the AngelOne position book is
+    /// readable, because that is the only source that sees every terminal leg.
+    /// </summary>
+    private bool FiguresKnown => _pnlMode == PnlMode.Paper || UseBrokerTruth;
+
+    private decimal _totalPnL => _pnlMode switch
+    {
+        PnlMode.Live => LiveUnrealized,
+        PnlMode.Paper => PaperUnrealized,
+        _ => LiveUnrealized + PaperUnrealized
+    };
+
+    private decimal _realizedPnL => _pnlMode switch
+    {
+        PnlMode.Live => LiveRealized,
+        PnlMode.Paper => _realizedPaper,
+        _ => LiveRealized + _realizedPaper
+    };
+
+    /// <summary>
+    /// Net MTM for the selected book. Derived from the very same unrealised and
+    /// realised properties the other two cards render, so the cards can never
+    /// contradict each other and "All" is exactly Live + Paper with no double count.
+    /// </summary>
+    private decimal _mtmNet => _totalPnL + _realizedPnL;
+
+    /// <summary>
+    /// The selected book did something today: it either still holds an open position
+    /// or it booked realised P&L. A fully squared-off day has no open positions but
+    /// still has a meaningful MTM, so open count alone must not gate the card.
+    /// </summary>
+    private bool HasBookActivity => _openPositions > 0 || _realizedPnL != 0m;
+
+    /// <summary>
+    /// The MTM figure is only meaningful once a tick has arrived and the book has
+    /// actually traded; the card is hidden otherwise. Broker connectivity is only
+    /// required for the live book - paper MTM is simulated locally.
+    /// </summary>
+    private bool _isMtmLive =>
+        _mtmAtIst.HasValue && HasBookActivity &&
+        _pnlMode switch
+        {
+            PnlMode.Live => _brokerConnected,
+            PnlMode.Paper => true,
+            _ => _brokerConnected || _positions.Any(IsPaperPosition) || _realizedPaper != 0m
+        };
+
+    private void OnPnlModeChanged(PnlMode mode)
+    {
+        _pnlMode = mode;
+        StateHasChanged();
+    }
     // Default lots loaded from global settings (Settings page → "Default Lots per Order")
     private decimal _defaultLots = 1;
 
     protected override async Task OnInitializedAsync()
     {
+        // Only run for the interactive pass. With prerender enabled this component is
+        // built twice; doing the work in both doubles every query and, worse, makes a
+        // failure in the interactive instance look like a screen that "went to zero"
+        // after briefly showing the prerendered figures.
+        if (!RendererInfo.IsInteractive)
+            return;
+
         var saved = await SettingsService.GetSettingAsync<int?>("DefaultQuantity");
         if (saved.HasValue && saved.Value > 0)
             _defaultLots = saved.Value;
         await LoadHiddenWatchlistIdsAsync();
 
+        // Seed the live cards from the last broadcast health figures so the book
+        // toggle renders real numbers straight away instead of zeros until the
+        // next 30s HealthTick arrives.
+        ApplyHealthSnapshot(HealthSnapshots.Latest);
+
         await RefreshAsync();
         await ConnectHubAsync();
+    }
+
+    private void ApplyHealthSnapshot(NexusApp.Services.HealthSnapshot? snapshot)
+    {
+        if (snapshot is null)
+            return;
+
+        _brokerConnected = snapshot.BrokerConnected;
+
+        if (snapshot.BrokerConnected && snapshot.BrokerPnlAvailable)
+        {
+            _liveUnrealizedTick = snapshot.LiveUnrealized;
+            _liveRealizedTick = snapshot.LiveRealized;
+            _hasBrokerTick = true;
+        }
+        else
+        {
+            _liveUnrealizedTick = 0m;
+            _liveRealizedTick = 0m;
+            _hasBrokerTick = false;
+        }
+
+        _mtmAtIst = snapshot.TimestampUtc.ToIst();
     }
 
     private async Task ConnectHubAsync()
@@ -501,13 +751,38 @@
                     if (TryGetProp(payload, out var connectedProp, "BrokerConnected", "brokerConnected"))
                         _brokerConnected = connectedProp.ValueKind == JsonValueKind.True;
 
-                    if (TryGetProp(payload, out var netProp, "NetPnL", "netPnL") &&
-                        TryGetDecimal(netProp, out var net))
-                        _mtmNet = net;
+                    var brokerPnlAvailable = true;
+                    if (TryGetProp(payload, out var brokerPnlProp, "BrokerPnlAvailable", "brokerPnlAvailable"))
+                        brokerPnlAvailable = brokerPnlProp.ValueKind == JsonValueKind.True;
 
-                    if (TryGetProp(payload, out var openProp, "OpenPositions", "openPositions") &&
-                        openProp.TryGetInt32(out var openCount))
-                        _mtmOpenCount = openCount;
+                    if (_brokerConnected && brokerPnlAvailable)
+                    {
+                        var applied = false;
+
+                        if (TryGetProp(payload, out var liveUnrealProp, "LiveUnrealized", "liveUnrealized") &&
+                            TryGetDecimal(liveUnrealProp, out var liveUnreal))
+                        {
+                            _liveUnrealizedTick = liveUnreal;
+                            applied = true;
+                        }
+
+                        if (TryGetProp(payload, out var liveRealProp, "LiveRealized", "liveRealized") &&
+                            TryGetDecimal(liveRealProp, out var liveReal))
+                        {
+                            _liveRealizedTick = liveReal;
+                            applied = true;
+                        }
+
+                        _hasBrokerTick = applied;
+                    }
+                    else
+                    {
+                        // Broker offline or live broker-book unreadable: do not render
+                        // local substitutes as terminal-truth live P&L.
+                        _hasBrokerTick = false;
+                        _liveUnrealizedTick = 0m;
+                        _liveRealizedTick = 0m;
+                    }
 
                     // Read as DateTimeOffset: System.Text.Json returns Kind=Local for a
                     // "Z" instant, which would be double-shifted by ToIst().
@@ -576,14 +851,10 @@
 
                     if (changed)
                     {
-                        _totalPnL = _positions.Sum(p => p.UnrealizedPnL);
-
-                        // Keep the MTM (Live) card in sync with the CMP stream instead of
-                        // waiting for the next 30s HealthTick. Mirrors the server-side
-                        // formula (NetPnL = unrealised MTM + realised today). The card's
-                        // visibility still comes from HealthTick (broker connectivity /
-                        // open-position count), so only refresh the stamp once it is live.
-                        _mtmNet = _totalPnL + _realizedPnL;
+                        // The stat cards read straight off _positions, so marking the rows
+                        // above is enough to move Unrealised P&L and MTM with the 1s CMP
+                        // stream. Visibility still comes from HealthTick, so only refresh
+                        // the stamp once it is live.
                         if (_mtmAtIst.HasValue)
                             _mtmAtIst = DateTime.UtcNow.ToIst();
 
@@ -592,11 +863,54 @@
                 });
             });
 
+            _hub.Reconnecting += reconnectingError =>
+            {
+                // While the hub is down no HealthTick arrives, so the live cards silently
+                // fall back to DB figures. Say so rather than showing stale numbers.
+                _ = InvokeAsync(() =>
+                {
+                    _hubError = "Reconnecting to the live feed...";
+                    StateHasChanged();
+                });
+                return Task.CompletedTask;
+            };
+
+            _hub.Reconnected += connectionId =>
+            {
+                _ = InvokeAsync(async () =>
+                {
+                    _hubError = null;
+                    await RefreshAsync();
+                });
+                return Task.CompletedTask;
+            };
+
+            _hub.Closed += ex =>
+            {
+                _ = InvokeAsync(() =>
+                {
+                    _hubError = ex is null
+                        ? "Live feed disconnected."
+                        : $"Live feed disconnected: {ex.Message}";
+                    _brokerConnected = false;
+                    _hasBrokerTick = false;
+                    StateHasChanged();
+                });
+                return Task.CompletedTask;
+            };
+
             await _hub.StartAsync();
+            _hubError = null;
         }
-        catch
+        catch (Exception ex)
         {
-            // Hub connection is best-effort; UI still works without it.
+            // Without the hub there are no HealthTick or CmpTick updates, so every live
+            // figure is frozen on whatever the last DB read produced. That must not look
+            // like real broker data.
+            _hubError = ex.Message;
+            Logger.LogError(ex, "Dashboard could not connect to the trading hub");
+            Snackbar.Add($"Live feed unavailable: {ex.Message}", Severity.Error);
+            StateHasChanged();
         }
     }
 
@@ -612,16 +926,17 @@
                 .Take(30)
                 .ToList();
 
-            _todaySignals = allRecent.Count(s => s.ReceivedTimestamp.Date == DateTime.UtcNow.Date);
-            _executedToday = allRecent.Count(s => s.Status == SignalStatus.Executed &&
-                s.ReceivedTimestamp.Date == DateTime.UtcNow.Date);
+            _todaySignals = allRecent.Count(s => s.ReceivedTimestamp.ToIst().Date == todayIst);
 
             using var db = await DbFactory.CreateDbContextAsync();
+            // Load every open position, not a page of them: these rows are the single
+            // source of truth for the Open Positions and Unrealised P&L cards, and a
+            // capped list silently under-reported both. Only the table is paged.
             _positions = await db.Positions.AsNoTracking()
                 .Include(p => p.Signal)
+                .Include(p => p.TradingAccount)
                 .Where(p => p.ClosedAt == null)
                 .OrderByDescending(p => p.OpenedAt)
-                .Take(20)
                 .ToListAsync();
             var watch = await db.TradingSignals.AsNoTracking()
                 .Where(s => s.Status == SignalStatus.Pending || s.Status == SignalStatus.Executed)
@@ -645,21 +960,51 @@
                     _exitBySignal.TryAdd(position.SignalId, position.ClosingPrice!.Value);
             }
 
-            _openPositions = _positions.Count;
-            _totalPnL = _positions.Sum(p => p.UnrealizedPnL);
-            var todayStart = DateTime.UtcNow.Date;
-            _realizedPnL = await db.Positions
-                .Where(p => p.ClosedAt >= todayStart && p.ClosedAt < todayStart.AddDays(1))
-                .SumAsync(p => p.RealizedPnL ?? 0m);
-            // Keep MTM (Live) consistent after position/signal changes too, so the card
-            // never shows a stale figure between HealthTicks.
-            _mtmNet = _totalPnL + _realizedPnL;
+            // Realised P&L is reported for the IST trading day, so the window is the
+            // IST midnight boundary expressed in UTC (the storage timezone).
+            var todayStart = todayIst.IstToUtc();
+            var tomorrowStart = todayIst.AddDays(1).IstToUtc();
+            var realizedByBook = await db.Positions
+                .Where(p => p.ClosedAt >= todayStart && p.ClosedAt < tomorrowStart)
+                .GroupBy(p => EF.Functions.Like(p.TradingAccount.ClientId, BookScope.PaperClientId))
+                .Select(g => new { IsPaper = g.Key, Total = g.Sum(p => p.RealizedPnL ?? 0m) })
+                .ToListAsync();
+            _realizedPaper = realizedByBook.Where(r => r.IsPaper).Sum(r => r.Total);
+            _realizedLive = realizedByBook.Where(r => !r.IsPaper).Sum(r => r.Total);
+
+            // "Executed today" counts distinct signals that actually traded, not order
+            // fills: one signal produces an entry order and an exit order, which would
+            // otherwise double the figure. Order is also the only entity that identifies
+            // which book it traded on.
+            var executedSignals = await db.Orders
+                .Where(o => o.Status == OrderStatus.Executed &&
+                            o.ExecutedAt >= todayStart && o.ExecutedAt < tomorrowStart)
+                .Select(o => new
+                {
+                    IsPaper = EF.Functions.Like(o.TradingAccount.ClientId, BookScope.PaperClientId),
+                    o.SignalId
+                })
+                .Distinct()
+                .ToListAsync();
+
+            _executedPaper = executedSignals.Count(x => x.IsPaper);
+            _executedLive = executedSignals.Count(x => !x.IsPaper);
+            // A signal traded on both books yields one row per book above, so the combined
+            // figure must be a distinct count rather than live + paper.
+            _executedAll = executedSignals.Select(x => x.SignalId).Distinct().Count();
+
             SyncEdits();
+            _refreshError = null;
             StateHasChanged();
         }
         catch (Exception ex)
         {
+            // A swallowed failure here leaves every card at its default 0, which reads
+            // as "flat day" rather than "broken". Log it and say so on screen.
+            _refreshError = ex.Message;
+            Logger.LogError(ex, "Dashboard refresh failed");
             Snackbar.Add($"Refresh failed: {ex.Message}", Severity.Error);
+            StateHasChanged();
         }
     }
 

@@ -8,14 +8,9 @@ namespace NexusApp.Brokers;
 /// A proxy broker that routes calls to the appropriate IBroker implementation (AngelOne or AliceBlue)
 /// depending on the active/default trading account stored in the database.
 /// </summary>
-public sealed class RoutingBroker : IBroker
+public sealed class RoutingBroker(IServiceProvider serviceProvider) : IBroker
 {
-    private readonly IServiceProvider _serviceProvider;
-
-    public RoutingBroker(IServiceProvider serviceProvider)
-    {
-        _serviceProvider = serviceProvider;
-    }
+    private readonly IServiceProvider _serviceProvider = serviceProvider;
 
     private IBroker GetActiveBroker()
     {
@@ -69,6 +64,9 @@ public sealed class RoutingBroker : IBroker
     public Task<bool> ModifyOrderAsync(string orderId, BrokerOrderRequest request) => GetActiveBroker().ModifyOrderAsync(orderId, request);
     
     public Task<bool> CancelOrderAsync(string orderId) => GetActiveBroker().CancelOrderAsync(orderId);
+
+    public Task<bool> ExitBracketOrderAsync(string parentOrderId, string symbol) =>
+        GetActiveBroker().ExitBracketOrderAsync(parentOrderId, symbol);
     
     public Task<List<BrokerOrder>> GetOrderBookAsync() => GetActiveBroker().GetOrderBookAsync();
     

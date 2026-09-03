@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using MudBlazor.Services;
 using NexusApp.BackgroundServices;
@@ -55,12 +56,38 @@ internal static class ServiceCollectionExtensions
     private static void AddPersistence(this IServiceCollection services, IConfiguration configuration)
     {
         var connectionString = configuration.GetConnectionString("DefaultConnection") ?? "Data Source=trading.db";
+        connectionString = ResolvePersistenceConnectionString(connectionString);
+
         var busyTimeoutInterceptor = new SqliteBusyTimeoutInterceptor();
         services.AddDbContext<TradingDbContext>(options =>
             options.UseSqlite(connectionString).AddInterceptors(busyTimeoutInterceptor));
         services.AddDbContextFactory<TradingDbContext>(
             options => options.UseSqlite(connectionString).AddInterceptors(busyTimeoutInterceptor),
             lifetime: ServiceLifetime.Scoped);
+    }
+
+    private static string ResolvePersistenceConnectionString(string connectionString)
+    {
+        var sqliteBuilder = new SqliteConnectionStringBuilder(connectionString);
+
+        if (string.IsNullOrWhiteSpace(sqliteBuilder.DataSource) || Path.IsPathRooted(sqliteBuilder.DataSource))
+        {
+            return connectionString;
+        }
+
+        var appServiceHome = Environment.GetEnvironmentVariable("HOME");
+        var runningOnAzureAppService = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID"))
+            && !string.IsNullOrWhiteSpace(appServiceHome);
+
+        if (!runningOnAzureAppService)
+        {
+            return connectionString;
+        }
+
+        var persistentDataFolder = Path.Combine(appServiceHome!, "data");
+        Directory.CreateDirectory(persistentDataFolder);
+        sqliteBuilder.DataSource = Path.Combine(persistentDataFolder, sqliteBuilder.DataSource);
+        return sqliteBuilder.ToString();
     }
 
     private static void AddAppAuthentication(this IServiceCollection services)
@@ -92,6 +119,7 @@ internal static class ServiceCollectionExtensions
         services.AddScoped<ISettingsService, SettingsService>();
         services.AddScoped<DataCleanupService>();
         services.AddScoped<TradeHistoryService>();
+        services.AddScoped<PositionAuditService>();
         services.AddScoped<ITradingAccountService, TradingAccountService>();
         services.AddScoped<TradingSignalService>();
         services.AddScoped<ISignalParser, SignalParser>();
@@ -173,6 +201,9 @@ internal static class ServiceCollectionExtensions
         services.AddSingleton<TelegramManager>();
         services.AddHostedService<TelegramListenerService>();
         services.AddHostedService<BrokerAutoConnectService>();
+        services.AddSingleton<BrokerPnlTracker>();
+        services.AddHostedService(sp => sp.GetRequiredService<BrokerPnlTracker>());
+        services.AddSingleton<NexusApp.Services.HealthSnapshotCache>();
         services.AddHostedService<HealthMonitorService>();
         services.AddHostedService<CmpStreamingService>();
         services.AddHostedService<OrderSyncService>();

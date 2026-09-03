@@ -73,7 +73,7 @@
 </MudPaper>
 
 @code {
-    private DateTime? _selectedDate = DateTime.Today;
+    private DateTime? _selectedDate = DateTime.UtcNow.ToIst().Date;
     private List<TradingSignal> _signals = new();
 
     private const string _sortColumnTime = "time";

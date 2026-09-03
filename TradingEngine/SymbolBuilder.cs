@@ -1,6 +1,7 @@
 using System.Globalization;
 using Microsoft.Extensions.Logging;
 using NexusApp.Brokers.AngelOne;
+using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Models;
 
@@ -147,7 +148,7 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
             try
             {
                 await _instrumentMaster.EnsureLoadedAsync();
-                var listed = _instrumentMaster.NearestExpiry(index, DateTime.Today);
+                var listed = _instrumentMaster.NearestExpiry(index, DateTimeExtensions.IstToday());
                 if (listed is not null)
                 {
                     _logger.LogInformation(
@@ -168,7 +169,7 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
             }
         }
 
-        return NearestWeeklyExpiry(DateTime.Today, index);
+        return NearestWeeklyExpiry(DateTimeExtensions.IstToday(), index);
     }
 
     private static ResolvedSymbol ToResolved(AngelInstrumentMaster.MasterEntry entry, DateTime expiry, SymbolSource source)

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using NexusApp.Helpers;
 
 namespace NexusApp.Brokers.AliceBlue;
 
@@ -58,17 +59,17 @@ public sealed class AliceBlueContractMaster
 
     /// <summary>
     /// Ensures the contract master is loaded (at most once per calendar day).
-    /// Uses a disk cache written on the current local date when available.
+    /// Uses a disk cache written on the current IST date when available.
     /// </summary>
     public async Task EnsureLoadedAsync(CancellationToken ct = default)
     {
-        if (IsLoaded && _loadedAtUtc.ToLocalTime().Date == DateTime.Today)
+        if (IsLoaded && _loadedAtUtc.ToIst().Date == DateTimeExtensions.IstToday())
             return;
 
         await _refreshLock.WaitAsync(ct);
         try
         {
-            if (IsLoaded && _loadedAtUtc.ToLocalTime().Date == DateTime.Today)
+            if (IsLoaded && _loadedAtUtc.ToIst().Date == DateTimeExtensions.IstToday())
                 return;
 
             var byTs = new ConcurrentDictionary<string, ContractEntry>(StringComparer.OrdinalIgnoreCase);
@@ -114,7 +115,7 @@ public sealed class AliceBlueContractMaster
     private async Task<string?> LoadCsvAsync(string exchange, CancellationToken ct)
     {
         var cachePath = Path.Combine(_cacheDir, $"aliceblue-contract-{exchange}.csv");
-        var cacheFresh = File.Exists(cachePath) && File.GetLastWriteTime(cachePath).Date == DateTime.Today;
+        var cacheFresh = File.Exists(cachePath) && File.GetLastWriteTimeUtc(cachePath).ToIst().Date == DateTimeExtensions.IstToday();
 
         if (cacheFresh)
         {

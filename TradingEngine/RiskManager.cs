@@ -292,15 +292,21 @@ public class PaperTradingEngine(
             if (order.Side == OrderSide.Sell)
             {
                 var openPosition = await _context.Positions
+                    .Include(p => p.Signal)
                     .FirstOrDefaultAsync(p => p.TradingAccountId == order.TradingAccountId
                         && p.Symbol == order.Symbol
                         && p.ClosedAt == null);
 
                 if (openPosition is not null)
                 {
+                    // Direction-aware: a raw (exit - entry) formula reports a short's loss
+                    // as a profit. Every other close path routes through PnlCalculator.
+                    var isLong = openPosition.Signal is null || openPosition.Signal.Action == SignalAction.Buy;
+
                     openPosition.ClosedAt = DateTime.UtcNow;
                     openPosition.ClosingPrice = currentPrice;
-                    openPosition.RealizedPnL = (currentPrice - openPosition.EntryPrice) * openPosition.Quantity;
+                    openPosition.RealizedPnL = PnlCalculator.RealizedPnl(
+                        openPosition.EntryPrice, currentPrice, openPosition.Quantity, isShort: !isLong);
                     openPosition.CurrentPrice = currentPrice;
                     openPosition.UnrealizedPnL = 0;
                     openPosition.UnrealizedPnLPercentage = 0;
@@ -379,10 +385,19 @@ public class PaperTradingEngine(
             var exitOffsetSetting = await _settings.GetSettingAsync<decimal?>("ExitPriceOffset");
             var exitOffset = exitOffsetSetting ?? 0m;
 
-            var positions = await _context.Positions
+            // PAPER ONLY. This is the simulated exit engine: it invents SL/target fills
+            // from a price feed. Live positions must never be closed here - their exits
+            // belong to the broker and are reconciled from real fills by OrderSyncService.
+            // Without this filter a live position gets a fabricated ClosedAt/RealizedPnL
+            // from a simulated exit price, so the DB books a profit the terminal never
+            // realised while the real broker leg is still running.
+            var allOpen = await _context.Positions
                 .Include(p => p.Signal)
+                .Include(p => p.TradingAccount)
                 .Where(p => p.ClosedAt == null)
                 .ToListAsync();
+
+            var positions = allOpen.Where(BookScope.IsPaper).ToList();
 
             foreach (var position in positions)
             {
@@ -487,13 +502,18 @@ public class PaperTradingEngine(
     {
         try
         {
-            var position = await _context.Positions.FindAsync(positionId);
+            var position = await _context.Positions
+                .Include(p => p.Signal)
+                .FirstOrDefaultAsync(p => p.Id == positionId);
             if (position == null)
                 return false;
 
+            var isLong = position.Signal is null || position.Signal.Action == SignalAction.Buy;
+
             position.ClosedAt = DateTime.UtcNow;
             position.ClosingPrice = closingPrice;
-            position.RealizedPnL = PnlCalculator.RealizedPnl(position.EntryPrice, closingPrice, position.Quantity);
+            position.RealizedPnL = PnlCalculator.RealizedPnl(
+                position.EntryPrice, closingPrice, position.Quantity, isShort: !isLong);
 
             await _context.SaveChangesAsync();
             _logger.LogInformation("Paper position closed: {Symbol} @ {Price}", position.Symbol, closingPrice);

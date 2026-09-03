@@ -109,6 +109,11 @@ $@"🛒 ORDER PLACED {modeBadge}
 • Time: {istTime} IST";
 
             await _telegramManager.SendOrderNotificationAsync(message);
+
+            // Only a fill is worth an audio cue; a live order that is merely accepted
+            // gets its sound later from the order-sync executed path.
+            if (orderStatus.Contains("EXECUTED", StringComparison.OrdinalIgnoreCase))
+                await SendTradeSoundAsync(isPaper ? "paper-entry" : "live-entry");
         }
         catch (Exception ex)
         {
@@ -138,10 +143,46 @@ $@"🚪 POSITION CLOSED {modeBadge} {pnlBadge}
 • Time: {istTime} IST";
 
             await _telegramManager.SendOrderNotificationAsync(message);
+            await SendTradeSoundAsync(ExitSoundFor(reason, isPaper));
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to send Telegram order closed notification");
+        }
+    }
+
+    /// <summary>
+    /// Maps a close reason to an audio cue. Stop-loss, target and a manual square-off
+    /// each get their own unmistakable sound; every other exit falls back to the
+    /// paper/live exit tone so the book is still audible.
+    /// </summary>
+    private static string ExitSoundFor(string reason, bool isPaper)
+    {
+        var r = (reason ?? string.Empty).ToLowerInvariant();
+
+        if (r.Contains("stop loss") || r.Contains("stoploss") || r.Contains("sl hit"))
+            return "sl-hit";
+        if (r.Contains("target"))
+            return "target-hit";
+        if (r.Contains("square off") || r.Contains("squareoff") || r.Contains("manual"))
+            return "squareoff";
+
+        return isPaper ? "paper-exit" : "live-exit";
+    }
+
+    public async Task SendTradeSoundAsync(string sound)
+    {
+        try
+        {
+            await _hub.Clients.All.SendAsync("TradeSound", new
+            {
+                Sound = sound,
+                Timestamp = DateTime.UtcNow
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to broadcast trade sound {Sound}", sound);
         }
     }
 

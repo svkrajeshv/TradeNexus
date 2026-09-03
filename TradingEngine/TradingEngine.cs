@@ -68,7 +68,7 @@ public class TradingEngine(
             _logger.LogWarning("Invalid signal: no targets");
             return Task.FromResult(false);
         }
-        if (signal.ExpiryDate != default && signal.ExpiryDate < DateTime.Today)
+        if (signal.ExpiryDate != default && signal.ExpiryDate < DateTimeExtensions.IstToday())
         {
             _logger.LogWarning("Invalid signal: expiry date in past ({Expiry})", signal.ExpiryDate);
             return Task.FromResult(false);
@@ -335,26 +335,40 @@ public class TradingEngine(
             var orderVariety = await _settings.GetSettingAsync<string>("OrderVariety") ?? "Robo";
             var isMarket = string.Equals(orderVariety, "Market", StringComparison.OrdinalIgnoreCase);
             var isRobo = !isMarket && string.Equals(orderVariety, "Robo", StringComparison.OrdinalIgnoreCase);
+
+            // BSE F&O (SENSEX / BANKEX) does not support Robo/bracket orders
+            // ("Robo orders are not allowed in BSE FNO due to low volume"), so such
+            // orders are downgraded to a plain Limit order managed by the app.
+            if (isRobo && string.Equals(resolved.Exchange, "BFO", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "Robo orders are not allowed on BSE F&O ({Symbol}); falling back to Limit order",
+                    resolved.Symbol);
+                isRobo = false;
+            }
+
             var entryOrderType = isMarket ? OrderType.Market : OrderType.Limit;
             var trailingSLPoints = await _settings.GetSettingAsync<decimal?>("TrailingStopLossPoints") ?? 0m;
 
             var limitPrice = signal.EntryPrice;
+            // Offsets are logged once as a single summary line rather than one entry per
+            // adjustment, so a single order does not spread its pricing across many logs.
+            var priceAdjustments = new List<string>();
+
             // Market orders fill at the prevailing market price, so the entry-price
             // limit offset does not apply to them.
             if (!isMarket && entryOffset > 0 && signal.Action == SignalAction.Buy)
             {
                 limitPrice = Math.Max(0.05m, signal.EntryPrice - entryOffset);
-                _logger.LogInformation(
-                    "Applied Entry Price offset (-{Offset}): Raw Entry={RawEntry} → Limit Order Price={LimitPrice}",
-                    entryOffset, signal.EntryPrice, limitPrice);
+                priceAdjustments.Add(
+                    $"Entry offset (-{entryOffset}): {signal.EntryPrice} → {limitPrice}");
             }
 
             if (stopLossBuffer > 0 && signalEntity.StopLoss > 0)
             {
                 var bufferedSl = Math.Max(0.05m, signalEntity.StopLoss - stopLossBuffer);
-                _logger.LogInformation(
-                    "Applied StopLoss Buffer (-{Buffer}): Raw SL={RawSL} → Buffered SL={BufferedSL}",
-                    stopLossBuffer, signalEntity.StopLoss, bufferedSl);
+                priceAdjustments.Add(
+                    $"StopLoss buffer (-{stopLossBuffer}): {signalEntity.StopLoss} → {bufferedSl}");
                 signalEntity.StopLoss = bufferedSl;
                 await _context.SaveChangesAsync();
             }
@@ -365,10 +379,15 @@ public class TradingEngine(
                     .Select(t => Math.Max(limitPrice + 1m, t - targetOffset))
                     .ToList();
                 signalEntity.Targets = adjustedTargets;
-                _logger.LogInformation(
-                    "Applied Target Price offset (-{Offset}): Adjusted Targets=[{Targets}]",
-                    targetOffset, string.Join(", ", adjustedTargets));
+                priceAdjustments.Add(
+                    $"Target offset (-{targetOffset}): [{string.Join(", ", adjustedTargets)}]");
                 await _context.SaveChangesAsync();
+            }
+
+            if (priceAdjustments.Count > 0)
+            {
+                _logger.LogInformation("Applied price adjustments for {Index}: {Adjustments}",
+                    signal.Index, string.Join(" | ", priceAdjustments));
             }
 
             var side = signal.Action == SignalAction.Buy ? OrderSide.Buy : OrderSide.Sell;
@@ -751,13 +770,41 @@ public class TradingEngine(
             var positions = await _broker.GetPositionBookAsync();
             foreach (var brokerPosition in positions)
             {
+                // Fully squared-off legs (netqty 0) carry no mark and must not be used
+                // to overwrite an open position's live figures.
+                if (brokerPosition.Quantity == 0m)
+                    continue;
+
+                // Never let broker marks overwrite simulated positions - paper rows are
+                // owned by PaperTradingEngine and would otherwise be clobbered whenever
+                // the same contract is also held live.
                 var position = await _context.Positions
-                    .FirstOrDefaultAsync(p => p.Symbol == brokerPosition.Symbol && p.ClosedAt == null);
+                    .FirstOrDefaultAsync(p => p.Symbol == brokerPosition.Symbol
+                        && p.ClosedAt == null
+                        && p.TradingAccount.ClientId != "PAPER");
 
                 if (position is not null)
                 {
-                    position.CurrentPrice = brokerPosition.CurrentPrice;
-                    position.UnrealizedPnL = PnlCalculator.UnrealizedPnl(position.EntryPrice, brokerPosition.CurrentPrice, position.Quantity);
+                    // Angel's position book often reports ltp/unrealised as 0 (it is not a
+                    // streaming mark). Those zeros must not clobber the WebSocket CMP that
+                    // the rest of the UI is marked from, otherwise live MTM reads 0.00.
+                    if (brokerPosition.CurrentPrice > 0m)
+                        position.CurrentPrice = brokerPosition.CurrentPrice;
+
+                    // Prefer the broker's own unrealised figure - it accounts for the real
+                    // average fill price (including partial fills), which our locally stored
+                    // EntryPrice may not reflect. Fall back to the local calculation against
+                    // the streamed CMP only when the broker reports nothing.
+                    if (brokerPosition.UnrealizedPnL != 0m)
+                    {
+                        position.UnrealizedPnL = brokerPosition.UnrealizedPnL;
+                    }
+                    else if (position.CurrentPrice > 0m)
+                    {
+                        position.UnrealizedPnL = PnlCalculator.UnrealizedPnl(
+                            position.EntryPrice, position.CurrentPrice, position.Quantity);
+                    }
+
                     position.UnrealizedPnLPercentage = position.EntryPrice > 0
                         ? (position.UnrealizedPnL / (position.EntryPrice * position.Quantity)) * 100m
                         : 0m;
@@ -782,7 +829,7 @@ public class TradingEngine(
         return isValid;
     }
 
-    public async Task<bool> SquareOffPositionAsync(int positionId)
+    public async Task<bool> SquareOffPositionAsync(int positionId, string reason = "Square Off")
     {
         try
         {
@@ -861,7 +908,7 @@ public class TradingEngine(
 
                 await _context.SaveChangesAsync();
                 _logger.LogInformation("Paper position {Symbol} squared off at {Price}", position.Symbol, ltp);
-                await _notifications.SendTelegramOrderClosedAsync(account.Name, true, position.Symbol, position.EntryPrice, ltp, position.RealizedPnL.Value, position.Quantity, "Square Off");
+                await _notifications.SendTelegramOrderClosedAsync(account.Name, true, position.Symbol, position.EntryPrice, ltp, position.RealizedPnL.Value, position.Quantity, reason);
                 await _hub.Clients.All.SendAsync("PositionChanged", new { Timestamp = DateTime.UtcNow });
                 await _hub.Clients.All.SendAsync("OrderStatusChanged", new { Timestamp = DateTime.UtcNow });
                 return true;            }
@@ -869,6 +916,26 @@ public class TradingEngine(
             {
                 // Live broker square-off
                 var accountBroker = _serviceProvider.GetRequiredKeyedService<IBroker>(account.BrokerType);
+
+                // Robo/bracket (BO) entries are broker-managed: the broker keeps the
+                // SL/target legs alive as pending SELL orders. Such positions cannot be
+                // exited with a plain INTRADAY sell (the quantity is locked under the BO
+                // product); the parent ROBO order must be cancelled instead, which squares
+                // off the bracket at market.
+                var bracketEntry = await _context.Orders
+                    .Where(o => o.TradingAccountId == account.Id &&
+                                o.Symbol == position.Symbol &&
+                                o.Side == OrderSide.Buy &&
+                                o.ProductType == ProductType.Mos &&
+                                o.BrokerId != null && o.BrokerId != "")
+                    .OrderByDescending(o => o.CreatedAt)
+                    .FirstOrDefaultAsync();
+
+                if (bracketEntry is not null)
+                {
+                    return await SquareOffBracketPositionAsync(
+                        position, account, accountBroker, bracketEntry, ltp, reason);
+                }
 
                 // A resting broker-side target SELL LIMIT (placed for plain LIMIT entries)
                 // must be pulled first, otherwise the exit below would sell the same
@@ -961,6 +1028,9 @@ public class TradingEngine(
                 if (response.Success)
                 {
                     _logger.LogInformation("Live square-off order accepted for {Symbol}; position removed from open positions", position.Symbol);
+                    await _notifications.SendTelegramOrderClosedAsync(
+                        account.Name, false, position.Symbol, position.EntryPrice, ltp,
+                        position.RealizedPnL ?? 0m, position.Quantity, reason);
                     return true;
                 }
                 else
@@ -975,5 +1045,76 @@ public class TradingEngine(
             _logger.LogError(ex, "Error in SquareOffPositionAsync for position {PositionId}", positionId);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Squares off a broker-managed Robo/bracket (BO) position. Angel One does not
+    /// allow a plain INTRADAY sell against BO quantity, so the parent ROBO order is
+    /// cancelled instead — the broker then exits the open bracket leg at market and
+    /// drops the remaining SL/target legs.
+    /// </summary>
+    private async Task<bool> SquareOffBracketPositionAsync(
+        Position position,
+        TradingAccount account,
+        IBroker accountBroker,
+        Order bracketEntry,
+        decimal ltp,
+        string reason)
+    {
+        var cancelled = await accountBroker.ExitBracketOrderAsync(bracketEntry.BrokerId, position.Symbol);
+        if (!cancelled)
+        {
+            _logger.LogError(
+                "Failed to square off Robo/BO position {Symbol}: no open bracket leg could be cancelled (parent order {OrderId})",
+                position.Symbol, bracketEntry.BrokerId);
+            return false;
+        }
+
+        // Any local pending SL/target legs of this bracket are no longer live.
+        var brokerLegs = await _context.Orders
+            .Where(o => o.TradingAccountId == account.Id &&
+                        o.Symbol == position.Symbol &&
+                        o.Side == OrderSide.Sell &&
+                        (o.Status == OrderStatus.Pending || o.Status == OrderStatus.Accepted))
+            .ToListAsync();
+        foreach (var leg in brokerLegs)
+            leg.Status = OrderStatus.Cancelled;
+
+        var exitOrder = new Order
+        {
+            SignalId = position.SignalId,
+            TradingAccountId = account.Id,
+            Symbol = position.Symbol,
+            Quantity = position.Quantity,
+            Price = ltp,
+            Side = OrderSide.Sell,
+            OrderType = OrderType.Market,
+            ProductType = ProductType.Mos,
+            Status = OrderStatus.Accepted,
+            BrokerId = bracketEntry.BrokerId,
+            CreatedAt = DateTime.UtcNow
+        };
+        _context.Orders.Add(exitOrder);
+
+        position.ClosedAt = DateTime.UtcNow;
+        position.ClosingPrice = ltp;
+        position.RealizedPnL = PnlCalculator.RealizedPnl(
+            position.EntryPrice, ltp, position.Quantity);
+        position.UnrealizedPnL = 0m;
+        position.UnrealizedPnLPercentage = 0m;
+
+        await _context.SaveChangesAsync();
+        await _hub.Clients.All.SendAsync("PositionChanged", new { Timestamp = DateTime.UtcNow });
+        await _hub.Clients.All.SendAsync("OrderStatusChanged", new { Timestamp = DateTime.UtcNow });
+
+        _logger.LogInformation(
+            "Robo/BO position {Symbol} squared off by cancelling its open bracket leg (parent order {OrderId})",
+            position.Symbol, bracketEntry.BrokerId);
+
+        await _notifications.SendTelegramOrderClosedAsync(
+            account.Name, false, position.Symbol, position.EntryPrice, ltp,
+            position.RealizedPnL ?? 0m, position.Quantity, reason);
+
+        return true;
     }
 }

@@ -20,7 +20,8 @@ namespace NexusApp.BackgroundServices;
 public sealed class HealthMonitorService(
     ILogger<HealthMonitorService> logger,
     IServiceProvider serviceProvider,
-    IHubContext<TradingHub> hub) : BackgroundService
+    IHubContext<TradingHub> hub,
+    NexusApp.Services.HealthSnapshotCache healthSnapshots) : BackgroundService
 {
     private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(30);
     private DateTime? _lastSquareOffDateLocal;
@@ -28,6 +29,7 @@ public sealed class HealthMonitorService(
     private readonly ILogger<HealthMonitorService> _logger = logger;
     private readonly IServiceProvider _serviceProvider = serviceProvider;
     private readonly IHubContext<TradingHub> _hub = hub;
+    private readonly NexusApp.Services.HealthSnapshotCache _healthSnapshots = healthSnapshots;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -68,18 +70,58 @@ public sealed class HealthMonitorService(
                     await engine.UpdatePositionsAsync();
                 }
 
-                var (mtm, realizedToday, openCount) = await LogAndComputePnlAsync(scope.ServiceProvider, stoppingToken);
+                var pnl = await LogAndComputePnlAsync(scope.ServiceProvider, broker, stoppingToken);
 
-                await _hub.Clients.All.SendAsync("HealthTick", new
+                // Connectivity is always reported. The P&L fields are only added when we
+                // actually computed them - the client applies fields it finds and keeps
+                // its previous values otherwise, so a failed tick leaves the cards on the
+                // last good figures instead of flashing 0.00.
+                var tick = new Dictionary<string, object?>
                 {
-                    BrokerConnected = broker.IsConnected,
-                    Broker = broker.BrokerName,
-                    Mtm = mtm,
-                    RealizedToday = realizedToday,
-                    NetPnL = mtm + realizedToday,
-                    OpenPositions = openCount,
-                    Timestamp = DateTime.UtcNow
-                }, stoppingToken);
+                    ["BrokerConnected"] = broker.IsConnected,
+                    ["Broker"] = broker.BrokerName,
+                    ["Timestamp"] = DateTime.UtcNow
+                };
+
+                if (pnl is { } p)
+                {
+                    tick["BrokerPnlAvailable"] = p.BrokerAvailable;
+
+                    if (p.BrokerAvailable)
+                    {
+                        var liveUnrealized = p.BrokerUnrealized;
+                        var liveRealized = p.BrokerRealized;
+
+                        _logger.LogInformation(
+                            "HealthTick live figures sourced from BROKER position book: unrealised {Unrealised:N2} | realised {Realised:N2}",
+                            liveUnrealized, liveRealized);
+
+                        tick["LiveUnrealized"] = liveUnrealized;
+                        tick["LiveRealized"] = liveRealized;
+                        tick["LiveNetPnL"] = liveUnrealized + liveRealized;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("HealthTick broker P&L unavailable; live cards will be marked unavailable until next successful broker read.");
+                    }
+
+                    tick["LiveOpenPositions"] = p.LiveOpenCount;
+                    tick["PaperUnrealized"] = p.PaperUnrealized;
+                    tick["PaperRealized"] = p.PaperRealized;
+                    tick["PaperNetPnL"] = p.PaperUnrealized + p.PaperRealized;
+                    tick["PaperOpenPositions"] = p.PaperOpenCount;
+                }
+
+                // Cache before broadcasting so a page that renders between two ticks
+                // can pick the figures up immediately instead of waiting 30s.
+                _healthSnapshots.Latest = new NexusApp.Services.HealthSnapshot(
+                    broker.IsConnected,
+                    pnl is { } snap && snap.BrokerAvailable,
+                    pnl?.BrokerUnrealized ?? 0m,
+                    pnl?.BrokerRealized ?? 0m,
+                    DateTime.UtcNow);
+
+                await _hub.Clients.All.SendAsync("HealthTick", tick, stoppingToken);
 
                 // Auto Square-Off Check
                 var settings = scope.ServiceProvider.GetRequiredService<ISettingsService>();
@@ -100,15 +142,15 @@ public sealed class HealthMonitorService(
                         if (openPositions.Count > 0)
                         {
                             _logger.LogInformation("Auto squaring off {Count} open position(s) at Market price.", openPositions.Count);
-                            foreach (var position in openPositions)
+                            foreach (var positionId in openPositions.Select(p => p.Id))
                             {
                                 try
                                 {
-                                    await engine.SquareOffPositionAsync(position.Id);
+                                    await engine.SquareOffPositionAsync(positionId);
                                 }
                                 catch (Exception ex)
                                 {
-                                    _logger.LogError(ex, "Failed to auto square off position {PositionId}", position.Id);
+                                    _logger.LogError(ex, "Failed to auto square off position {PositionId}", positionId);
                                 }
                             }
                         }
@@ -132,13 +174,37 @@ public sealed class HealthMonitorService(
     }
 
     /// <summary>
+    /// Aggregate P&amp;L for a single health tick, split by simulated (paper) vs real
+    /// broker accounts.
+    /// <para>
+    /// <paramref name="BrokerAvailable"/> distinguishes "the broker book was read and
+    /// reports a flat 0.00" from "the broker book could not be read". Both produce a
+    /// zero figure, so testing the value alone silently substitutes local numbers for a
+    /// genuinely flat book.
+    /// </para>
+    /// </summary>
+    private readonly record struct PnlSnapshot(
+        decimal PaperUnrealized,
+        decimal PaperRealized,
+        int PaperOpenCount,
+        decimal LiveUnrealized,
+        decimal LiveRealized,
+        int LiveOpenCount,
+        bool BrokerAvailable,
+        decimal BrokerUnrealized,
+        decimal BrokerRealized);
+
+    /// <summary>
     /// Reads the freshly-marked positions, logs a per-symbol MTM breakdown plus a
     /// session summary to the console/Output window, and returns the aggregate
     /// numbers so they can be pushed to the UI on the same health tick.
     /// "Realized today" is scoped to the current IST trading day.
+    /// Returns <c>null</c> when the figures could not be computed, so the caller can
+    /// omit them from the broadcast rather than publishing misleading zeros.
     /// </summary>
-    private async Task<(decimal Mtm, decimal RealizedToday, int OpenCount)> LogAndComputePnlAsync(
+    private async Task<PnlSnapshot?> LogAndComputePnlAsync(
         IServiceProvider scopedProvider,
+        IBroker broker,
         CancellationToken cancellationToken)
     {
         try
@@ -148,31 +214,65 @@ public sealed class HealthMonitorService(
             var open = await db.Positions
                 .AsNoTracking()
                 .Where(p => p.ClosedAt == null)
-                .Select(p => new { p.Symbol, p.Quantity, p.EntryPrice, p.CurrentPrice, p.UnrealizedPnL })
+                .Select(p => new
+                {
+                    p.Symbol,
+                    p.Quantity,
+                    p.EntryPrice,
+                    p.CurrentPrice,
+                    p.UnrealizedPnL,
+                    IsPaper = EF.Functions.Like(p.TradingAccount.ClientId, BookScope.PaperClientId)
+                })
                 .ToListAsync(cancellationToken);
-
-            var mtm = open.Sum(p => p.UnrealizedPnL);
 
             // Positions store UTC timestamps, so translate "today in IST" into a UTC
             // window before querying, keeping the filter translatable by EF Core.
-            var istDayStartUtc = DateTime.UtcNow.ToIst().Date.IstToUtc();
-            var realizedToday = await db.Positions
+            // The window is half-open so it matches the dashboard's realised query
+            // exactly; an open-ended ">=" would also pick up future-dated closures.
+            var istToday = DateTime.UtcNow.ToIst().Date;
+            var istDayStartUtc = istToday.IstToUtc();
+            var istNextDayStartUtc = istToday.AddDays(1).IstToUtc();
+            var realized = await db.Positions
                 .AsNoTracking()
-                .Where(p => p.ClosedAt != null && p.ClosedAt >= istDayStartUtc)
-                .SumAsync(p => p.RealizedPnL ?? 0m, cancellationToken);
+                .Where(p => p.ClosedAt >= istDayStartUtc && p.ClosedAt < istNextDayStartUtc)
+                .GroupBy(p => EF.Functions.Like(p.TradingAccount.ClientId, BookScope.PaperClientId))
+                .Select(g => new { IsPaper = g.Key, Total = g.Sum(p => p.RealizedPnL ?? 0m) })
+                .ToListAsync(cancellationToken);
+
+            var paperUnrealized = open.Where(p => p.IsPaper).Sum(p => p.UnrealizedPnL);
+            var liveUnrealized = open.Where(p => !p.IsPaper).Sum(p => p.UnrealizedPnL);
+            var paperRealized = realized.Where(r => r.IsPaper).Sum(r => r.Total);
+            var liveRealized = realized.Where(r => !r.IsPaper).Sum(r => r.Total);
+
+            // Broker truth: the position book carries realised P&L even for legs that
+            // are fully squared off (netqty 0), which have no matching open Position row.
+            var (Available, Unrealized, Realized) = await ReadBrokerPnlAsync(scopedProvider, broker);
 
             _logger.LogInformation(
-                "MTM {Mtm:N2} | Realized {Realized:N2} | Net {Net:N2} | Open {Count}",
-                mtm, realizedToday, mtm + realizedToday, open.Count);
+                "LIVE  mtm {Mtm:N2} | realized {Realized:N2} | open {Count}",
+                liveUnrealized, liveRealized, open.Count(p => !p.IsPaper));
+            _logger.LogInformation(
+                "PAPER mtm {Mtm:N2} | realized {Realized:N2} | open {Count}",
+                paperUnrealized, paperRealized, open.Count(p => p.IsPaper));
+
+            if (Available)
+            {
+                _logger.LogInformation(
+                    "BROKER mtm {Mtm:N2} | realized {Realized:N2} (from position book)",
+                    Unrealized, Realized);
+            }
 
             foreach (var p in open)
             {
                 _logger.LogInformation(
-                    "  {Symbol} qty={Qty} entry={Entry:N2} ltp={Ltp:N2} mtm={Pnl:N2}",
-                    p.Symbol, p.Quantity, p.EntryPrice, p.CurrentPrice, p.UnrealizedPnL);
+                    "  [{Mode}] {Symbol} qty={Qty} entry={Entry:N2} ltp={Ltp:N2} mtm={Pnl:N2}",
+                    p.IsPaper ? "PAPER" : "LIVE", p.Symbol, p.Quantity, p.EntryPrice, p.CurrentPrice, p.UnrealizedPnL);
             }
 
-            return (mtm, realizedToday, open.Count);
+            return new PnlSnapshot(
+                paperUnrealized, paperRealized, open.Count(p => p.IsPaper),
+                liveUnrealized, liveRealized, open.Count(p => !p.IsPaper),
+                Available, Unrealized, Realized);
         }
         catch (OperationCanceledException)
         {
@@ -180,8 +280,40 @@ public sealed class HealthMonitorService(
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to compute P&L summary for health tick");
-            return (0m, 0m, 0);
+            // Do not return a zeroed snapshot: the caller would broadcast it and every
+            // live P&L card would read 0.00 with no indication anything went wrong.
+            _logger.LogError(ex, "Failed to compute P&L summary for health tick");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Aggregates the broker position book into unrealised/realised totals.
+    /// Deliberately not persisted - it is a live read-through of broker state,
+    /// avoiding the problem that squared-off legs have no local Position to map onto.
+    /// </summary>
+    private async Task<(bool Available, decimal Unrealized, decimal Realized)> ReadBrokerPnlAsync(
+        IServiceProvider services, IBroker broker)
+    {
+        if (!broker.IsConnected)
+            return (false, 0m, 0m);
+
+        // Preferred path: figures derived from the slow broker snapshot re-marked by
+        // SmartStream ticks. Avoids a getPosition call on every 30s health tick, which
+        // is what pushed the account into Angel One's access-rate limit.
+        var tracker = services.GetService<BrokerPnlTracker>();
+        if (tracker?.TryGetLivePnl() is { } live)
+            return (true, live.Unrealized, live.Realized);
+
+        try
+        {
+            var book = await broker.GetPositionBookAsync();
+            return (true, book.Sum(p => p.UnrealizedPnL), book.Sum(p => p.RealizedPnL));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read broker position book for P&L");
+            return (false, 0m, 0m);
         }
     }
 }
@@ -420,10 +552,9 @@ public sealed class CmpStreamingService(
 
                     // Drop armed state for signals that are no longer awaiting entry.
                     var awaitingIds = awaitingSignals.Select(s => s.Id).ToHashSet();
-                    foreach (var armedId in _entryArmedSignals.Keys)
+                    foreach (var armedId in _entryArmedSignals.Keys.Where(id => !awaitingIds.Contains(id)))
                     {
-                        if (!awaitingIds.Contains(armedId))
-                            _entryArmedSignals.TryRemove(armedId, out _);
+                        _entryArmedSignals.TryRemove(armedId, out _);
                     }
 
                     foreach (var sig in awaitingSignals)
@@ -503,16 +634,13 @@ public sealed class CmpStreamingService(
                             continue;
                         }
 
-                        if (!crossed)
+                        if (!crossed && _entryArmedSignals.TryAdd(sig.Id, 0))
                         {
                             // Contract is trading below the trigger — arm the signal so the
                             // next upward cross through the trigger executes it.
-                            if (_entryArmedSignals.TryAdd(sig.Id, 0))
-                            {
-                                _logger.LogInformation(
-                                    "Entry armed for signal {Id}: CMP {Cmp} is below Trigger {Trigger} (raw entry {Entry}).",
-                                    sig.Id, cmp, triggerPrice, sig.EntryPrice);
-                            }
+                            _logger.LogInformation(
+                                "Entry armed for signal {Id}: CMP {Cmp} is below Trigger {Trigger} (raw entry {Entry}).",
+                                sig.Id, cmp, triggerPrice, sig.EntryPrice);
                         }
 
                         if (crossed)
@@ -600,7 +728,7 @@ public sealed class CmpStreamingService(
 
         try
         {
-            var expiry = signal.ExpiryDate != default ? signal.ExpiryDate : DateTime.Today;
+            var expiry = signal.ExpiryDate != default ? signal.ExpiryDate : DateTimeExtensions.IstToday();
             var optType = signal.OptionType.ToString().ToUpperInvariant();
             var entry = _instrumentMaster.FindOption(signal.Index, expiry, signal.Strike, optType);
             if (entry is not null && !string.IsNullOrWhiteSpace(entry.TradingSymbol))

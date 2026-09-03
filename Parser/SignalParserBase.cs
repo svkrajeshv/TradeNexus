@@ -1,3 +1,4 @@
+using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Models;
 using System.Text.RegularExpressions;
@@ -360,10 +361,11 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
 
             if (month > 0)
             {
-                var year = DateTime.Now.Year;
+                var istToday = DateTimeExtensions.IstToday();
+                var year = istToday.Year;
 
                 // If month is in past, use next year
-                if (month < DateTime.Now.Month)
+                if (month < istToday.Month)
                     year++;
 
                 try

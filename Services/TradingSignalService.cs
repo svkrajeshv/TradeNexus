@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using NexusApp.Data;
+using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Models;
 
@@ -174,8 +175,10 @@ public class TradingSignalService
     {
         try
         {
-            var startOfDay = date.Date;
-            var endOfDay = startOfDay.AddDays(1);
+            // The caller supplies an IST calendar date; timestamps are stored in UTC,
+            // so the day window is the IST midnight boundary converted to UTC.
+            var startOfDay = date.Date.IstToUtc();
+            var endOfDay = date.Date.AddDays(1).IstToUtc();
 
             return await _context.TradingSignals
                 .AsNoTracking()
@@ -203,8 +206,11 @@ public class TradingSignalService
             var failedSignals = await _context.TradingSignals.CountAsync(s => s.Status == SignalStatus.Failed);
             var ignoredSignals = await _context.TradingSignals.CountAsync(s => s.Status == SignalStatus.Ignored);
 
+            // "Today" is the IST trading day; timestamps are stored in UTC.
+            var istDayStart = DateTimeExtensions.IstToday().IstToUtc();
+            var istDayEnd = DateTimeExtensions.IstToday().AddDays(1).IstToUtc();
             var todaySignals = await _context.TradingSignals
-                .Where(s => s.ReceivedTimestamp.Date == DateTime.Today)
+                .Where(s => s.ReceivedTimestamp >= istDayStart && s.ReceivedTimestamp < istDayEnd)
                 .CountAsync();
 
             return new SignalStatistics

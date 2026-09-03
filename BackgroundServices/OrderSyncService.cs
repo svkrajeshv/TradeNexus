@@ -306,6 +306,9 @@ public sealed class OrderSyncService : BackgroundService
 
             if (order.Status == OrderStatus.Executed)
             {
+                await notifications.SendTradeSoundAsync(
+                    order.Side == OrderSide.Sell ? "live-exit" : "live-entry");
+
                 var priceDisplay = order.ExecutedPrice > 0 ? order.ExecutedPrice : order.Price;
                 await notifications.SendOrderNotificationAsync(
                     order.Symbol,
@@ -367,21 +370,22 @@ public sealed class OrderSyncService : BackgroundService
     /// <summary>
     /// Creates or closes locally-tracked live positions in response to broker fills.
     ///
-    /// Only <b>non-Robo (Limit / MIS)</b> orders on <b>live</b> accounts are tracked here:
-    /// Robo/bracket orders (<see cref="ProductType.Mos"/>) are managed by the broker,
-    /// and paper positions are simulated by <see cref="PaperTradingEngine"/> — creating a
-    /// locally-managed row for either would risk a double exit.
+    /// All <b>live</b> account fills are tracked (paper positions are simulated by
+    /// <see cref="PaperTradingEngine"/> and are excluded), so the dashboard can report
+    /// live open positions and MTM:
     ///
-    ///   * BUY  fill → opens a position carrying the signal's StopLoss/Targets and
-    ///                 flags it <see cref="Position.ManagedLocally"/> so the price
-    ///                 monitor can square it off when LTP crosses SL/target.
+    ///   * BUY  fill → opens a position carrying the signal's StopLoss/Targets.
+    ///                 Non-Robo (Limit / MIS) entries are flagged
+    ///                 <see cref="Position.ManagedLocally"/> so the price monitor can
+    ///                 square them off on SL/target; Robo/bracket entries
+    ///                 (<see cref="ProductType.Mos"/>) are tracked for reporting only
+    ///                 because the broker owns their exits.
     ///   * SELL fill → closes the matching open position (exit already happened at broker).
     /// </summary>
     private async Task ReconcileLivePositionsAsync(TradingDbContext db, List<Order> changed, CancellationToken ct)
     {
         var executed = changed
             .Where(o => o.Status == OrderStatus.Executed &&
-                        o.ProductType != ProductType.Mos &&           // skip Robo/bracket (broker-managed)
                         !string.IsNullOrEmpty(o.BrokerId) &&
                         !o.BrokerId.StartsWith("Paper", StringComparison.OrdinalIgnoreCase) &&
                         !o.BrokerId.StartsWith("REJ-", StringComparison.OrdinalIgnoreCase))
@@ -424,7 +428,11 @@ public sealed class OrderSyncService : BackgroundService
                 }
                 else
                 {
-                    // Opening BUY fill — create a locally-managed position if one isn't tracked yet.
+                    // Opening BUY fill — track the position if one isn't tracked yet.
+                    // Robo/bracket (Mos) fills are tracked for reporting only; their
+                    // SL/target exits stay with the broker.
+                    var isBrokerManaged = order.ProductType == ProductType.Mos;
+
                     var already = await db.Positions.AnyAsync(p =>
                         p.TradingAccountId == order.TradingAccountId &&
                         p.Symbol == order.Symbol &&
@@ -453,15 +461,17 @@ public sealed class OrderSyncService : BackgroundService
                         OpenedAt = order.ExecutedAt ?? DateTime.UtcNow,
                         UnrealizedPnL = 0,
                         UnrealizedPnLPercentage = 0,
-                        ManagedLocally = true
+                        ManagedLocally = !isBrokerManaged
                     });
                     mutated = true;
                     _logger.LogInformation(
-                        "Tracking live position for SL/target monitoring: {Symbol} @ {Price} (SL={SL}, Targets={Targets})",
+                        "Tracking live position ({Mode}): {Symbol} @ {Price} (SL={SL}, Targets={Targets})",
+                        isBrokerManaged ? "broker-managed Robo/BO, reporting only" : "app-managed SL/target",
                         order.Symbol, fillPrice, slValue?.ToString() ?? "None",
                         string.Join("/", targetList));
 
-                    await PlaceRestingTargetOrderAsync(db, order, qty, fillPrice, targetList, ct);
+                    if (!isBrokerManaged)
+                        await PlaceRestingTargetOrderAsync(db, order, qty, fillPrice, targetList, ct);
                 }
             }
             catch (Exception ex)

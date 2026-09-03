@@ -426,7 +426,7 @@ public sealed partial class TelegramListenerService(
                 var isFromDestChannel = string.Equals(message.SenderName, destChannel, StringComparison.OrdinalIgnoreCase);
                 if (!isFromDestChannel)
                 {
-                    var isToday = message.Timestamp.Date == DateTime.UtcNow.Date;
+                    var isToday = message.Timestamp.EnsureUtc().ToIst().Date == DateTimeExtensions.IstToday();
                     var isNewMessage = message.Timestamp >= _serviceStartTime;
 
                     var shouldForward = isToday && isNewMessage && (!currentSettings.ForwardOnlySignals || (parsed is not null && parsed.IsValid));

@@ -19,7 +19,7 @@ public interface ITradingEngine
     Task<bool> ExecuteSignalAsync(ParsedSignal signal, int? accountId = null);
     Task<bool> UpdatePositionsAsync();
     Task<bool> CheckRiskLimitsAsync(int accountId);
-    Task<bool> SquareOffPositionAsync(int positionId);
+    Task<bool> SquareOffPositionAsync(int positionId, string reason = "Square Off");
 }
 
 /// <summary>
@@ -34,6 +34,12 @@ public interface INotificationService
     Task SendTelegramOrderClosedAsync(string accountName, bool isPaper, string symbol, decimal entryPrice, decimal exitPrice, decimal realizedPnL, decimal quantity, string reason);
     Task SendTelegramCustomNotificationAsync(string message);
     Task SendTelegramDailyPnlSummaryAsync();
+
+    /// <summary>
+    /// Broadcasts an audio cue name to connected UI clients (see
+    /// <c>wwwroot/js/notifications.js</c> for the available patterns).
+    /// </summary>
+    Task SendTradeSoundAsync(string sound);
 }
 
 /// <summary>

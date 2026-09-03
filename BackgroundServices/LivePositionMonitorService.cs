@@ -7,13 +7,13 @@ using NexusApp.Models;
 namespace NexusApp.BackgroundServices;
 
 /// <summary>
-/// Monitors <b>live</b>, locally-managed positions (created from non-Robo Limit
-/// order fills where the broker is NOT managing brackets) and squares them off
-/// through the real broker when the last-traded price crosses the position's
-/// stop-loss or a target.
+/// Marks all open <b>live</b> positions to the latest traded price so the dashboard
+/// reports an accurate live MTM, and squares off <b>locally-managed</b> positions
+/// (created from non-Robo Limit order fills where the broker is NOT managing
+/// brackets) through the real broker when the price crosses the stop-loss or a target.
 ///
-/// Robo/bracket orders (broker-managed) and paper positions are intentionally
-/// ignored here — paper exits are simulated by <see cref="TradingEngine.PaperTradingEngine"/>
+/// Robo/bracket positions are marked but never exited here, and paper positions are
+/// skipped entirely — paper exits are simulated by <see cref="TradingEngine.PaperTradingEngine"/>
 /// and Robo exits are handled by the broker.
 ///
 /// SL/target logic assumes a long options BUY (LTP ≤ SL exits at stop, LTP ≥ target exits).
@@ -55,9 +55,12 @@ public sealed class LivePositionMonitorService(
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TradingDbContext>();
 
+        // All open live positions are marked to the latest LTP so the dashboard's
+        // live MTM is accurate. Broker-managed (Robo/BO) positions are marked but
+        // never exited here - the broker owns their SL/target legs.
         var positions = await db.Positions
             .Include(p => p.Signal)
-            .Where(p => p.ClosedAt == null && p.ManagedLocally)
+            .Where(p => p.ClosedAt == null && p.TradingAccount.ClientId != "PAPER")
             .ToListAsync(ct);
 
         if (positions.Count == 0)
@@ -115,6 +118,10 @@ public sealed class LivePositionMonitorService(
                     await db.SaveChangesAsync(ct);
                 }
 
+                // Broker-managed brackets are only marked, never exited locally.
+                if (!position.ManagedLocally)
+                    continue;
+
                 var exitReason = ExitEvaluator.Evaluate(position, ltp);
                 if (exitReason == ExitReason.None)
                     continue;
@@ -135,7 +142,9 @@ public sealed class LivePositionMonitorService(
                     "Live position {Symbol} hit {Reason} (LTP {Ltp}, SL {SL}); squaring off via broker",
                     position.Symbol, exitReason, ltp, position.StopLoss);
 
-                var ok = await engine.SquareOffPositionAsync(position.Id);
+                var ok = await engine.SquareOffPositionAsync(
+                    position.Id,
+                    exitReason == ExitReason.StopLoss ? "Stop Loss Hit" : "Target Hit");
                 if (!ok)
                 {
                     _logger.LogWarning(

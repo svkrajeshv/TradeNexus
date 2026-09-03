@@ -180,8 +180,11 @@
     private const string UnknownChannel = "Unknown";
     private const string UnknownTerminal = "Unknown";
 
-    private DateTime? _fromDate = DateTime.Today.AddDays(-30);
-    private DateTime? _toDate = DateTime.Today;
+    private static DateTime IstToday() => DateTime.UtcNow.ToIst().Date;
+    private static DateTime DefaultFromDate() => IstToday().AddDays(-30);
+
+    private DateTime? _fromDate = DefaultFromDate();
+    private DateTime? _toDate = IstToday();
     private string _selectedChannel = AllChannels;
     private string _selectedTerminal = AllTerminals;
 
@@ -242,8 +245,9 @@
     {
         try
         {
-            var fromUtc = (_fromDate ?? DateTime.Today.AddDays(-30)).Date.EnsureUtc();
-            var toUtc = (_toDate ?? DateTime.Today).Date.AddDays(1).EnsureUtc(); // inclusive end-of-day
+            // Pickers hold IST calendar dates; ClosedAt is stored in UTC.
+            var fromUtc = (_fromDate ?? DefaultFromDate()).Date.IstToUtc();
+            var toUtc = (_toDate ?? IstToday()).Date.AddDays(1).IstToUtc(); // inclusive end-of-day
 
             using var db = await DbFactory.CreateDbContextAsync();
 
@@ -283,8 +287,8 @@
 
     private async Task ResetAsync()
     {
-        _fromDate = DateTime.Today.AddDays(-30);
-        _toDate = DateTime.Today;
+        _fromDate = DefaultFromDate();
+        _toDate = IstToday();
         _selectedChannel = AllChannels;
         _selectedTerminal = AllTerminals;
         await ApplyAsync();
