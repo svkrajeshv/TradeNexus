@@ -509,7 +509,8 @@ public sealed partial class TelegramListenerService(
                 signal.SignalDelayMs,
                 signal.OriginalMessage,
                 signal.ReceivedTimestamp,
-                signal.ChannelName
+                signal.ChannelName,
+                RequiresManualAction = signal.Status is SignalStatus.Parsed or SignalStatus.Pending
             });
 
             var mode = (await settings.GetSettingAsync<string>("TradingMode") ?? "manual").ToLowerInvariant();

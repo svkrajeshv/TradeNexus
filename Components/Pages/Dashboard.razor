@@ -70,8 +70,35 @@
         padding: 12px;
         margin-bottom: 10px;
         border: 1px solid var(--mud-palette-lines-default);
+        border-left-width: 4px;
         border-radius: 8px;
         background-color: var(--mud-palette-surface);
+    }
+    /* Book differentiation: a colored left border + faint row/card tint make the
+       Live (real money) vs Paper (simulated) book obvious at a glance, without
+       relying on reading the channel text - important on the small mobile cards
+       where that text is easy to miss. */
+    .position-card--live {
+        border-left-color: var(--mud-palette-success);
+        background-color: rgba(76, 175, 80, 0.06);
+    }
+    .position-card--paper {
+        border-left-color: var(--mud-palette-tertiary, #9c27b0);
+        background-color: rgba(156, 39, 176, 0.05);
+    }
+    .book-badge {
+        font-size: 0.62rem !important;
+        height: 20px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.3px;
+    }
+    .position-row--live {
+        border-left: 4px solid var(--mud-palette-success);
+        background-color: rgba(76, 175, 80, 0.05);
+    }
+    .position-row--paper {
+        border-left: 4px solid var(--mud-palette-tertiary, #9c27b0);
+        background-color: rgba(156, 39, 176, 0.04);
     }
     .watchlist-card-full {
         grid-column: 1 / -1;
@@ -307,7 +334,19 @@
                                 CMP: @GetCmpDisplay(context)
                             </MudChip>
                         </MudTd>
-                        <MudTd DataLabel="Delay">@FormatDelay(context.SignalDelayMs)</MudTd>
+                        <MudTd DataLabel="Delay">
+                            @FormatDelay(context.SignalDelayMs)
+                            @{
+                                var staleness = GetSignalStaleness(context);
+                            }
+                            @if (staleness is { } s)
+                            {
+                                <br />
+                                <MudText Typo="Typo.caption" Color="s.Color" Style="white-space:nowrap;">
+                                    ⏱ @s.Text
+                                </MudText>
+                            }
+                        </MudTd>
                         <MudTd DataLabel="Status">
                             <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
                         </MudTd>
@@ -322,6 +361,11 @@
                                     <MudButton Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined"
                                                Style="min-width:64px" OnClick="@(() => IgnoreAsync(context))">Ignore</MudButton>
                                 </MudStack>
+                            }
+                            else if (IsPendingAutoExecution(context))
+                            {
+                                <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Outlined"
+                                           Style="min-width:64px" OnClick="@(() => CancelPendingAutoAsync(context))">Cancel</MudButton>
                             }
                         </MudTd>
                     </RowTemplate>
@@ -410,9 +454,10 @@
                 <!-- Desktop Table View (hidden on mobile) -->
                 <div class="d-none d-sm-flex flex-column">
                     <div class="grid-height-box table-scroll">
-                    <MudTable Items="DisplayPositions" Dense="true" Hover="true">
+                    <MudTable Items="DisplayPositions" Dense="true" Hover="true" RowClassFunc="@GetPositionRowClass">
                         <HeaderContent>
                             <MudTh>Symbol</MudTh>
+                            <MudTh>Book</MudTh>
                             <MudTh>Channel</MudTh>
                             <MudTh>Qty</MudTh>
                             <MudTh>Entry</MudTh>
@@ -424,6 +469,12 @@
                         </HeaderContent>
                         <RowTemplate>
                             <MudTd>@context.Symbol</MudTd>
+                            <MudTd>
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
+                                         Color="@(BookScope.IsPaper(context) ? Color.Tertiary : Color.Success)">
+                                    @(BookScope.IsPaper(context) ? "PAPER" : "LIVE")
+                                </MudChip>
+                            </MudTd>
                             <MudTd>
                                 <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
                                     @(string.IsNullOrWhiteSpace(context.Signal?.ChannelName) ? "-" : context.Signal.ChannelName)
@@ -456,10 +507,13 @@
                     <MudStack Class="w-100">
                         @foreach (var position in DisplayPositions)
                         {
-                            <div class="position-card">
-                                <div class="watchlist-card-full">
-                                    <div class="watchlist-card-label">Symbol</div>
-                                    <div class="watchlist-card-value">@position.Symbol</div>
+                            <div class="position-card @(BookScope.IsPaper(position) ? "position-card--paper" : "position-card--live")">
+                                <div class="watchlist-card-full d-flex justify-space-between align-center">
+                                    <div class="watchlist-card-value" style="font-weight:600;">@position.Symbol</div>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
+                                             Color="@(BookScope.IsPaper(position) ? Color.Tertiary : Color.Success)">
+                                        @(BookScope.IsPaper(position) ? "PAPER" : "LIVE")
+                                    </MudChip>
                                 </div>
 
                                 <div>
@@ -664,6 +718,9 @@
     }
     // Default lots loaded from global settings (Settings page → "Default Lots per Order")
     private decimal _defaultLots = 1;
+    // Pending order auto-cancel timeout (Settings page), used to project a
+    // remaining-window staleness hint on still-actionable Live Signal rows.
+    private int _pendingOrderTimeoutMinutes = 5;
 
     protected override async Task OnInitializedAsync()
     {
@@ -677,6 +734,7 @@
         var saved = await SettingsService.GetSettingAsync<int?>("DefaultQuantity");
         if (saved.HasValue && saved.Value > 0)
             _defaultLots = saved.Value;
+        _pendingOrderTimeoutMinutes = await SettingsService.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
         await LoadHiddenWatchlistIdsAsync();
 
         // Seed the live cards from the last broadcast health figures so the book
@@ -720,14 +778,19 @@
                 .WithAutomaticReconnect()
                 .Build();
 
-            _hub.On<JsonElement>("SignalReceived", async _ =>
+            _hub.On<JsonElement>("SignalReceived", async payload =>
             {
                 await InvokeAsync(async () =>
                 {
                     await RefreshAsync();
-                    Snackbar.Add("New signal received", Severity.Info);
+
+                    var requiresManual = payload.ValueKind == JsonValueKind.Object &&
+                        TryGetProp(payload, out var requiresManualProp, "RequiresManualAction", "requiresManualAction") &&
+                        requiresManualProp.ValueKind == JsonValueKind.True;
+
+                    Snackbar.Add(requiresManual ? "New signal received — action required" : "New signal received (auto)", Severity.Info);
                     await JS.InvokeVoidAsync("NexusApp.notify", "Trading Signal", "A new signal was parsed");
-                    await JS.InvokeVoidAsync("NexusApp.beep");
+                    await JS.InvokeVoidAsync("NexusApp.playSound", requiresManual ? "signal-manual" : "signal-auto");
                 });
             });
 
@@ -1121,6 +1184,24 @@
         await RefreshAsync();
     }
 
+    /// <summary>
+    /// In Auto trading mode, signals that are waiting on a background trigger
+    /// (entry price crossing, or an activation phrase from the channel) are not
+    /// yet executed and have no Save/BUY/Ignore actions since the user is not
+    /// meant to edit them. This still leaves the user with no way to stop the
+    /// engine from executing them once the trigger condition is met, so a
+    /// standalone Cancel action is offered for these two statuses only.
+    /// </summary>
+    private bool IsPendingAutoExecution(TradingSignal signal) =>
+        signal.Status == SignalStatus.AwaitingEntry || signal.Status == SignalStatus.AwaitingActivation;
+
+    private async Task CancelPendingAutoAsync(TradingSignal signal)
+    {
+        await SignalService.UpdateSignalStatusAsync(signal.Id, SignalStatus.Ignored);
+        Snackbar.Add("Signal cancelled before execution", Severity.Normal);
+        await RefreshAsync();
+    }
+
     private async Task RemoveFromWatchlistAsync(TradingSignal signal)
     {
         _hiddenWatchlistSignalIds.Add(signal.Id);
@@ -1307,6 +1388,44 @@
                     : $"{seconds / 3600:0.0} h";
     }
 
+    private readonly record struct SignalStalenessInfo(string Text, Color Color);
+
+    /// <summary>
+    /// Projects the remaining window before an unfilled limit order (placed right
+    /// now off this signal) would be auto-cancelled, based on the "Pending Order
+    /// Auto-Cancel" setting and how long the signal has already been sitting
+    /// unactioned since it was received.
+    /// </summary>
+    private SignalStalenessInfo? GetSignalStaleness(TradingSignal signal)
+    {
+        if (_pendingOrderTimeoutMinutes <= 0 || !IsEditable(signal))
+            return null;
+
+        var elapsed = DateTime.UtcNow - signal.ReceivedTimestamp.EnsureUtc();
+        var remaining = TimeSpan.FromMinutes(_pendingOrderTimeoutMinutes) - elapsed;
+
+        if (remaining <= TimeSpan.Zero)
+            return new SignalStalenessInfo("Cancelling...", Color.Error);
+
+        var totalWindow = TimeSpan.FromMinutes(_pendingOrderTimeoutMinutes);
+        var fractionRemaining = remaining.TotalSeconds / totalWindow.TotalSeconds;
+        var color = fractionRemaining switch
+        {
+            < 0.2 => Color.Error,
+            < 0.5 => Color.Warning,
+            _ => Color.Default
+        };
+
+        return new SignalStalenessInfo($"{FormatCountdown(remaining)} left", color);
+    }
+
+    private static string FormatCountdown(TimeSpan remaining)
+    {
+        if (remaining.TotalMinutes >= 1)
+            return $"{(int)remaining.TotalMinutes}m {remaining.Seconds}s";
+        return $"{Math.Max(0, remaining.Seconds)}s";
+    }
+
     private static string BuildDefaultTargetText(TradingSignal signal)
     {
         var firstTarget = signal.Targets.Count > 0 ? signal.Targets[0] : signal.EntryPrice;
@@ -1347,6 +1466,13 @@
     }
 
     private int GetCrossedCount() => _signals.Count(HasCmpCrossedEntry);
+
+    /// <summary>
+    /// Colors the whole Open Positions row by book (live vs paper) so the two are
+    /// distinguishable at a glance on desktop without reading the Book chip text.
+    /// </summary>
+    private static string GetPositionRowClass(NexusApp.Models.Position position, int rowNumber) =>
+        BookScope.IsPaper(position) ? "position-row--paper" : "position-row--live";
 
     private string GetCmpBlinkClass(TradingSignal signal)
     {

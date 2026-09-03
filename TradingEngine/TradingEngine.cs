@@ -750,6 +750,13 @@ public class TradingEngine(
                 _logger.LogWarning("Failure recorded without Order row (no trading account exists): {Reason}", reason);
                 await _context.SaveChangesAsync();
             }
+
+            // Surface the failure in the UI. This is the only place every failed
+            // execution path (validation, staleness, time-window, account, risk,
+            // broker error) funnels through, so a single notification here covers
+            // both manual and automatic execution without duplicating call sites.
+            await _notifications.SendErrorNotificationAsync(
+                $"{signal.Action} {signal.Index} {signal.Strike}{signal.OptionType} — {reason}");
         }
         catch (Exception ex)
         {

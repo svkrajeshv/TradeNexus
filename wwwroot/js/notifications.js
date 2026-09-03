@@ -48,7 +48,15 @@ window.NexusApp.soundPatterns = {
     "sl-hit":      [[240, 0.30, 0.00, "sawtooth", 0.25], [180, 0.40, 0.28, "sawtooth", 0.25]],
 
     // Target - bright ascending triad.
-    "target-hit":  [[784, 0.10, 0.00, "sine", 0.20], [988, 0.10, 0.10, "sine", 0.20], [1319, 0.22, 0.20, "sine", 0.20]]
+    "target-hit":  [[784, 0.10, 0.00, "sine", 0.20], [988, 0.10, 0.10, "sine", 0.20], [1319, 0.22, 0.20, "sine", 0.20]],
+
+    // New signal that needs a manual decision (Parsed/Pending) - urgent, attention-
+    // grabbing double-beep so it stands out from informational cues.
+    "signal-manual": [[1046, 0.14, 0.00, "square", 0.24], [1046, 0.14, 0.20, "square", 0.24]],
+
+    // New signal armed for auto-execution (AwaitingActivation/AwaitingEntry) - a
+    // single soft chime; informational only, no action required yet.
+    "signal-auto":   [[523, 0.16, 0.00, "sine", 0.14]]
 };
 
 window.NexusApp.playSound = function (name) {
