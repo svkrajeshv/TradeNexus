@@ -116,7 +116,9 @@ internal static class ServiceCollectionExtensions
 
     private static void AddDomainServices(this IServiceCollection services)
     {
+        services.AddSingleton<HubConnectionFactory>();
         services.AddScoped<ISettingsService, SettingsService>();
+        services.AddScoped<IIndexRiskProfileService, IndexRiskProfileService>();
         services.AddScoped<DataCleanupService>();
         services.AddScoped<TradeHistoryService>();
         services.AddScoped<PositionAuditService>();

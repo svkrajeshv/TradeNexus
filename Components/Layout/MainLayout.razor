@@ -12,6 +12,7 @@
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
 @inject NavigationManager Nav
+@inject HubConnectionFactory HubFactory
 @implements IAsyncDisposable
 
 <MudThemeProvider Theme="_theme" IsDarkMode="_isDarkMode" />
@@ -80,7 +81,7 @@
 
 @code {
     private bool _drawerOpen = true;
-    private bool _isDarkMode = false;
+    private bool _isDarkMode = true;
     private bool _brokerConnected;
     private bool _cleanupRunning;
     private TelegramConnectionState _telegramState = TelegramConnectionState.Disconnected;
@@ -116,10 +117,7 @@
         // blocks the layout render / page navigation.
         try
         {
-            _hub = new HubConnectionBuilder()
-                .WithUrl(Nav.ToAbsoluteUri("/tradingHub"))
-                .WithAutomaticReconnect()
-                .Build();
+            _hub = HubFactory.Create(Nav);
 
             _hub.On<JsonElement>("Notification", async payload =>
             {

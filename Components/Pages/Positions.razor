@@ -14,6 +14,7 @@
 @using Microsoft.AspNetCore.SignalR.Client
 @inject NavigationManager Nav
 @inject NexusApp.Services.HealthSnapshotCache HealthSnapshots
+@inject NexusApp.Services.HubConnectionFactory HubFactory
 @implements IAsyncDisposable
 
 <PageTitle>NexusApp - Positions</PageTitle>
@@ -269,10 +270,7 @@
         await LoadAsync();
         try
         {
-            _hub = new HubConnectionBuilder()
-                .WithUrl(Nav.ToAbsoluteUri("/tradingHub"))
-                .WithAutomaticReconnect()
-                .Build();
+            _hub = HubFactory.Create(Nav);
 
             _hub.On<JsonElement>("HealthTick", payload =>
             {

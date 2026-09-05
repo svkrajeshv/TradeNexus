@@ -212,7 +212,7 @@
                                   Variant="Variant.Outlined"
                                   Class="mb-3" />
                 <MudDivider Class="my-3" />
-                <MudText Typo="Typo.subtitle2" Class="mb-1">Signal Defaults</MudText>
+                <MudText Typo="Typo.subtitle2" Class="mb-1">Signal Defaults (Global Fallback)</MudText>
                 <MudNumericField T="decimal"
                                   @bind-Value="_defaultTargetPoints"
                                    Label="Default Target (pts)"
@@ -251,6 +251,46 @@
                                   HelperText="Cancel unfilled limit orders after this many minutes (0 = disabled)"
                                   Variant="Variant.Outlined"
                                   Min="0" />
+            </MudPaper>
+
+            <!-- Segment-Based Risk & Target Defaults -->
+            <MudPaper Class="pa-4 settings-card-blue" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
+                    <MudIcon Icon="@Icons.Material.Filled.Speed" Color="Color.Primary" />
+                    <MudText Typo="Typo.h6">Index Risk Profiles (Target &amp; Stop-Loss)</MudText>
+                </MudStack>
+                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
+                    Configure segment-calibrated default Stop-Loss and Target levels based on index volatility.
+                </MudText>
+                <MudSelect T="string" @bind-Value="_riskSlMode" Label="Calculation Mode" Variant="Variant.Outlined" Class="mb-3">
+                    <MudSelectItem Value="@("Points")">Absolute Points (Fixed pts from entry)</MudSelectItem>
+                    <MudSelectItem Value="@("Percent")">Percentage of Premium (% from entry)</MudSelectItem>
+                </MudSelect>
+
+                <MudTable Items="_indexProfiles" Dense="true" Hover="true" Elevation="0">
+                    <HeaderContent>
+                        <MudTh>Index</MudTh>
+                        <MudTh>SL (Pts)</MudTh>
+                        <MudTh>Target (Pts)</MudTh>
+                        <MudTh>SL (%)</MudTh>
+                        <MudTh>Target (%)</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd DataLabel="Index"><b>@context.Index</b></MudTd>
+                        <MudTd DataLabel="SL (Pts)">
+                            <MudNumericField T="decimal" @bind-Value="context.DefaultSlPoints" Min="1m" Variant="Variant.Text" Margin="Margin.Dense" />
+                        </MudTd>
+                        <MudTd DataLabel="Target (Pts)">
+                            <MudNumericField T="decimal" @bind-Value="context.DefaultTargetPoints" Min="1m" Variant="Variant.Text" Margin="Margin.Dense" />
+                        </MudTd>
+                        <MudTd DataLabel="SL (%)">
+                            <MudNumericField T="decimal" @bind-Value="context.SlPercent" Min="1m" Max="100m" Variant="Variant.Text" Margin="Margin.Dense" />
+                        </MudTd>
+                        <MudTd DataLabel="Target (%)">
+                            <MudNumericField T="decimal" @bind-Value="context.TargetPercent" Min="1m" Max="500m" Variant="Variant.Text" Margin="Margin.Dense" />
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
             </MudPaper>
         </MudStack>
     </MudItem>
@@ -302,6 +342,27 @@
     private int _pnlHistoryRetentionDays = 90;
     private string _orderVariety = "Robo";
     private decimal _trailingStopLossPoints = 0m;
+    private string _riskSlMode = "Points";
+
+    public class IndexRiskProfileVm
+    {
+        public string Index { get; set; } = string.Empty;
+        public decimal DefaultSlPoints { get; set; }
+        public decimal DefaultTargetPoints { get; set; }
+        public decimal SlPercent { get; set; }
+        public decimal TargetPercent { get; set; }
+    }
+
+    private List<IndexRiskProfileVm> _indexProfiles =
+    [
+        new() { Index = "NIFTY",      DefaultSlPoints = 20, DefaultTargetPoints = 35,  SlPercent = 18, TargetPercent = 35 },
+        new() { Index = "BANKNIFTY",  DefaultSlPoints = 40, DefaultTargetPoints = 70,  SlPercent = 20, TargetPercent = 40 },
+        new() { Index = "FINNIFTY",   DefaultSlPoints = 20, DefaultTargetPoints = 35,  SlPercent = 18, TargetPercent = 35 },
+        new() { Index = "MIDCPNIFTY", DefaultSlPoints = 15, DefaultTargetPoints = 25,  SlPercent = 15, TargetPercent = 30 },
+        new() { Index = "SENSEX",     DefaultSlPoints = 80, DefaultTargetPoints = 140, SlPercent = 25, TargetPercent = 50 },
+        new() { Index = "BANKEX",     DefaultSlPoints = 90, DefaultTargetPoints = 150, SlPercent = 25, TargetPercent = 50 },
+    ];
+
     private string _adminUsername = "admin";
     private string _adminPassword = "";
     private string _confirmAdminPassword = "";
@@ -371,6 +432,22 @@
             var tslp = await SettingsService.GetSettingAsync<decimal?>("TrailingStopLossPoints");
             if (tslp.HasValue) _trailingStopLossPoints = tslp.Value;
 
+            _riskSlMode = await SettingsService.GetSettingAsync<string>("Risk.SlMode") ?? "Points";
+            foreach (var profile in _indexProfiles)
+            {
+                var slPts = await SettingsService.GetSettingAsync<decimal?>($"SL.Points.{profile.Index}");
+                if (slPts.HasValue) profile.DefaultSlPoints = slPts.Value;
+
+                var tgtPts = await SettingsService.GetSettingAsync<decimal?>($"Target.Points.{profile.Index}");
+                if (tgtPts.HasValue) profile.DefaultTargetPoints = tgtPts.Value;
+
+                var slPct = await SettingsService.GetSettingAsync<decimal?>($"SL.Percent.{profile.Index}");
+                if (slPct.HasValue) profile.SlPercent = slPct.Value;
+
+                var tgtPct = await SettingsService.GetSettingAsync<decimal?>($"Target.Percent.{profile.Index}");
+                if (tgtPct.HasValue) profile.TargetPercent = tgtPct.Value;
+            }
+
             _adminUsername = await Auth.GetAdminUsernameAsync();
             _adminPassword = "";
             _confirmAdminPassword = "";
@@ -426,6 +503,15 @@
             await SettingsService.SetSettingAsync("PnlHistoryRetentionDays", _pnlHistoryRetentionDays);
             await SettingsService.SetSettingAsync("OrderVariety", _orderVariety);
             await SettingsService.SetSettingAsync("TrailingStopLossPoints", _trailingStopLossPoints);
+
+            await SettingsService.SetSettingAsync("Risk.SlMode", _riskSlMode);
+            foreach (var profile in _indexProfiles)
+            {
+                await SettingsService.SetSettingAsync($"SL.Points.{profile.Index}", profile.DefaultSlPoints);
+                await SettingsService.SetSettingAsync($"Target.Points.{profile.Index}", profile.DefaultTargetPoints);
+                await SettingsService.SetSettingAsync($"SL.Percent.{profile.Index}", profile.SlPercent);
+                await SettingsService.SetSettingAsync($"Target.Percent.{profile.Index}", profile.TargetPercent);
+            }
 
             if (!string.IsNullOrWhiteSpace(_adminUsername))
             {

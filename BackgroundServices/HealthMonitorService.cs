@@ -71,7 +71,11 @@ public sealed class HealthMonitorService(
                 var broker = scope.ServiceProvider.GetRequiredService<IBroker>();
                 var engine = scope.ServiceProvider.GetRequiredService<ITradingEngine>();
 
-                if (broker.IsConnected)
+                // Position reconciliation hits the rate-limited getPosition endpoint.
+                // The book is static once the exchange closes, so this is confined to
+                // the trading window; BrokerPnlTracker keeps the last snapshot for the
+                // end-of-day figures.
+                if (broker.IsConnected && MarketHours.IsPollingWindowNow())
                 {
                     await engine.UpdatePositionsAsync();
                 }
@@ -310,6 +314,12 @@ public sealed class HealthMonitorService(
         var tracker = services.GetService<BrokerPnlTracker>();
         if (tracker?.TryGetLivePnl() is { } live)
             return (true, live.Unrealized, live.Realized);
+
+        // Fallback only: outside the session the book is static, so a direct
+        // getPosition on every 30s tick would burn rate-limit budget for figures
+        // that cannot have changed. Report unavailable instead of polling.
+        if (!MarketHours.IsPollingWindowNow())
+            return (false, 0m, 0m);
 
         try
         {

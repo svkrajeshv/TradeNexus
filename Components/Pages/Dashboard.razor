@@ -18,6 +18,7 @@
 @inject ITradingEngine TradingEngine
 @inject ISettingsService SettingsService
 @inject NexusApp.Services.HealthSnapshotCache HealthSnapshots
+@inject NexusApp.Services.HubConnectionFactory HubFactory
 @inject ILogger<Dashboard> Logger
 @implements IAsyncDisposable
 
@@ -528,6 +529,7 @@
 
 @code {
     private HubConnection? _hub;
+    private bool _disposed;
     private List<TradingSignal> _signals = new();
     private List<TradingSignal> _watchlist = new();
     private List<NexusApp.Models.Position> _positions = new();
@@ -728,10 +730,7 @@
     {
         try
         {
-            _hub = new HubConnectionBuilder()
-                .WithUrl(Nav.ToAbsoluteUri("/tradingHub"))
-                .WithAutomaticReconnect()
-                .Build();
+            _hub = HubFactory.Create(Nav);
 
             _hub.On<JsonElement>("SignalReceived", async payload =>
             {
@@ -917,8 +916,12 @@
                 return Task.CompletedTask;
             };
 
-            await _hub.StartAsync();
+            await StartHubWithRetryAsync();
             _hubError = null;
+        }
+        catch (ObjectDisposedException)
+        {
+            // The component was disposed (navigation away) while connecting; nothing to report.
         }
         catch (Exception ex)
         {
@@ -929,6 +932,37 @@
             Logger.LogError(ex, "Dashboard could not connect to the trading hub");
             Snackbar.Add($"Live feed unavailable: {ex.Message}", Severity.Error);
             StateHasChanged();
+        }
+    }
+
+    // The first negotiate can lose the race with a still-warming host (or a briefly
+    // saturated thread pool). Retry with backoff so a transient startup hiccup does not
+    // leave the page permanently without a feed. Bails out the moment the component is
+    // disposed - otherwise the loop keeps calling StartAsync on a torn-down connection
+    // and reports "Cannot access a disposed object" instead of the real failure.
+    private async Task StartHubWithRetryAsync()
+    {
+        const int maxAttempts = 4;
+        for (var attempt = 1; ; attempt++)
+        {
+            if (_disposed || _hub is null)
+                return;
+
+            try
+            {
+                await _hub.StartAsync();
+                return;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+            catch (Exception ex) when (attempt < maxAttempts)
+            {
+                Logger.LogWarning(ex,
+                    "Trading hub connect attempt {Attempt}/{MaxAttempts} failed; retrying", attempt, maxAttempts);
+                await Task.Delay(TimeSpan.FromSeconds(attempt * 2));
+            }
         }
     }
 
@@ -1168,6 +1202,7 @@
 
     public async ValueTask DisposeAsync()
     {
+        _disposed = true;
         if (_hub is not null)
         {
             await _hub.DisposeAsync();

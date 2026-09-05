@@ -10,6 +10,7 @@
 @inject IBroker Broker
 @inject ISnackbar Snackbar
 @inject NavigationManager Nav
+@inject NexusApp.Services.HubConnectionFactory HubFactory
 @implements IAsyncDisposable
 
 <PageTitle>NexusApp - Orders</PageTitle>
@@ -183,10 +184,7 @@
         await LoadAsync();
         try
         {
-            _hub = new HubConnectionBuilder()
-                .WithUrl(Nav.ToAbsoluteUri("/tradingHub"))
-                .WithAutomaticReconnect()
-                .Build();
+            _hub = HubFactory.Create(Nav);
             _hub.On("OrderStatusChanged", async () =>
             {
                 await InvokeAsync(async () =>

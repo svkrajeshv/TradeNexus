@@ -37,44 +37,56 @@ public class TradingEngine(
     private readonly IHubContext<TradingHub> _hub = hub;
     private readonly IServiceProvider _serviceProvider = serviceProvider;
 
-    public Task<bool> ValidateSignalAsync(ParsedSignal signal)
+    public async Task<bool> ValidateSignalAsync(ParsedSignal signal)
     {
         if (string.IsNullOrEmpty(signal.Index))
         {
             _logger.LogWarning("Invalid signal: missing index");
-            return Task.FromResult(false);
+            return false;
         }
         if (signal.EntryPrice <= 0)
         {
             _logger.LogWarning("Invalid signal: invalid entry price");
-            return Task.FromResult(false);
+            return false;
         }
         if (signal.StopLoss <= 0)
         {
             _logger.LogWarning("Invalid signal: invalid stop loss");
-            return Task.FromResult(false);
+            return false;
         }
         // Safety: never let SL == Entry (would trigger stop-out immediately).
-        // If they match (from PAID or an editorial error), buffer SL by 50 pts below entry.
+        // If they match (from PAID or an editorial error), apply segment-calibrated buffer below entry.
         if (signal.StopLoss == signal.EntryPrice)
         {
-            var buffered = Math.Max(0.05m, signal.EntryPrice - 50m);
+            var riskProfileService = _serviceProvider.GetService<IIndexRiskProfileService>();
+            decimal bufferPts;
+            if (riskProfileService is not null)
+            {
+                bufferPts = await riskProfileService.GetDefaultSlBufferPointsAsync(signal.Index, signal.EntryPrice);
+            }
+            else
+            {
+                var slFallback = await _settings.GetSettingAsync<decimal?>("DefaultStopLossPoints") ?? 50m;
+                bufferPts = slFallback > 0 ? slFallback : 50m;
+            }
+
+            var buffered = Math.Max(0.05m, signal.EntryPrice - bufferPts);
             _logger.LogInformation(
-                "SL equals Entry ({Entry}); applying default 50-pt buffer → SL={Sl}",
-                signal.EntryPrice, buffered);
+                "SL equals Entry ({Entry}) for {Index}; applying segment default {BufferPts}-pt buffer → SL={Sl}",
+                signal.EntryPrice, signal.Index, bufferPts, buffered);
             signal.StopLoss = buffered;
         }
         if (signal.Targets.Count == 0)
         {
             _logger.LogWarning("Invalid signal: no targets");
-            return Task.FromResult(false);
+            return false;
         }
         if (signal.ExpiryDate != default && signal.ExpiryDate < DateTimeExtensions.IstToday())
         {
             _logger.LogWarning("Invalid signal: expiry date in past ({Expiry})", signal.ExpiryDate);
-            return Task.FromResult(false);
+            return false;
         }
-        return Task.FromResult(true);
+        return true;
     }
 
     /// <summary>
@@ -900,9 +912,7 @@ public class TradingEngine(
         // Position, since they carry no strike/expiry/option-type information. Treating
         // them as "untracked" creates a duplicate/spurious row alongside the real one, so
         // they must be excluded from reconciliation entirely.
-        brokerPositions = brokerPositions
-            .Where(bp => IsResolvableContractSymbol(bp.Symbol))
-            .ToList();
+        brokerPositions = [.. brokerPositions.Where(bp => IsResolvableContractSymbol(bp.Symbol))];
 
         if (brokerPositions.Count == 0)
             return;
