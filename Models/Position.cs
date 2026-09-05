@@ -8,7 +8,7 @@ public class Position
     public int Id { get; set; }
     
     public int TradingAccountId { get; set; }
-    
+
     public int SignalId { get; set; }
     
     public string Symbol { get; set; } = string.Empty;
@@ -21,7 +21,7 @@ public class Position
     
     public decimal? StopLoss { get; set; }
     
-    public List<decimal> Targets { get; set; } = new();
+    public List<decimal> Targets { get; set; } = [];
     
     public decimal UnrealizedPnL { get; set; }
     
@@ -53,12 +53,13 @@ public class Position
         {
             if (Id > 0 && other.Id > 0)
                 return Id == other.Id;
+            return ReferenceEquals(this, other);
         }
-        return base.Equals(obj);
+        return false;
     }
 
     public override int GetHashCode()
     {
-        return Id > 0 ? Id.GetHashCode() : base.GetHashCode();
+        return Id > 0 ? Id.GetHashCode() : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this);
     }
 }

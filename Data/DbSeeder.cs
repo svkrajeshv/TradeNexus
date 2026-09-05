@@ -32,6 +32,7 @@ internal static class DbSeeder
         ("AllowAfterMarketHours", defaultvalue, SettingType.Boolean, "Allow order placement outside market hours"),
         ("AutoSquareOffEnabled", defaultvalue, SettingType.Boolean, "Automatically square off all open positions at a set time before market close"),
         ("AutoSquareOffTime", "14:50", SettingType.String, "Time (HH:mm IST) at which open positions are auto squared off"),
+        ("RiskAutoSquareOffEnabled", defaultvalue, SettingType.Boolean, "Automatically square off all open live positions for an account when its Daily Max Profit or Daily Max Loss is hit"),
         ("EnableEntryPriceCrossingTrigger", defaultvalue, SettingType.Boolean, "Hold execution until CMP crosses entry price"),
         ("RequireEntryCrossFromBelow", "true", SettingType.Boolean, "Only trigger entry after the contract has traded below the entry price and then crosses up (prevents chasing when the signal arrives above entry)"),
         ("DuplicateSignalCooldownMinutes", "2", SettingType.Integer, "Block repeat executions of the same contract from the same channel for this many minutes (0 = disabled)"),

@@ -8,7 +8,6 @@
 @using NexusApp.Models
 @inject IDbContextFactory<TradingDbContext> DbFactory
 @inject IBroker Broker
-@inject ISettingsService SettingsService
 @inject ISnackbar Snackbar
 @inject NavigationManager Nav
 @implements IAsyncDisposable
@@ -54,9 +53,8 @@
             <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnQty)">Qty @SortIndicator(_sortColumnQty)</MudButton></MudTh>
             <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnPrice)">Price @SortIndicator(_sortColumnPrice)</MudButton></MudTh>
             <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnFilled)">Filled @SortIndicator(_sortColumnFilled)</MudButton></MudTh>
-            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnStatus)">Status @SortIndicator(_sortColumnStatus)</MudButton></MudTh>
             <MudTh Style="min-width:200px; max-width:260px;">Remarks</MudTh>
-            <MudTh>Actions</MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnStatus)">Status @SortIndicator(_sortColumnStatus)</MudButton></MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd Style="white-space:nowrap;">@context.CreatedAt.ToIstString("hh:mm:ss tt")</MudTd>
@@ -85,19 +83,6 @@
             <MudTd>@context.Quantity</MudTd>
             <MudTd>@context.Price</MudTd>
             <MudTd>@(context.ExecutedPrice?.ToString() ?? "-")</MudTd>
-            <MudTd>
-                <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
-                @{
-                    var staleness = GetStalenessInfo(context);
-                }
-                @if (staleness is { } s)
-                {
-                    <br />
-                    <MudText Typo="Typo.caption" Color="s.Color" Style="white-space:nowrap;">
-                        ⏱ @s.Text
-                    </MudText>
-                }
-            </MudTd>
             <MudTd Style="min-width:200px; max-width:260px;">
                 @if (string.IsNullOrWhiteSpace(context.ErrorMessage))
                 {
@@ -115,15 +100,7 @@
                 }
             </MudTd>
             <MudTd>
-                @if (IsCancellable(context))
-                {
-                    <MudButton Size="Size.Small"
-                               Variant="Variant.Text"
-                               Color="Color.Error"
-                               OnClick="@(() => CancelOneAsync(context))">
-                        Cancel
-                    </MudButton>
-                }
+                <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
             </MudTd>
         </RowTemplate>
     </MudTable>
@@ -135,10 +112,6 @@
     private List<Order> _orders = new();
     private bool _cancelling;
     private HubConnection? _hub;
-
-    // Pending Order Auto-Cancel countdown (Settings page). 0 = feature disabled,
-    // in which case no staleness caption is rendered at all.
-    private int _pendingOrderTimeoutMinutes;
 
     private const string _sortColumnTime = "time";
     private const string _sortColumnChannel = "channel";
@@ -239,8 +212,6 @@
     {
         try
         {
-            _pendingOrderTimeoutMinutes = await SettingsService.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
-
             using var db = await DbFactory.CreateDbContextAsync();
             var q = db.Orders.AsNoTracking().Include(o => o.TradingAccount).Include(o => o.Signal).OrderByDescending(o => o.CreatedAt).AsQueryable();
             q = _tradeFilter switch
@@ -377,53 +348,6 @@
         OrderStatus.Accepted => Color.Info,
         _ => Color.Warning
     };
-
-    private readonly record struct StalenessInfo(string Text, Color Color);
-
-    /// <summary>
-    /// Countdown until the "Pending Order Auto-Cancel" setting (see
-    /// OrderSyncService.CancelStaleOrdersAsync) will cancel this order, mirroring
-    /// exactly the same eligibility rules that background service uses so the UI
-    /// never shows a countdown for an order that isn't actually at risk:
-    /// real (non-paper), Pending/Accepted, has a broker id, and is not a
-    /// long-lived resting target order. Returns null when the feature is
-    /// disabled or the order is not eligible - no caption is rendered then.
-    /// </summary>
-    private StalenessInfo? GetStalenessInfo(Order order)
-    {
-        if (_pendingOrderTimeoutMinutes <= 0)
-            return null;
-
-        if (order.Status != OrderStatus.Pending && order.Status != OrderStatus.Accepted)
-            return null;
-
-        if (string.IsNullOrEmpty(order.BrokerId) ||
-            order.BrokerId.StartsWith("REJ-", StringComparison.OrdinalIgnoreCase) ||
-            order.BrokerId.StartsWith("Paper", StringComparison.OrdinalIgnoreCase) ||
-            RestingTargetOrders.IsRestingTarget(order))
-        {
-            return null;
-        }
-
-        var deadline = order.CreatedAt.AddMinutes(_pendingOrderTimeoutMinutes);
-        var remaining = deadline - DateTime.UtcNow;
-        var totalWindow = TimeSpan.FromMinutes(_pendingOrderTimeoutMinutes);
-
-        if (remaining <= TimeSpan.Zero)
-            return new StalenessInfo("Cancelling...", Color.Error);
-
-        var fractionLeft = totalWindow.TotalSeconds > 0 ? remaining.TotalSeconds / totalWindow.TotalSeconds : 0;
-        var color = fractionLeft < 0.2 ? Color.Error : fractionLeft < 0.5 ? Color.Warning : Color.Default;
-
-        return new StalenessInfo(FormatCountdown(remaining), color);
-    }
-
-    private static string FormatCountdown(TimeSpan remaining)
-    {
-        if (remaining.TotalMinutes >= 1)
-            return $"{(int)remaining.TotalMinutes}m {remaining.Seconds}s left";
-        return $"{Math.Max(0, remaining.Seconds)}s left";
-    }
 
     private static string FormatBrokerId(string? brokerId)
     {

@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 using NexusApp.Data;
 using NexusApp.Models;
 
@@ -10,31 +9,15 @@ namespace NexusApp.Services;
 /// table so P&amp;L history survives the daily/session cleanup that deletes positions.
 /// Archiving is idempotent — positions already present in the history (by PositionId) are skipped.
 /// </summary>
-public sealed class TradeHistoryService
+public sealed class TradeHistoryService(
+    IDbContextFactory<TradingDbContext> dbFactory,
+    ILogger<TradeHistoryService> logger)
 {
     private const string UnknownChannel = "Unknown";
     private const string UnknownTerminal = "Unknown";
 
-    private readonly IDbContextFactory<TradingDbContext> _dbFactory;
-    private readonly ILogger<TradeHistoryService> _logger;
-
-    public TradeHistoryService(
-        IDbContextFactory<TradingDbContext> dbFactory,
-        ILogger<TradeHistoryService> logger)
-    {
-        _dbFactory = dbFactory;
-        _logger = logger;
-    }
-
-    /// <summary>
-    /// Archives every closed position that is not yet in the history table.
-    /// Returns the number of newly archived rows.
-    /// </summary>
-    public async Task<int> ArchiveClosedPositionsAsync(CancellationToken ct = default)
-    {
-        await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        return await ArchiveAsync(db, saveChanges: true, ct);
-    }
+    private readonly IDbContextFactory<TradingDbContext> _dbFactory = dbFactory;
+    private readonly ILogger<TradeHistoryService> _logger = logger;
 
     /// <summary>
     /// Deletes durable history rows whose <see cref="ClosedTradeHistory.ClosedAt"/> is older
@@ -59,6 +42,16 @@ public sealed class TradeHistoryService
                 removed, retentionDays, cutoffUtc);
 
         return removed;
+    }
+
+    /// <summary>
+    /// Archives every closed position that is not yet in the history table.
+    /// Returns the number of newly archived rows.
+    /// </summary>
+    public async Task<int> ArchiveClosedPositionsAsync(CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        return await ArchiveAsync(db, saveChanges: true, ct);
     }
 
     /// <summary>

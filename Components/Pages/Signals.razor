@@ -30,7 +30,6 @@
             <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnEntry)">Entry @SortIndicator(_sortColumnEntry)</MudButton></MudTh>
             <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnSl)">SL @SortIndicator(_sortColumnSl)</MudButton></MudTh>
             <MudTh>Targets</MudTh>
-            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnDelay)">Delay @SortIndicator(_sortColumnDelay)</MudButton></MudTh>
             <MudTh Style="min-width:130px;"><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnStatus)">Status @SortIndicator(_sortColumnStatus)</MudButton></MudTh>
             <MudTh Style="min-width:350px; width:45%;">Message</MudTh>
         </HeaderContent>
@@ -53,7 +52,6 @@
             <MudTd>@context.EntryPrice</MudTd>
             <MudTd>@context.StopLoss</MudTd>
             <MudTd Style="white-space:nowrap;">@string.Join(" / ", context.Targets)</MudTd>
-            <MudTd Style="white-space:nowrap;">@FormatDelay(context.SignalDelayMs)</MudTd>
             <MudTd Style="min-width:130px; white-space:nowrap;">
                 <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
                 @if (context.Status == SignalStatus.Failed)
@@ -82,7 +80,6 @@
     private const string _sortColumnSymbol = "symbol";
     private const string _sortColumnEntry = "entry";
     private const string _sortColumnSl = "sl";
-    private const string _sortColumnDelay = "delay";
     private const string _sortColumnStatus = "status";
 
     private string _sortColumn = _sortColumnTime;
@@ -109,9 +106,6 @@
 
             (_sortColumnSl, true) => _signals.OrderByDescending(s => s.StopLoss),
             (_sortColumnSl, false) => _signals.OrderBy(s => s.StopLoss),
-
-            (_sortColumnDelay, true) => _signals.OrderByDescending(s => s.SignalDelayMs),
-            (_sortColumnDelay, false) => _signals.OrderBy(s => s.SignalDelayMs),
 
             (_sortColumnStatus, true) => _signals.OrderByDescending(s => s.Status),
             (_sortColumnStatus, false) => _signals.OrderBy(s => s.Status),
@@ -167,17 +161,4 @@
 
     private static string FormatStrike(decimal strike) =>
         strike.ToString("0.##", CultureInfo.InvariantCulture);
-
-    private static string FormatDelay(decimal ms)
-    {
-        if (ms <= 0) return "-";
-        var seconds = (double)ms / 1000.0;
-        return seconds < 1
-            ? $"{seconds:0.00} s"
-            : seconds < 60
-                ? $"{seconds:0.0} s"
-                : seconds < 3600
-                    ? $"{seconds / 60:0.0} min"
-                    : $"{seconds / 3600:0.0} h";
-    }
 }

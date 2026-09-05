@@ -48,7 +48,7 @@ namespace NexusApp.Migrations
                     b.HasIndex("Key")
                         .IsUnique();
 
-                    b.ToTable("ApplicationSettings");
+                    b.ToTable("ApplicationSettings", (string)null);
                 });
 
             modelBuilder.Entity("NexusApp.Models.AuditLog", b =>
@@ -97,7 +97,7 @@ namespace NexusApp.Migrations
 
                     b.HasIndex("Timestamp");
 
-                    b.ToTable("AuditLogs");
+                    b.ToTable("AuditLogs", (string)null);
                 });
 
             modelBuilder.Entity("NexusApp.Models.ClosedTradeHistory", b =>
@@ -155,7 +155,7 @@ namespace NexusApp.Migrations
                     b.HasIndex("PositionId")
                         .IsUnique();
 
-                    b.ToTable("ClosedTradeHistory");
+                    b.ToTable("ClosedTradeHistory", (string)null);
                 });
 
             modelBuilder.Entity("NexusApp.Models.Order", b =>
@@ -224,7 +224,7 @@ namespace NexusApp.Migrations
 
                     b.HasIndex("TradingAccountId");
 
-                    b.ToTable("Orders");
+                    b.ToTable("Orders", (string)null);
                 });
 
             modelBuilder.Entity("NexusApp.Models.Position", b =>
@@ -289,7 +289,7 @@ namespace NexusApp.Migrations
 
                     b.HasIndex("TradingAccountId");
 
-                    b.ToTable("Positions");
+                    b.ToTable("Positions", (string)null);
                 });
 
             modelBuilder.Entity("NexusApp.Models.TradingAccount", b =>
@@ -347,7 +347,7 @@ namespace NexusApp.Migrations
 
                     b.HasIndex("IsEnabled");
 
-                    b.ToTable("TradingAccounts");
+                    b.ToTable("TradingAccounts", (string)null);
                 });
 
             modelBuilder.Entity("NexusApp.Models.TradingSignal", b =>
@@ -423,7 +423,7 @@ namespace NexusApp.Migrations
                     b.HasIndex("TelegramMessageId")
                         .IsUnique();
 
-                    b.ToTable("TradingSignals");
+                    b.ToTable("TradingSignals", (string)null);
                 });
 
             modelBuilder.Entity("NexusApp.Models.Order", b =>

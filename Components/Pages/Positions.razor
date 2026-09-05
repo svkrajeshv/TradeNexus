@@ -95,19 +95,19 @@
             <col style="width:40px;" />
         </ColGroup>
         <HeaderContent>
-            <MudTh>Status</MudTh>
-            <MudTh>Book</MudTh>
-            <MudTh>Entry Time</MudTh>
-            <MudTh>Exit Time</MudTh>
-            <MudTh>Channel</MudTh>
-            <MudTh>Symbol</MudTh>
-            <MudTh>Qty</MudTh>
-            <MudTh>Entry</MudTh>
-            <MudTh>LTP / Exit</MudTh>
-            <MudTh>SL</MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null)">Status</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => BookScope.IsPaper(p))">Book</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel InitialDirection="SortDirection.Descending" SortBy="new Func<NexusApp.Models.Position, object>(p => p.OpenedAt)">Entry Time</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt ?? DateTime.MinValue)">Exit Time</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Signal?.ChannelName ?? string.Empty)">Channel</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Symbol)">Symbol</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Quantity)">Qty</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.EntryPrice)">Entry</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.CurrentPrice : (p.ClosingPrice ?? 0m))">LTP/Exit</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.StopLoss ?? 0m)">SL</MudTableSortLabel></MudTh>
             <MudTh>Targets</MudTh>
-            <MudTh>P&amp;L</MudTh>
-            <MudTh>P&amp;L %</MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.UnrealizedPnL : (p.RealizedPnL ?? 0m))">P&amp;L</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.UnrealizedPnLPercentage : 0m)">P&amp;L %</MudTableSortLabel></MudTh>
         </HeaderContent>
         <GroupHeaderTemplate>
             <MudTh Class="mud-table-cell-custom-group" colspan="13">
@@ -154,11 +154,11 @@
             <MudTd DataLabel="Symbol">@context.Symbol</MudTd>
             <MudTd DataLabel="Qty">@context.Quantity</MudTd>
             <MudTd DataLabel="Entry">@context.EntryPrice</MudTd>
-            <MudTd DataLabel="LTP / Exit">
+            <MudTd DataLabel="LTP/Exit">
                 @(context.ClosedAt == null ? context.CurrentPrice.ToString("N2") : (context.ClosingPrice?.ToString("N2") ?? "-"))
             </MudTd>
             <MudTd DataLabel="SL">@(context.StopLoss?.ToString() ?? "-")</MudTd>
-            <MudTd DataLabel="Targets">@(context.Targets.Count > 0 ? string.Join(" / ", context.Targets) : "-")</MudTd>
+            <MudTd DataLabel="Targets">@(context.Targets.Count > 0 ? context.Targets[0].ToString() : "-")</MudTd>
             <MudTd DataLabel="P&L">
                 @{
                     var pnl = context.ClosedAt == null ? context.UnrealizedPnL : (context.RealizedPnL ?? 0);

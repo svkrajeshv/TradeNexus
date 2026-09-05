@@ -27,6 +27,14 @@ public sealed class LivePositionMonitorService(
     private readonly ILogger<LivePositionMonitorService> _logger = logger;
     private readonly IServiceProvider _services = services;
 
+    // Tracks the IST trading date on which each account last had its Daily Max
+    // Profit/Loss auto square-off triggered, so it fires at most once per
+    // account per day (see CheckRiskLimitsAsync below).
+    private readonly Dictionary<int, DateTime> _lastRiskTriggeredDateByAccount = [];
+
+    // Tracks the IST trading date when global portfolio risk square-off was triggered.
+    private DateTime? _lastGlobalRiskTriggeredDate;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Live position monitor started (cadence {Seconds}s)", Cadence.TotalSeconds);
@@ -76,6 +84,8 @@ public sealed class LivePositionMonitorService(
             .ToDictionaryAsync(a => a.Id, ct);
 
         var brokerCache = new Dictionary<int, IBroker>();
+
+        await CheckRiskLimitsAsync(scope.ServiceProvider, db, positions, accounts, ct);
 
         foreach (var position in positions)
         {
@@ -159,4 +169,189 @@ public sealed class LivePositionMonitorService(
         }
     }
 
+    /// <summary>
+    /// Checks both tiers of risk limits:
+    /// 1. Global Portfolio Limits: combined P&L across all accounts (live + paper).
+    ///    If hit, all open positions across all accounts are squared off.
+    /// 2. Per-Account Limits: evaluated for each account individually.
+    ///    If hit, only that specific account's open positions are squared off.
+    /// Both gated by <c>RiskAutoSquareOffEnabled</c> and tracked per IST trading day.
+    /// </summary>
+    private async Task CheckRiskLimitsAsync(
+        IServiceProvider scopedServices,
+        TradingDbContext db,
+        List<Position> positions,
+        Dictionary<int, Models.TradingAccount> accounts,
+        CancellationToken ct)
+    {
+        var settings = scopedServices.GetRequiredService<ISettingsService>();
+        var enabled = await settings.GetSettingAsync<bool?>("RiskAutoSquareOffEnabled") ?? false;
+        if (!enabled)
+            return;
+
+        var todayIst = DateTime.UtcNow.ToIst().Date;
+        var riskManager = scopedServices.GetRequiredService<TradingEngine.RiskManager>();
+        var engine = scopedServices.GetRequiredService<ITradingEngine>();
+        var notifications = scopedServices.GetService<INotificationService>();
+
+        // -------------------------------------------------------------
+        // TIER 2: GLOBAL PORTFOLIO CHECK (LIVE + PAPER COMBINED)
+        // -------------------------------------------------------------
+        if (_lastGlobalRiskTriggeredDate != todayIst)
+        {
+            try
+            {
+                var globalMetrics = await riskManager.GetGlobalPortfolioRiskMetricsAsync();
+
+                string? globalReason = null;
+                if (globalMetrics.DailyMaxLoss > 0 && globalMetrics.DailyPnL <= -globalMetrics.DailyMaxLoss)
+                    globalReason = $"Global Portfolio Daily Max Loss Hit (Combined P&L: \u20B9{globalMetrics.DailyPnL:N2}, Limit: \u20B9{globalMetrics.DailyMaxLoss:N2})";
+                else if (globalMetrics.DailyMaxProfit > 0 && globalMetrics.DailyPnL >= globalMetrics.DailyMaxProfit)
+                    globalReason = $"Global Portfolio Daily Max Profit Hit (Combined P&L: \u20B9{globalMetrics.DailyPnL:N2}, Limit: \u20B9{globalMetrics.DailyMaxProfit:N2})";
+
+                if (globalReason is not null)
+                {
+                    // Fetch ALL open positions across all accounts (live AND paper)
+                    var allOpenPositionIds = await db.Positions
+                        .AsNoTracking()
+                        .Where(p => p.ClosedAt == null)
+                        .Select(p => p.Id)
+                        .ToListAsync(ct);
+
+                    if (allOpenPositionIds.Count > 0)
+                    {
+                        _logger.LogWarning(
+                            "PORTFOLIO RISK HIT: {Reason} \u2014 auto squaring off {Count} open position(s) across ALL accounts",
+                            globalReason, allOpenPositionIds.Count);
+
+                        _lastGlobalRiskTriggeredDate = todayIst;
+
+                        var closed = 0;
+                        var failed = 0;
+                        foreach (var posId in allOpenPositionIds)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            try
+                            {
+                                if (await engine.SquareOffPositionAsync(posId, globalReason))
+                                    closed++;
+                                else
+                                    failed++;
+                            }
+                            catch (Exception ex)
+                            {
+                                failed++;
+                                _logger.LogWarning(ex, "Global risk square-off failed for position {PositionId}", posId);
+                            }
+                        }
+
+                        if (notifications is not null)
+                        {
+                            var msg = $"\U0001F6A8 GLOBAL PORTFOLIO AUTO SQUARE-OFF\n\n"
+                                + $"\u2022 {globalReason}\n"
+                                + $"\u2022 Closed: {closed} of {allOpenPositionIds.Count} position(s) across ALL accounts (Live + Paper)"
+                                + (failed > 0 ? $"\n\u2022 Failed: {failed}" : string.Empty)
+                                + $"\n\u2022 Time: {DateTime.UtcNow.ToIstString("hh:mm:ss tt")} IST";
+                            try { await notifications.SendTelegramCustomNotificationAsync(msg); }
+                            catch (Exception ex) { _logger.LogDebug(ex, "Global risk auto square-off Telegram notification failed"); }
+                        }
+
+                        // All open positions have been handled; return for this tick
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed evaluating global portfolio risk-limit auto square-off");
+            }
+        }
+
+        // -------------------------------------------------------------
+        // TIER 1: PER-ACCOUNT CHECK (INDIVIDUAL ACCOUNT LIMITS)
+        // -------------------------------------------------------------
+        var accountIdsWithOpenPositions = positions.Select(p => p.TradingAccountId).Distinct();
+
+        foreach (var accountId in accountIdsWithOpenPositions)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (!accounts.TryGetValue(accountId, out var account) || !account.IsEnabled)
+                continue;
+
+            // Reset the per-day guard once a new IST trading day starts.
+            if (_lastRiskTriggeredDateByAccount.TryGetValue(accountId, out var triggeredDate) && triggeredDate == todayIst)
+                continue;
+
+            try
+            {
+                var metrics = await riskManager.GetRiskMetricsAsync(accountId);
+
+                string? reason = null;
+                if (metrics.DailyMaxLoss > 0 && metrics.DailyPnL <= -metrics.DailyMaxLoss)
+                    reason = $"Account Daily Max Loss Hit (P&L: \u20B9{metrics.DailyPnL:N2}, Limit: \u20B9{metrics.DailyMaxLoss:N2})";
+                else if (metrics.DailyMaxProfit > 0 && metrics.DailyPnL >= metrics.DailyMaxProfit)
+                    reason = $"Account Daily Max Profit Hit (P&L: \u20B9{metrics.DailyPnL:N2}, Limit: \u20B9{metrics.DailyMaxProfit:N2})";
+
+                if (reason is null)
+                    continue;
+
+                var openPositionIds = await db.Positions
+                    .AsNoTracking()
+                    .Where(p => p.TradingAccountId == accountId && p.ClosedAt == null)
+                    .Select(p => p.Id)
+                    .ToListAsync(ct);
+
+                if (openPositionIds.Count == 0)
+                    continue;
+
+                _logger.LogWarning(
+                    "Account {Name}: {Reason} \u2014 auto squaring off {Count} open position(s)",
+                    account.Name, reason, openPositionIds.Count);
+
+                // Mark as triggered before issuing square-offs so a slow/failing
+                // broker call doesn't cause this account to be re-processed every
+                // tick for the rest of the day.
+                _lastRiskTriggeredDateByAccount[accountId] = todayIst;
+
+                var closed = 0;
+                var failed = 0;
+                foreach (var positionId in openPositionIds)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    try
+                    {
+                        if (await engine.SquareOffPositionAsync(positionId, reason))
+                            closed++;
+                        else
+                            failed++;
+                    }
+                    catch (Exception ex)
+                    {
+                        failed++;
+                        _logger.LogWarning(ex, "Risk-limit square-off failed for position {PositionId}", positionId);
+                    }
+                }
+
+                _logger.LogInformation(
+                    "Account {Name} risk-limit square-off complete: closed {Closed}, failed {Failed} of {Total}",
+                    account.Name, closed, failed, openPositionIds.Count);
+
+                if (notifications is not null)
+                {
+                    var msg = $"\U0001F514 ACCOUNT RISK LIMIT AUTO SQUARE-OFF \u2014 {account.Name}\n\n"
+                        + $"\u2022 {reason}\n"
+                        + $"\u2022 Closed: {closed} of {openPositionIds.Count} position(s)"
+                        + (failed > 0 ? $"\n\u2022 Failed: {failed}" : string.Empty)
+                        + $"\n\u2022 Time: {DateTime.UtcNow.ToIstString("hh:mm:ss tt")} IST";
+                    try { await notifications.SendTelegramCustomNotificationAsync(msg); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Risk-limit auto square-off Telegram notification failed"); }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed evaluating risk-limit auto square-off for account {Name}", account.Name);
+            }
+        }
+    }
 }

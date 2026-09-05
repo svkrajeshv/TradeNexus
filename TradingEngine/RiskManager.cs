@@ -20,28 +20,31 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
     private readonly ILogger<RiskManager> _logger = logger;
 
     /// <summary>
-    /// Validates if account meets all risk criteria
+    /// Validates if account meets all risk criteria (both global portfolio limits and account-specific limits)
     /// </summary>
     public async Task<(bool IsValid, string Reason)> ValidateLimitsAsync(TradingAccount account)
     {
         try
         {
+            // Tier 2: Check global portfolio limits first (combined live + paper)
+            var (globalValid, globalReason) = await ValidateGlobalLimitsAsync();
+            if (!globalValid)
+            {
+                _logger.LogWarning("Account {Name} blocked by global limit: {Reason}", account.Name, globalReason);
+                return (false, globalReason);
+            }
+
             var todayIst = DateTime.UtcNow.ToIst().Date;
             var startOfDayUtc = todayIst.AddHours(-5.5);
             var endOfDayUtc = startOfDayUtc.AddDays(1);
 
-            // Fetch effective risk limits: prefer global settings if configured in Settings UI, fallback to account settings
-            var globalMaxLoss = await _settings.GetSettingAsync<decimal?>("DailyMaxLoss");
-            var globalMaxProfit = await _settings.GetSettingAsync<decimal?>("DailyMaxProfit");
-            var globalMaxPositions = await _settings.GetSettingAsync<int?>("MaxOpenPositions");
-            var globalMaxTrades = await _settings.GetSettingAsync<int?>("MaxTradesPerDay");
+            // Tier 1: Account-specific limits (configured per account on Accounts page)
+            var dailyMaxLoss = account.DailyMaxLoss;
+            var dailyMaxProfit = account.DailyMaxProfit;
+            var maxOpenPositions = account.MaxOpenPositions;
+            var maxTradesPerDay = account.MaxTradesPerDay;
 
-            var dailyMaxLoss = globalMaxLoss ?? account.DailyMaxLoss;
-            var dailyMaxProfit = globalMaxProfit ?? account.DailyMaxProfit;
-            var maxOpenPositions = globalMaxPositions ?? account.MaxOpenPositions;
-            var maxTradesPerDay = globalMaxTrades ?? account.MaxTradesPerDay;
-
-            // Calculate actual Daily P&L from closed and open positions today (IST)
+            // Calculate actual Daily P&L for THIS account from closed and open positions today (IST)
             var closedPositionsToday = await _context.Positions
                 .AsNoTracking()
                 .Where(p => p.TradingAccountId == account.Id
@@ -59,18 +62,18 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
             decimal unrealizedPnL = openPositionsList.Sum(p => p.UnrealizedPnL);
             decimal dailyPnL = realizedPnL + unrealizedPnL;
 
-            // Check daily loss limit
+            // Check account daily loss limit
             if (dailyMaxLoss > 0 && dailyPnL < -dailyMaxLoss)
             {
-                var reason = $"Daily max loss limit reached (P&L: ₹{dailyPnL:N2}, Limit: ₹{dailyMaxLoss:N2})";
+                var reason = $"Account daily max loss limit reached (P&L: ₹{dailyPnL:N2}, Limit: ₹{dailyMaxLoss:N2})";
                 _logger.LogWarning(AccountReasonLogTemplate, account.Name, reason);
                 return (false, reason);
             }
 
-            // Check daily profit limit
+            // Check account daily profit limit
             if (dailyMaxProfit > 0 && dailyPnL > dailyMaxProfit)
             {
-                var reason = $"Daily max profit target reached (P&L: ₹{dailyPnL:N2}, Limit: ₹{dailyMaxProfit:N2})";
+                var reason = $"Account daily max profit target reached (P&L: ₹{dailyPnL:N2}, Limit: ₹{dailyMaxProfit:N2})";
                 _logger.LogWarning(AccountReasonLogTemplate, account.Name, reason);
                 return (false, reason);
             }
@@ -191,15 +194,11 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
             var startOfDayUtc = todayIst.AddHours(-5.5);
             var endOfDayUtc = startOfDayUtc.AddDays(1);
 
-            var globalMaxLoss = await _settings.GetSettingAsync<decimal?>("DailyMaxLoss");
-            var globalMaxProfit = await _settings.GetSettingAsync<decimal?>("DailyMaxProfit");
-            var globalMaxPositions = await _settings.GetSettingAsync<int?>("MaxOpenPositions");
-            var globalMaxTrades = await _settings.GetSettingAsync<int?>("MaxTradesPerDay");
-
-            var dailyMaxLoss = globalMaxLoss ?? account.DailyMaxLoss;
-            var dailyMaxProfit = globalMaxProfit ?? account.DailyMaxProfit;
-            var maxOpenPositions = globalMaxPositions ?? account.MaxOpenPositions;
-            var maxTradesPerDay = globalMaxTrades ?? account.MaxTradesPerDay;
+            // Tier 1: Per-account metrics
+            var dailyMaxLoss = account.DailyMaxLoss;
+            var dailyMaxProfit = account.DailyMaxProfit;
+            var maxOpenPositions = account.MaxOpenPositions;
+            var maxTradesPerDay = account.MaxTradesPerDay;
 
             var todayOrders = await _context.Orders
                 .Where(o => o.TradingAccountId == accountId
@@ -240,6 +239,86 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
             return new();
         }
     }
+
+    /// <summary>
+    /// Validates global portfolio limits across ALL accounts (live + paper combined)
+    /// </summary>
+    public async Task<(bool IsValid, string Reason)> ValidateGlobalLimitsAsync()
+    {
+        try
+        {
+            var metrics = await GetGlobalPortfolioRiskMetricsAsync();
+
+            if (metrics.DailyMaxLoss > 0 && metrics.DailyPnL <= -metrics.DailyMaxLoss)
+            {
+                var reason = $"Global portfolio daily max loss reached (Combined P&L: ₹{metrics.DailyPnL:N2}, Limit: ₹{metrics.DailyMaxLoss:N2})";
+                return (false, reason);
+            }
+
+            if (metrics.DailyMaxProfit > 0 && metrics.DailyPnL >= metrics.DailyMaxProfit)
+            {
+                var reason = $"Global portfolio daily max profit reached (Combined P&L: ₹{metrics.DailyPnL:N2}, Limit: ₹{metrics.DailyMaxProfit:N2})";
+                return (false, reason);
+            }
+
+            return (true, string.Empty);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating global portfolio risk limits");
+            return (false, $"Global risk check error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Computes portfolio-wide risk metrics across all accounts (both live and paper combined).
+    /// </summary>
+    public async Task<GlobalRiskMetrics> GetGlobalPortfolioRiskMetricsAsync()
+    {
+        try
+        {
+            var todayIst = DateTime.UtcNow.ToIst().Date;
+            var startOfDayUtc = todayIst.AddHours(-5.5);
+            var endOfDayUtc = startOfDayUtc.AddDays(1);
+
+            var globalMaxLoss = await _settings.GetSettingAsync<decimal?>("DailyMaxLoss") ?? 0m;
+            var globalMaxProfit = await _settings.GetSettingAsync<decimal?>("DailyMaxProfit") ?? 0m;
+
+            // Aggregate closed P&L today across all accounts (live + paper)
+            var closedRealized = await _context.Positions
+                .AsNoTracking()
+                .Where(p => p.ClosedAt.HasValue
+                    && p.ClosedAt.Value >= startOfDayUtc
+                    && p.ClosedAt.Value < endOfDayUtc)
+                .SumAsync(p => p.RealizedPnL ?? 0m);
+
+            // Aggregate open unrealized P&L across all accounts (live + paper)
+            var openUnrealized = await _context.Positions
+                .AsNoTracking()
+                .Where(p => p.ClosedAt == null)
+                .SumAsync(p => p.UnrealizedPnL);
+
+            var combinedPnL = closedRealized + openUnrealized;
+
+            var openPositionsCount = await _context.Positions
+                .AsNoTracking()
+                .Where(p => p.ClosedAt == null)
+                .CountAsync();
+
+            return new GlobalRiskMetrics
+            {
+                DailyPnL = combinedPnL,
+                DailyMaxLoss = globalMaxLoss,
+                DailyMaxProfit = globalMaxProfit,
+                OpenPositionsCount = openPositionsCount
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error computing global portfolio risk metrics");
+            return new();
+        }
+    }
 }
 
 /// <summary>
@@ -260,6 +339,21 @@ public class RiskMetrics
         OpenPositionsCount < MaxOpenPositions &&
         DailyPnL >= -DailyMaxLoss &&
         DailyPnL <= DailyMaxProfit;
+}
+
+/// <summary>
+/// Portfolio-wide risk metrics across all accounts (live + paper)
+/// </summary>
+public class GlobalRiskMetrics
+{
+    public decimal DailyPnL { get; set; }
+    public decimal DailyMaxLoss { get; set; }
+    public decimal DailyMaxProfit { get; set; }
+    public int OpenPositionsCount { get; set; }
+
+    public bool IsWithinLimits =>
+        (DailyMaxLoss <= 0 || DailyPnL >= -DailyMaxLoss) &&
+        (DailyMaxProfit <= 0 || DailyPnL <= DailyMaxProfit);
 }
 
 /// <summary>

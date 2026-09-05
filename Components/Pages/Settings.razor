@@ -128,10 +128,11 @@
             <MudPaper Class="pa-4 settings-card-red" Elevation="2">
                 <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3">
                     <MudIcon Icon="@Icons.Material.Filled.Shield" Color="Color.Error" />
-                    <MudText Typo="Typo.h6">Risk Management</MudText>
+                    <MudText Typo="Typo.h6">Portfolio Risk Management (All Accounts)</MudText>
                 </MudStack>
-                <MudNumericField T="decimal" @bind-Value="_dailyMaxLoss" Label="Daily Max Loss (₹)" Variant="Variant.Outlined" Class="mb-3" />
-                <MudNumericField T="decimal" @bind-Value="_dailyMaxProfit" Label="Daily Max Profit (₹)" Variant="Variant.Outlined" Class="mb-3" />
+                <MudNumericField T="decimal" @bind-Value="_dailyMaxLoss" Label="Portfolio Daily Max Loss (₹) — All Accounts" HelperText="Combined daily loss threshold across all accounts (Live + Paper). 0 = disabled" Variant="Variant.Outlined" Class="mb-3" />
+                <MudNumericField T="decimal" @bind-Value="_dailyMaxProfit" Label="Portfolio Daily Max Profit (₹) — All Accounts" HelperText="Combined daily profit target across all accounts (Live + Paper). 0 = disabled" Variant="Variant.Outlined" Class="mb-3" />
+                <MudSwitch T="bool" @bind-Value="_riskAutoSquareOffEnabled" Color="Color.Error" Label="Auto square-off positions when Risk Limits (Portfolio or Account) are hit" Class="mb-2" />
                 <MudNumericField T="int" @bind-Value="_maxOpenPositions" Label="Max Open Positions" Variant="Variant.Outlined" Class="mb-3" />
                 <MudNumericField T="int" @bind-Value="_maxTradesPerDay" Label="Max Trades / Day" Variant="Variant.Outlined" Class="mb-3" />
                 <MudNumericField T="int"
@@ -274,6 +275,7 @@
 
     private decimal _dailyMaxLoss = 1000;
     private decimal _dailyMaxProfit = 5000;
+    private bool _riskAutoSquareOffEnabled = false;
     private int _maxOpenPositions = 5;
     private int _maxTradesPerDay = 10;
     private decimal _stopLossBuffer = 0;
@@ -323,6 +325,8 @@
  
             var dml  = await SettingsService.GetSettingAsync<decimal?>("DailyMaxLoss");       if (dml.HasValue)  _dailyMaxLoss     = dml.Value;
             var dmp  = await SettingsService.GetSettingAsync<decimal?>("DailyMaxProfit");     if (dmp.HasValue)  _dailyMaxProfit   = dmp.Value;
+            var rase = await SettingsService.GetSettingAsync<bool?>("RiskAutoSquareOffEnabled");
+            if (rase.HasValue) _riskAutoSquareOffEnabled = rase.Value;
             var mop  = await SettingsService.GetSettingAsync<int?>("MaxOpenPositions");       if (mop.HasValue)  _maxOpenPositions  = mop.Value;
             var mtpd = await SettingsService.GetSettingAsync<int?>("MaxTradesPerDay");        if (mtpd.HasValue) _maxTradesPerDay   = mtpd.Value;
             var slb  = await SettingsService.GetSettingAsync<decimal?>("StopLossBuffer");     if (slb.HasValue)  _stopLossBuffer    = slb.Value;
@@ -393,6 +397,7 @@
 
             await SettingsService.SetSettingAsync("DailyMaxLoss",       _dailyMaxLoss);
             await SettingsService.SetSettingAsync("DailyMaxProfit",     _dailyMaxProfit);
+            await SettingsService.SetSettingAsync("RiskAutoSquareOffEnabled", _riskAutoSquareOffEnabled);
             await SettingsService.SetSettingAsync("MaxOpenPositions",   _maxOpenPositions);
             await SettingsService.SetSettingAsync("MaxTradesPerDay",    _maxTradesPerDay);
             await SettingsService.SetSettingAsync("StopLossBuffer",     _stopLossBuffer);

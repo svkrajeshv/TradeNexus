@@ -219,63 +219,81 @@ $@"🚪 POSITION CLOSED {modeBadge} {pnlBadge}
                 .Where(p => p.ClosedAt != null
                             && p.ClosedAt >= utcStart
                             && p.ClosedAt < utcEnd)
-                .Select(p => new
-                {
+                .Select(p => new ClosedPositionRow(
                     p.Symbol,
                     p.Quantity,
-                    RealizedPnL = p.RealizedPnL ?? 0m
-                })
+                    p.RealizedPnL ?? 0m,
+                    p.TradingAccount.ClientId,
+                    p.OpenedAt))
                 .ToListAsync();
 
             var istDate = istDayStart.ToString("dd MMM yyyy");
 
-            if (closedToday.Count == 0)
-            {
-                var noneMessage =
-$@"📊 DAILY P&L SUMMARY — {istDate}
-
-No positions were closed today.";
-                await _telegramManager.SendOrderNotificationAsync(noneMessage);
-                return;
-            }
-
-            var perSymbol = closedToday
-                .GroupBy(p => p.Symbol)
-                .Select(g => new
-                {
-                    Symbol = g.Key,
-                    Quantity = g.Sum(x => x.Quantity),
-                    Pnl = g.Sum(x => x.RealizedPnL)
-                })
-                .OrderByDescending(x => x.Pnl)
+            // Live and Paper are reported as two separate messages so neither book's
+            // numbers get folded into (and confused with) the other's total.
+            var liveRows = closedToday
+                .Where(p => !string.Equals(p.ClientId, BookScope.PaperClientId, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var paperRows = closedToday
+                .Where(p => string.Equals(p.ClientId, BookScope.PaperClientId, StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
-            var netPnl = closedToday.Sum(x => x.RealizedPnL);
-            var totalTrades = closedToday.Count;
-            var wins = closedToday.Count(x => x.RealizedPnL > 0);
-            var losses = closedToday.Count(x => x.RealizedPnL < 0);
-            var netBadge = netPnl >= 0 ? "🟢 PROFIT" : "🔴 LOSS";
-
-            var lines = new System.Text.StringBuilder();
-            lines.AppendLine($"📊 DAILY P&L SUMMARY — {istDate} {netBadge}");
-            lines.AppendLine();
-            lines.AppendLine("Executed Symbols:");
-            foreach (var s in perSymbol)
-            {
-                var symBadge = s.Pnl >= 0 ? "🟢" : "🔴";
-                lines.AppendLine($"{symBadge} {s.Symbol}  |  Qty: {s.Quantity:N0}  |  P&L: ₹{s.Pnl:N2}");
-            }
-            lines.AppendLine();
-            lines.AppendLine($"• Total Trades: {totalTrades}");
-            lines.AppendLine($"• Wins / Losses: {wins} / {losses}");
-            lines.AppendLine($"• Net P&L: ₹{netPnl:N2}");
-            lines.Append($"• Time: {istNow:hh:mm:ss tt} IST");
-
-            await _telegramManager.SendOrderNotificationAsync(lines.ToString());
+            await SendBookSummaryAsync("LIVE", "⚡", liveRows, istDate, istNow);
+            await SendBookSummaryAsync("PAPER", "📝", paperRows, istDate, istNow);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to send Telegram daily P&L summary");
         }
     }
+
+    private async Task SendBookSummaryAsync(
+        string bookLabel,
+        string bookIcon,
+        List<ClosedPositionRow> rows,
+        string istDate,
+        DateTime istNow)
+    {
+        if (rows.Count == 0)
+        {
+            var noneMessage =
+$@"📊 {bookIcon} {bookLabel} P&L SUMMARY — {istDate}
+
+No positions were closed today.";
+            await _telegramManager.SendOrderNotificationAsync(noneMessage);
+            return;
+        }
+
+        // Ordered by entry time (earliest first) rather than grouped by symbol, so
+        // repeat trades on the same symbol each show up as their own line in the
+        // order they were actually taken.
+        var orderedTrades = rows
+            .OrderBy(x => x.OpenedAt)
+            .ToList();
+
+        var netPnl = rows.Sum(x => x.RealizedPnL);
+        var totalTrades = rows.Count;
+        var wins = rows.Count(x => x.RealizedPnL > 0);
+        var losses = rows.Count(x => x.RealizedPnL < 0);
+        var netBadge = netPnl >= 0 ? "🟢 PROFIT" : "🔴 LOSS";
+
+        var lines = new System.Text.StringBuilder();
+        lines.AppendLine($"📊 {bookIcon} {bookLabel} P&L SUMMARY — {istDate} {netBadge}");
+        lines.AppendLine();
+        lines.AppendLine("Executed Symbols:");
+        foreach (var t in orderedTrades)
+        {
+            var symBadge = t.RealizedPnL >= 0 ? "🟢" : "🔴";
+            lines.AppendLine($"{symBadge} {t.Symbol}  |  Qty: {t.Quantity:N0}  |  P&L: ₹{t.RealizedPnL:N2}");
+        }
+        lines.AppendLine();
+        lines.AppendLine($"• Total Trades: {totalTrades}");
+        lines.AppendLine($"• Wins / Losses: {wins} / {losses}");
+        lines.AppendLine($"• Net P&L: ₹{netPnl:N2}");
+        lines.Append($"• Time: {istNow:hh:mm:ss tt} IST");
+
+        await _telegramManager.SendOrderNotificationAsync(lines.ToString());
+    }
+
+    private sealed record ClosedPositionRow(string Symbol, decimal Quantity, decimal RealizedPnL, string? ClientId, DateTime OpenedAt);
 }

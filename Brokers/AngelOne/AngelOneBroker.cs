@@ -1083,9 +1083,14 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                     $"AngelOne position book request failed (status '{status}'): {brokerError}");
             }
 
+            // AngelOne legitimately returns status "SUCCESS" with a null/absent 'data'
+            // payload when the account simply has no open positions (not a broker
+            // failure). Only treat a missing payload as an unreadable book when the
+            // status itself was not a success — a genuine failure is already caught
+            // above, so reaching here with a success status and no data just means
+            // an empty position book.
             if (!root.TryGetProperty("data", out var data) || data.ValueKind == JsonValueKind.Null)
-                throw new InvalidOperationException(
-                    $"AngelOne position book response contained no 'data' payload: {ExtractBrokerError(root)}");
+                return [];
 
             var positions = new List<BrokerPosition>();
 

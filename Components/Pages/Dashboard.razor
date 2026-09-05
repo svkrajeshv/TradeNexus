@@ -1353,7 +1353,7 @@
     /// </summary>
     private SignalStalenessInfo? GetSignalStaleness(TradingSignal signal)
     {
-        if (_pendingOrderTimeoutMinutes <= 0 || !IsEditable(signal))
+        if (_pendingOrderTimeoutMinutes <= 0 || !(IsEditable(signal) || IsPendingAutoExecution(signal)))
             return null;
 
         var elapsed = DateTime.UtcNow - signal.ReceivedTimestamp.EnsureUtc();
