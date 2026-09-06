@@ -73,9 +73,10 @@ public class HubConnectionFactory(IServer server, ILogger<HubConnectionFactory> 
                 return null;
             }
 
-            // Plain HTTP first: it maps to a ws:// loopback, avoiding certificate
-            // validation on a hop that never leaves the machine.
-            var address = addresses.FirstOrDefault(a => a.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            // Plain HTTP first: the hub path is exempt from HTTPS redirection (see
+            // WebApplicationExtensions.ConfigurePipeline), so this avoids certificate
+            // validation and redirect handling on the loopback hop entirely.
+            var address = addresses.FirstOrDefault(a => a.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                           ?? addresses.First();
 
             var builder = new UriBuilder(address);

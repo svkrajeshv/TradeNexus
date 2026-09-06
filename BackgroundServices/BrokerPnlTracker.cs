@@ -15,10 +15,7 @@ namespace NexusApp.BackgroundServices;
 ///   * SmartStream LTP ticks re-mark the open legs continuously in between, so
 ///     unrealised P&amp;L moves in real time without any further REST calls.
 /// </summary>
-public sealed class BrokerPnlTracker(
-    ILogger<BrokerPnlTracker> logger,
-    IServiceProvider serviceProvider,
-    AngelOneWebSocketClient ws) : BackgroundService
+public sealed class BrokerPnlTracker(ILogger<BrokerPnlTracker> logger, IServiceProvider serviceProvider, AngelOneWebSocketClient ws) : BackgroundService
 {
     /// <summary>
     /// REST snapshot cadence while the exchange is open. Fast enough that the position
