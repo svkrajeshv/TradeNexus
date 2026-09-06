@@ -50,6 +50,34 @@ internal static class DbSeeder
         ("Target.Points.BANKEX",    "150", SettingType.Decimal, "Default Target points for BANKEX"),
         ("SL.Percent.BANKEX",       "25",  SettingType.Decimal, "Default SL % for BANKEX"),
         ("Target.Percent.BANKEX",   "50",  SettingType.Decimal, "Default Target % for BANKEX"),
+
+        // --- MCX commodity options -------------------------------------------------
+        // Mcx.Enabled defaults to false: commodity signals are neither parsed nor
+        // executed until the user explicitly opts in from Settings, so adding MCX
+        // support does not change behaviour for an existing installation.
+        ("Mcx.Enabled",     "false",  SettingType.Boolean, "Enable commodity (MCX) signal parsing and order execution"),
+        ("Lots.CRUDEOIL",   "0",      SettingType.Integer, "CRUDEOIL lot override (0 = use DefaultQuantity)"),
+        ("Lots.NATURALGAS", "0",      SettingType.Integer, "NATURALGAS lot override"),
+        ("Lots.GOLD",       "0",      SettingType.Integer, "GOLD lot override"),
+        ("Lots.SILVER",     "0",      SettingType.Integer, "SILVER lot override"),
+        ("SL.Points.CRUDEOIL",       "15",  SettingType.Decimal, "Default SL points for CRUDEOIL"),
+        ("Target.Points.CRUDEOIL",   "30",  SettingType.Decimal, "Default Target points for CRUDEOIL"),
+        ("SL.Percent.CRUDEOIL",      "22",  SettingType.Decimal, "Default SL % for CRUDEOIL"),
+        ("Target.Percent.CRUDEOIL",  "45",  SettingType.Decimal, "Default Target % for CRUDEOIL"),
+        ("SL.Points.NATURALGAS",     "5",   SettingType.Decimal, "Default SL points for NATURALGAS"),
+        ("Target.Points.NATURALGAS", "10",  SettingType.Decimal, "Default Target points for NATURALGAS"),
+        ("SL.Percent.NATURALGAS",    "25",  SettingType.Decimal, "Default SL % for NATURALGAS"),
+        ("Target.Percent.NATURALGAS","50",  SettingType.Decimal, "Default Target % for NATURALGAS"),
+        ("SL.Points.GOLD",           "60",  SettingType.Decimal, "Default SL points for GOLD"),
+        ("Target.Points.GOLD",       "120", SettingType.Decimal, "Default Target points for GOLD"),
+        ("SL.Percent.GOLD",          "20",  SettingType.Decimal, "Default SL % for GOLD"),
+        ("Target.Percent.GOLD",      "40",  SettingType.Decimal, "Default Target % for GOLD"),
+        ("SL.Points.SILVER",         "50",  SettingType.Decimal, "Default SL points for SILVER"),
+        ("Target.Points.SILVER",     "100", SettingType.Decimal, "Default Target points for SILVER"),
+        ("SL.Percent.SILVER",        "22",  SettingType.Decimal, "Default SL % for SILVER"),
+        ("Target.Percent.SILVER",    "45",  SettingType.Decimal, "Default Target % for SILVER"),
+        // ---------------------------------------------------------------------------
+
         ("DailyMaxLoss",    "1000",   SettingType.Decimal, "Max loss per day in ₹"),
         ("DailyMaxProfit",  "5000",   SettingType.Decimal, "Max profit target per day in ₹"),
         ("MaxOpenPositions","5",      SettingType.Integer, "Max simultaneous open positions"),

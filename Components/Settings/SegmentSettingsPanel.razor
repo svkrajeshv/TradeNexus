@@ -1,0 +1,83 @@
+@using MudBlazor
+@using NexusApp.Helpers
+@using NexusApp.Models
+
+@*
+    Renders the lot overrides and SL/Target risk profiles for a single market
+    segment. Both collections are bound by reference to the parent page's lists,
+    so edits flow straight back into the page's single SaveAsync - no duplicated
+    persistence logic and no divergence between the Equity and MCX tabs.
+*@
+
+<MudStack Spacing="3">
+    <MudPaper Class="pa-4 settings-card-purple" Elevation="2">
+        <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
+            <MudIcon Icon="@Icons.Material.Filled.FormatListNumbered" Color="Color.Secondary" />
+            <MudText Typo="Typo.h6">Per-Contract Lot Overrides</MudText>
+        </MudStack>
+        <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
+            0 = use the Default Order Size from the General tab.
+        </MudText>
+        <MudGrid Spacing="2">
+            @foreach (var lot in SegmentLots)
+            {
+                <MudItem xs="6">
+                    <MudNumericField T="int" @bind-Value="lot.Lots" Label="@lot.Underlying"
+                                     Variant="Variant.Outlined" Min="0" Disabled="@(!Enabled)" />
+                </MudItem>
+            }
+        </MudGrid>
+    </MudPaper>
+
+    <MudPaper Class="pa-4 settings-card-blue" Elevation="2">
+        <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
+            <MudIcon Icon="@Icons.Material.Filled.Speed" Color="Color.Primary" />
+            <MudText Typo="Typo.h6">Risk Profiles (Target &amp; Stop-Loss)</MudText>
+        </MudStack>
+        <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
+            Volatility-calibrated default Stop-Loss and Target levels per contract.
+        </MudText>
+
+        <MudTable Items="SegmentProfiles" Dense="true" Hover="true" Elevation="0">
+            <HeaderContent>
+                <MudTh>Contract</MudTh>
+                <MudTh>SL (Pts)</MudTh>
+                <MudTh>Target (Pts)</MudTh>
+                <MudTh>SL (%)</MudTh>
+                <MudTh>Target (%)</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd DataLabel="Contract"><b>@context.Index</b></MudTd>
+                <MudTd DataLabel="SL (Pts)">
+                    <MudNumericField T="decimal" @bind-Value="context.DefaultSlPoints" Min="1m" Variant="Variant.Text" Margin="Margin.Dense" Disabled="@(!Enabled)" />
+                </MudTd>
+                <MudTd DataLabel="Target (Pts)">
+                    <MudNumericField T="decimal" @bind-Value="context.DefaultTargetPoints" Min="1m" Variant="Variant.Text" Margin="Margin.Dense" Disabled="@(!Enabled)" />
+                </MudTd>
+                <MudTd DataLabel="SL (%)">
+                    <MudNumericField T="decimal" @bind-Value="context.SlPercent" Min="1m" Max="100m" Variant="Variant.Text" Margin="Margin.Dense" Disabled="@(!Enabled)" />
+                </MudTd>
+                <MudTd DataLabel="Target (%)">
+                    <MudNumericField T="decimal" @bind-Value="context.TargetPercent" Min="1m" Max="500m" Variant="Variant.Text" Margin="Margin.Dense" Disabled="@(!Enabled)" />
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+    </MudPaper>
+</MudStack>
+
+@code {
+    /// <summary>Segment whose rows this panel edits.</summary>
+    [Parameter, EditorRequired] public MarketSegment Segment { get; set; }
+
+    /// <summary>Parent's full lot list; filtered to <see cref="Segment"/> for display.</summary>
+    [Parameter, EditorRequired] public List<LotConfigVm> Lots { get; set; } = [];
+
+    /// <summary>Parent's full risk-profile list; filtered to <see cref="Segment"/> for display.</summary>
+    [Parameter, EditorRequired] public List<IndexRiskProfileVm> Profiles { get; set; } = [];
+
+    /// <summary>When false every input is disabled (used by the MCX master toggle).</summary>
+    [Parameter] public bool Enabled { get; set; } = true;
+
+    private IEnumerable<LotConfigVm> SegmentLots => Lots.Where(l => l.Segment == Segment);
+    private IEnumerable<IndexRiskProfileVm> SegmentProfiles => Profiles.Where(p => p.Segment == Segment);
+}

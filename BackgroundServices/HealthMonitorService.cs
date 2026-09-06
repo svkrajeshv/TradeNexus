@@ -21,7 +21,8 @@ public sealed class HealthMonitorService(
     ILogger<HealthMonitorService> logger,
     IServiceProvider serviceProvider,
     IHubContext<TradingHub> hub,
-    NexusApp.Services.HealthSnapshotCache healthSnapshots) : BackgroundService
+    NexusApp.Services.HealthSnapshotCache healthSnapshots,
+    NexusApp.Services.McxToggle mcx) : BackgroundService
 {
     // Reduced from 30s -> 10s. Safe to do because ReadBrokerPnlAsync now prefers the
     // BrokerPnlTracker cache (fed continuously by SmartStream ticks) over a direct
@@ -36,6 +37,15 @@ public sealed class HealthMonitorService(
     private readonly IServiceProvider _serviceProvider = serviceProvider;
     private readonly IHubContext<TradingHub> _hub = hub;
     private readonly NexusApp.Services.HealthSnapshotCache _healthSnapshots = healthSnapshots;
+    private readonly NexusApp.Services.McxToggle _mcx = mcx;
+
+    /// <summary>
+    /// True while any enabled segment is in its polling window. With commodity trading
+    /// off this collapses to the equity window, leaving cadence unchanged from before
+    /// MCX support existed.
+    /// </summary>
+    private async Task<bool> IsPollingWindowAsync(CancellationToken ct = default) =>
+        MarketHours.IsAnySegmentPollingWindowNow(await _mcx.IsEnabledAsync(ct));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -75,7 +85,7 @@ public sealed class HealthMonitorService(
                 // The book is static once the exchange closes, so this is confined to
                 // the trading window; BrokerPnlTracker keeps the last snapshot for the
                 // end-of-day figures.
-                if (broker.IsConnected && MarketHours.IsPollingWindowNow())
+                if (broker.IsConnected && await IsPollingWindowAsync(stoppingToken))
                 {
                     await engine.UpdatePositionsAsync();
                 }
@@ -318,7 +328,7 @@ public sealed class HealthMonitorService(
         // Fallback only: outside the session the book is static, so a direct
         // getPosition on every 30s tick would burn rate-limit budget for figures
         // that cannot have changed. Report unavailable instead of polling.
-        if (!MarketHours.IsPollingWindowNow())
+        if (!await IsPollingWindowAsync())
             return (false, 0m, 0m);
 
         try

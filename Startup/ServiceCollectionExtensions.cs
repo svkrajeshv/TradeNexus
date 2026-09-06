@@ -128,12 +128,13 @@ internal static class ServiceCollectionExtensions
         // Channel-aware signal parser strategies (highest priority wins).
         services.AddScoped<SignalParser>();
         services.AddScoped<IChannelSignalParser, SignalParser>();
-        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.AbcBtstSignalParser>();
-        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.IntradayNiftyParser>();
-        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.TradeWithPihuParser>();
-        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.TradeWithMohitAgrawalParser>();
-        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.BankniftyExpressParser>();
-        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.GujaratiTraderParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.AbcBtstSignalParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.IntradayNiftyParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.TradeWithPihuParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.TradeWithMohitAgrawalParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.BankniftyExpressParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.GujaratiTraderParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.McxSignalParser>();
         services.AddScoped<SignalParserResolver>();
         services.AddScoped<RiskManager>();
         services.AddScoped<PaperTradingEngine>();
@@ -180,20 +181,20 @@ internal static class ServiceCollectionExtensions
             var httpFactory = sp.GetRequiredService<IHttpClientFactory>();
             var apiUrl = configuration[$"{AliceBlueClientName}:ApiUrl"]
                 ?? "https://ant.aliceblueonline.com/rest/AliceBlueAPIService";
-            return new NexusApp.Brokers.AliceBlue.AliceBlueApiClient(
+            return new Brokers.AliceBlue.AliceBlueApiClient(
                 httpFactory.CreateClient(AliceBlueClientName),
-                sp.GetRequiredService<ILogger<NexusApp.Brokers.AliceBlue.AliceBlueApiClient>>(),
+                sp.GetRequiredService<ILogger<Brokers.AliceBlue.AliceBlueApiClient>>(),
                 apiUrl);
         });
-        services.AddSingleton<NexusApp.Brokers.AliceBlue.AliceBlueContractMaster>();
-        services.AddSingleton<NexusApp.Brokers.AliceBlue.AliceBlueBroker>(sp => new NexusApp.Brokers.AliceBlue.AliceBlueBroker(
-            sp.GetRequiredService<NexusApp.Brokers.AliceBlue.AliceBlueApiClient>(),
-            sp.GetRequiredService<ILogger<NexusApp.Brokers.AliceBlue.AliceBlueBroker>>(),
-            sp.GetRequiredService<NexusApp.Brokers.AliceBlue.AliceBlueContractMaster>()));
-        services.AddKeyedSingleton<IBroker, NexusApp.Brokers.AliceBlue.AliceBlueBroker>(
-            AliceBlueClientName, (sp, key) => sp.GetRequiredService<NexusApp.Brokers.AliceBlue.AliceBlueBroker>());
+        services.AddSingleton<Brokers.AliceBlue.AliceBlueContractMaster>();
+        services.AddSingleton<Brokers.AliceBlue.AliceBlueBroker>(sp => new Brokers.AliceBlue.AliceBlueBroker(
+            sp.GetRequiredService<Brokers.AliceBlue.AliceBlueApiClient>(),
+            sp.GetRequiredService<ILogger<Brokers.AliceBlue.AliceBlueBroker>>(),
+            sp.GetRequiredService<Brokers.AliceBlue.AliceBlueContractMaster>()));
+        services.AddKeyedSingleton<IBroker, Brokers.AliceBlue.AliceBlueBroker>(
+            AliceBlueClientName, (sp, key) => sp.GetRequiredService<Brokers.AliceBlue.AliceBlueBroker>());
 
-        services.AddSingleton<IBroker, NexusApp.Brokers.RoutingBroker>();
+        services.AddSingleton<IBroker, Brokers.RoutingBroker>();
     }
 
     private static void AddHostedServices(this IServiceCollection services)
@@ -205,7 +206,8 @@ internal static class ServiceCollectionExtensions
         services.AddHostedService<BrokerAutoConnectService>();
         services.AddSingleton<BrokerPnlTracker>();
         services.AddHostedService(sp => sp.GetRequiredService<BrokerPnlTracker>());
-        services.AddSingleton<NexusApp.Services.HealthSnapshotCache>();
+        services.AddSingleton<HealthSnapshotCache>();
+        services.AddSingleton<McxToggle>();
         services.AddHostedService<HealthMonitorService>();
         services.AddHostedService<CmpStreamingService>();
         services.AddHostedService<OrderSyncService>();

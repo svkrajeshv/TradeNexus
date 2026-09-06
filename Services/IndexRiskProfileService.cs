@@ -13,12 +13,23 @@ public class IndexRiskProfileService(ISettingsService settings) : IIndexRiskProf
     private static readonly Dictionary<string, (decimal SlPts, decimal TgtPts, decimal SlPct, decimal TgtPct)> BaselineProfiles =
         new(StringComparer.OrdinalIgnoreCase)
         {
+            // NSE / BSE index options
             ["NIFTY"] = (20m, 35m, 18m, 35m),
             ["BANKNIFTY"] = (40m, 70m, 20m, 40m),
             ["FINNIFTY"] = (20m, 35m, 18m, 35m),
             ["MIDCPNIFTY"] = (15m, 25m, 15m, 30m),
             ["SENSEX"] = (80m, 140m, 25m, 50m),
             ["BANKEX"] = (90m, 150m, 25m, 50m),
+
+            // MCX commodity options. Point values are deliberately NOT copied from the
+            // index rows: commodity option premiums sit in a different range entirely,
+            // so an index-derived points buffer would be far too wide or too tight.
+            // Percent buffers are kept a little wider than equity to absorb the higher
+            // intraday volatility of energy contracts.
+            ["CRUDEOIL"] = (15m, 30m, 22m, 45m),
+            ["NATURALGAS"] = (5m, 10m, 25m, 50m),
+            ["GOLD"] = (60m, 120m, 20m, 40m),
+            ["SILVER"] = (50m, 100m, 22m, 45m),
         };
 
     private async Task<IndexRiskProfile> GetProfileAsync(string index)

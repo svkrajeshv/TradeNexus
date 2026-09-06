@@ -4,6 +4,7 @@ using NexusApp.Brokers.AngelOne;
 using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Models;
+using System.Linq;
 
 namespace NexusApp.TradingEngine;
 
@@ -15,11 +16,6 @@ namespace NexusApp.TradingEngine;
 /// </summary>
 public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger, AngelInstrumentMaster? instrumentMaster = null)
 {
-    private static readonly HashSet<string> NseIndices = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"
-    };
-
     private static readonly HashSet<string> BseIndices = new(StringComparer.OrdinalIgnoreCase)
     {
         "SENSEX", "BANKEX"
@@ -169,6 +165,19 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
             }
         }
 
+        // Commodity expiries are irregular and vary per commodity (CRUDEOIL ~19th,
+        // GOLD ~5th), so the equity weekday heuristic below would silently produce a
+        // date that does not correspond to any listed contract - and the caller would
+        // then book a wrong or non-existent series. Fail loudly instead.
+        if (MarketSegments.IsCommodity(index))
+        {
+            _logger.LogError(
+                "Cannot resolve expiry for commodity {Index}: no listed contract in the instrument master, " +
+                "and the weekday expiry heuristic does not apply to MCX.", index);
+            throw new InvalidOperationException(
+                $"Unable to resolve an MCX expiry for '{index}'. The instrument master has no listed contract for it.");
+        }
+
         return NearestWeeklyExpiry(DateTimeExtensions.IstToday(), index);
     }
 
@@ -208,21 +217,29 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
         var strikeStr = strike.ToString("0", CultureInfo.InvariantCulture);
         var opt = type == OptionType.Ce ? "CE" : "PE";
 
-        var candidates = new List<string>(4)
-        {
-            $"{idx}{dd}{mon}{yy}{strikeStr}{opt}", // e.g. BANKNIFTY28JUL2657000CE
-            $"{idx}{yy}{mon}{strikeStr}{opt}",      // e.g. BANKNIFTY26JUL57000PE
-            $"{idx}{dd}{mon}{strikeStr}{opt}",      // occasional variant
-            BuildStandardSymbol(index, strike, type, expiry)
-        };
+        var candidates = MarketSegments.IsCommodity(idx)
+            ?
+            [
+                // MCX lists commodity options as {UNDERLYING}{dd}{MMM}{yy}{strike}{CE|PE}
+                // e.g. CRUDEOIL17NOV265900CE, with a monthly variant also in circulation.
+                $"{idx}{dd}{mon}{yy}{strikeStr}{opt}",
+                $"{idx}{mon}{yy}{strikeStr}{opt}",
+                $"{idx}{dd}{mon}{strikeStr}{opt}",
+                BuildStandardSymbol(index, strike, type, expiry)
+            ]
+            : new List<string>(4)
+            {
+                $"{idx}{dd}{mon}{yy}{strikeStr}{opt}", // e.g. BANKNIFTY28JUL2657000CE
+                $"{idx}{yy}{mon}{strikeStr}{opt}",      // e.g. BANKNIFTY26JUL57000PE
+                $"{idx}{dd}{mon}{strikeStr}{opt}",      // occasional variant
+                BuildStandardSymbol(index, strike, type, expiry)
+            };
 
         var dedup = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var ordered = new List<string>(candidates.Count);
-        foreach (var c in candidates)
-        {
-            if (dedup.Add(c))
-                ordered.Add(c);
-        }
+        ordered.AddRange(from c in candidates
+                         where dedup.Add(c)
+                         select c);
         return ordered;
     }
 
@@ -303,12 +320,19 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
         "MIDCPNIFTY" => 120,
         "SENSEX" => 20,
         "BANKEX" => 30,
+        // MCX commodity lot sizes. Last-resort fallbacks only: the instrument master's
+        // lotsize is authoritative and is preferred wherever it is available, because
+        // the exchange revises these periodically.
+        "CRUDEOIL" => 100,
+        "NATURALGAS" => 1250,
+        "GOLD" => 100,
+        "SILVER" => 30,
         _ => 1
     };
 
     private static string ExchangeFor(string index) =>
-        BseIndices.Contains(index) ? "BFO" :
-        NseIndices.Contains(index) ? "NFO" : "NFO";
+        MarketSegments.IsCommodity(index) ? "MCX" :
+        BseIndices.Contains(index) ? "BFO" : "NFO";
 }
 
 public sealed class ResolvedSymbol

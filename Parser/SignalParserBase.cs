@@ -58,6 +58,34 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
 
     private readonly IServiceScopeFactory? _scopeFactory = scopeFactory;
 
+    /// <summary>
+    /// Commodity underlyings, built from the single source of truth so this can never
+    /// drift from the instrument-master filter or the segment resolver.
+    /// </summary>
+    private static readonly string CommodityIndexPattern =
+        $"({string.Join("|", MarketSegments.CommodityUnderlyings.OrderByDescending(c => c.Length))})";
+
+    /// <summary>
+    /// Commodity strikes span a far wider range than index strikes (NATURALGAS trades
+    /// near 200, GOLD above 100000), so <see cref="StrikePattern"/>'s <c>(\d{4,5})</c>
+    /// cannot cover them. Requires a trailing CE/PE so it cannot capture an entry price
+    /// or an expiry day by mistake.
+    /// </summary>
+    private const string CommodityStrikePattern = @"(\d{2,7})\s*(?:CE|PE|CALL|PUT)";
+
+    /// <summary>
+    /// Set during <see cref="ParseAsync"/> from the <c>Mcx.Enabled</c> master toggle.
+    /// Fails closed: stays false when the setting cannot be read.
+    /// </summary>
+    private bool _mcxEnabled;
+
+    /// <summary>
+    /// True when the parsed underlying belongs to the commodity segment. Channels are
+    /// resolved by name, but a single channel may post both equity and commodity calls,
+    /// so the segment can only be known per-message.
+    /// </summary>
+    protected static bool IsCommoditySignal(ParsedSignal signal) => MarketSegments.IsCommodity(signal.Index);
+
     // ---- Channel strategy hooks (overridable) --------------------------------
 
     /// <inheritdoc />
@@ -102,10 +130,12 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
 
             var sl = await settings.GetSettingAsync<decimal?>("DefaultStopLossPoints");
             if (sl is > 0) DefaultSlPoints = sl.Value;
+
+            _mcxEnabled = await settings.GetSettingAsync<bool?>("Mcx.Enabled") ?? false;
         }
         catch
         {
-            // Keep built-in defaults on any failure.
+            // Keep built-in defaults on any failure. _mcxEnabled stays false (fails closed).
         }
     }
 
@@ -141,11 +171,22 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
                 return signal;
             }
 
-            // Parse index (NIFTY, BANKNIFTY, etc.)
+            // Parse index (NIFTY, BANKNIFTY, CRUDEOIL, etc.)
             if (!ParseIndex(normalized, signal))
             {
                 signal.ValidationErrors = "Could not parse index name";
                 return signal;
+            }
+
+            // Commodity master toggle. Applied here rather than per-channel because a
+            // channel may post both equity and commodity calls, so the segment is only
+            // known once the underlying has been parsed.
+            if (IsCommoditySignal(signal) && !_mcxEnabled)
+            {
+                _logger.LogInformation(
+                    "Commodity trading is disabled; ignoring {Index} signal message {MessageId}.",
+                    signal.Index, telegramMessageId);
+                return null;
             }
 
             // Parse strike price
@@ -221,7 +262,7 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
         return false;
     }
 
-    protected static bool ParseIndex(string message, ParsedSignal signal)
+    protected virtual bool ParseIndex(string message, ParsedSignal signal)
     {
         var match = Regex.Match(message, IndexPattern);
         if (match.Success)
@@ -229,11 +270,33 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
             signal.Index = match.Groups[1].Value;
             return true;
         }
+
+        // Fallback: the message may be a commodity call on an otherwise equity channel.
+        match = Regex.Match(message, CommodityIndexPattern, RegexOptions.IgnoreCase);
+        if (match.Success)
+        {
+            signal.Index = match.Groups[1].Value.ToUpperInvariant();
+            return true;
+        }
+
         return false;
     }
 
-    protected static bool ParseStrike(string message, ParsedSignal signal)
+    protected virtual bool ParseStrike(string message, ParsedSignal signal)
     {
+        // Commodity strikes fall outside the 4-5 digit index range, so match on the
+        // strike that is explicitly followed by CE/PE instead.
+        if (IsCommoditySignal(signal))
+        {
+            var commodity = Regex.Match(message, CommodityStrikePattern, RegexOptions.IgnoreCase);
+            if (commodity.Success && decimal.TryParse(commodity.Groups[1].Value, out var commodityStrike) && commodityStrike > 0)
+            {
+                signal.Strike = commodityStrike;
+                return true;
+            }
+            return false;
+        }
+
         var match = Regex.Match(message, StrikePattern);
         if (match.Success && decimal.TryParse(match.Groups[1].Value, out var strike))
         {
@@ -249,7 +312,7 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
         if (match.Success)
         {
             var type = match.Groups[1].Value;
-            signal.OptionType = type.StartsWith("C") ? OptionType.Ce : OptionType.Pe;
+            signal.OptionType = type.StartsWith("C", StringComparison.OrdinalIgnoreCase) ? OptionType.Ce : OptionType.Pe;
             return true;
         }
         return false;

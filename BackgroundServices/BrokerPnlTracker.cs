@@ -1,6 +1,7 @@
 using NexusApp.Brokers.AngelOne;
 using NexusApp.Helpers;
 using NexusApp.Interfaces;
+using NexusApp.Services;
 
 namespace NexusApp.BackgroundServices;
 
@@ -15,7 +16,7 @@ namespace NexusApp.BackgroundServices;
 ///   * SmartStream LTP ticks re-mark the open legs continuously in between, so
 ///     unrealised P&amp;L moves in real time without any further REST calls.
 /// </summary>
-public sealed class BrokerPnlTracker(ILogger<BrokerPnlTracker> logger, IServiceProvider serviceProvider, AngelOneWebSocketClient ws) : BackgroundService
+public sealed class BrokerPnlTracker(ILogger<BrokerPnlTracker> logger, IServiceProvider serviceProvider, AngelOneWebSocketClient ws, McxToggle mcx) : BackgroundService
 {
     /// <summary>
     /// REST snapshot cadence while the exchange is open. Fast enough that the position
@@ -35,6 +36,7 @@ public sealed class BrokerPnlTracker(ILogger<BrokerPnlTracker> logger, IServiceP
     private readonly ILogger<BrokerPnlTracker> _logger = logger;
     private readonly IServiceProvider _serviceProvider = serviceProvider;
     private readonly AngelOneWebSocketClient _ws = ws;
+    private readonly McxToggle _mcx = mcx;
 
     private readonly Lock _gate = new();
     private List<BrokerPosition> _snapshot = [];
@@ -110,7 +112,7 @@ public sealed class BrokerPnlTracker(ILogger<BrokerPnlTracker> logger, IServiceP
 
             try
             {
-                var delay = MarketHours.IsPollingWindowNow() ? MarketHoursInterval : OffHoursInterval;
+                var delay = await IsPollingWindowAsync(stoppingToken) ? MarketHoursInterval : OffHoursInterval;
                 await Task.Delay(delay, stoppingToken);
             }
             catch (OperationCanceledException)
@@ -120,13 +122,21 @@ public sealed class BrokerPnlTracker(ILogger<BrokerPnlTracker> logger, IServiceP
         }
     }
 
+    /// <summary>
+    /// True while any enabled segment is in its polling window. With commodity trading
+    /// off this collapses to the equity window, so cadence is unchanged from before MCX
+    /// support existed.
+    /// </summary>
+    private async Task<bool> IsPollingWindowAsync(CancellationToken ct) =>
+        MarketHours.IsAnySegmentPollingWindowNow(await _mcx.IsEnabledAsync(ct));
+
     private async Task RefreshSnapshotAsync(CancellationToken ct)
     {
         // The position book cannot change while the exchange is closed, so polling it
         // outside the session only spends Angel One rate-limit budget (1 req/s on
         // getPosition) that the live session needs. One final snapshot is still taken
         // after the window closes so the end-of-day figures reflect the last fills.
-        if (!MarketHours.IsPollingWindowNow())
+        if (!await IsPollingWindowAsync(ct))
         {
             if (_idleSnapshotTaken)
                 return;

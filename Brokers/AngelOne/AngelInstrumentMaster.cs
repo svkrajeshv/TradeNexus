@@ -301,10 +301,20 @@ public sealed class AngelInstrumentMaster
     /// <summary>
     /// Underlyings we actually trade. Non-listed index/stock options are dropped
     /// from the in-memory index to save memory (~90% reduction).
+    /// <para>
+    /// The MCX commodities are loaded unconditionally rather than being gated on the
+    /// <c>Mcx.Enabled</c> setting: loading them is harmless, and gating would mean
+    /// flipping that toggle required a full master re-download before commodity
+    /// symbols could resolve. Keeping the load unconditional makes the toggle take
+    /// effect immediately, at the cost of a modestly larger index while MCX is off.
+    /// </para>
     /// </summary>
     private static readonly HashSet<string> SupportedUnderlyings = new(StringComparer.OrdinalIgnoreCase)
     {
-        "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"
+        // NSE / BSE index options
+        "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX",
+        // MCX commodity options
+        "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"
     };
 
     /// <summary>
@@ -443,7 +453,7 @@ public sealed class AngelInstrumentMaster
         _optionIndex = pruned;
 
         _logger.LogInformation(
-            "Instrument master loaded: parsed={Parsed} kept={Kept} (options={Options}, non-options={NonOpt}). Dropped {Dropped} contracts to save memory.",
+            "Instrument master loaded: parsed={Parsed} kept={Kept} (options={Options}, mcx={NonOpt}). Dropped {Dropped} contracts to save memory.",
             totalParsed, byTs.Count, pruned.Count, byTs.Count - pruned.Count, totalParsed - byTs.Count);
     }
 

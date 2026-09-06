@@ -151,14 +151,38 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
                 return false;
             }
 
-            // Check trading hours (9:15 AM – 3:30 PM IST for NSE/BSE) unless bypass is enabled.
+            // Check trading hours unless bypass is enabled. The window depends on the
+            // segment: NSE/BSE 09:15-15:30, MCX 09:00-23:30.
             var now = DateTime.UtcNow.ToIst();
-            var marketOpen  = new TimeSpan(9, 15, 0);
-            var marketClose = new TimeSpan(15, 30, 0);
+            var segment = MarketSegments.ForTradingSymbol(order.Symbol);
+
+            if (segment == MarketSegment.Commodity)
+            {
+                // Commodity orders are blocked outright unless the master toggle is on.
+                // This is the authoritative gate: the parser gate alone would not stop an
+                // already-parsed signal or a manually-entered commodity order.
+                var mcxEnabled = await _settings.GetSettingAsync<bool?>("Mcx.Enabled") ?? false;
+                if (!mcxEnabled)
+                {
+                    _logger.LogWarning("Commodity trading is disabled - blocking MCX order for {Symbol}.", order.Symbol);
+                    order.ErrorMessage = "Commodity (MCX) trading is disabled. Enable it in Settings \u2192 MCX to trade commodities.";
+                    return false;
+                }
+            }
+
+            var marketOpen = segment == MarketSegment.Commodity ? MarketHours.CommodityOpen : MarketHours.Open;
+            var marketClose = segment == MarketSegment.Commodity ? MarketHours.CommodityClose : MarketHours.Close;
 
             if (!bypassMarketHours && (now.TimeOfDay < marketOpen || now.TimeOfDay > marketClose))
             {
-                _logger.LogWarning("Trading outside market hours ({Time} IST). Market: 09:15–15:30", now.ToString("HH:mm"));
+                if (segment == MarketSegment.Commodity)
+                {
+                    _logger.LogWarning("Trading outside MCX market hours ({Time} IST). Market: 09:00\u201323:30", now.ToString("HH:mm"));
+                    order.ErrorMessage = $"MCX market is closed (current time: {now:hh:mm tt} IST). MCX hours are 09:00 AM to 11:30 PM. Enable 'Allow orders after market hours' in Settings to test.";
+                    return false;
+                }
+
+                _logger.LogWarning("Trading outside market hours ({Time} IST). Market: 09:15\u201315:30", now.ToString("HH:mm"));
                 order.ErrorMessage = $"Market is closed (current time: {now:hh:mm tt} IST). Market hours are 09:15 AM to 03:30 PM. Enable 'Allow orders after market hours' in Settings to test.";
                 return false;
             }
