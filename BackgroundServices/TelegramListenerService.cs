@@ -31,9 +31,21 @@ public sealed partial class TelegramListenerService(
     private readonly IServiceProvider _serviceProvider = serviceProvider;
     private readonly TelegramManager _manager = manager;
     private readonly IHubContext<TradingHub> _hub = hub;
-    private readonly ConcurrentDictionary<(string Channel, long MessageId), byte> _processedMessages = new();
+    /// <summary>
+    /// Messages already handled, keyed by (channel, message id) with the message TEXT as the
+    /// value. Telegram raises an update for edits under the SAME message id, so the text is
+    /// kept to tell a genuine re-delivery (ignore) from an edited call (re-process).
+    /// </summary>
+    private readonly ConcurrentDictionary<(string Channel, long MessageId), string> _processedMessages = new();
     private readonly ConcurrentDictionary<string, int> _lastSeenMessageIds = new(StringComparer.OrdinalIgnoreCase);
     private const string SignalStatusChangedEvent = "SignalStatusChanged";
+
+    /// <summary>
+    /// How long after a call was received a further message for the same channel + contract is
+    /// considered a revision of that call (edit / corrected re-post) rather than a new signal.
+    /// </summary>
+    private static readonly TimeSpan SignalRevisionWindow = TimeSpan.FromMinutes(5);
+
     private DateTime _serviceStartTime = DateTime.UtcNow;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -239,8 +251,21 @@ public sealed partial class TelegramListenerService(
             );
         }
 
-        if (!_processedMessages.TryAdd((message.SenderName, message.MessageId), 0))
-            return;
+        var messageKey = (message.SenderName, message.MessageId);
+        var messageText = message.Text ?? string.Empty;
+        if (!_processedMessages.TryAdd(messageKey, messageText))
+        {
+            if (_processedMessages.TryGetValue(messageKey, out var previousText) &&
+                string.Equals(previousText, messageText, StringComparison.Ordinal))
+            {
+                // Same message delivered twice (real-time event + poll) — nothing to do.
+                return;
+            }
+
+            // The channel edited the call (corrected entry/SL/targets); re-process so the
+            // stored signal is refreshed instead of keeping the stale levels.
+            _processedMessages[messageKey] = messageText;
+        }
 
         if (_processedMessages.Count > 2000)
         {
@@ -257,6 +282,11 @@ public sealed partial class TelegramListenerService(
             var settings = scope.ServiceProvider.GetRequiredService<ISettingsService>();
 
             if (await TryHandleIntermediateSquareOffAsync(context, message, scope.ServiceProvider))
+                return;
+
+            // Tagged follow-up that only carries Target/SL levels for a previously
+            // posted call (e.g. "Vip Group" replies "Target 320/350" to its own signal).
+            if (await TryHandleFollowUpUpdateAsync(context, message))
                 return;
 
             // Channel-specific skip rule (e.g. ABC BTST TRADE positional "#BTST TRADE"
@@ -463,9 +493,58 @@ public sealed partial class TelegramListenerService(
                 return;
             }
 
-            var duplicate = await context.TradingSignals.AsNoTracking()
-                .AnyAsync(s => s.TelegramMessageId == message.MessageId);
-            if (duplicate) return;
+            // Duplicate / revision guard.
+            // A channel frequently re-states the SAME call within seconds: an edit of the
+            // original post (same message id, corrected levels) or a fresh re-post of the same
+            // contract. Matching only on TelegramMessageId let the re-post through and produced
+            // a second row for one call. Any un-executed signal for the same channel + contract
+            // received inside the revision window is therefore treated as the same call and
+            // updated in place.
+            var revisionCutoff = receivedAt - SignalRevisionWindow;
+            var existing = await context.TradingSignals
+                .Where(s => s.TelegramMessageId == message.MessageId ||
+                            (s.ChannelName == message.SenderName &&
+                             s.Index == parsed.Index &&
+                             s.Strike == parsed.Strike &&
+                             s.OptionType == parsed.OptionType &&
+                             s.Action == parsed.Action &&
+                             s.ReceivedTimestamp >= revisionCutoff))
+                .OrderByDescending(s => s.ReceivedTimestamp)
+                .FirstOrDefaultAsync();
+
+            if (existing is not null)
+            {
+                // Already acted upon (or deliberately dropped) — never rewrite history.
+                if (existing.Status is SignalStatus.Executed or SignalStatus.Failed or SignalStatus.Ignored)
+                {
+                    _logger.LogDebug(
+                        "Message {MessageId} from {Channel} matches signal {SignalId} which is already {Status}; ignored.",
+                        message.MessageId, message.SenderName, existing.Id, existing.Status);
+                    return;
+                }
+
+                existing.TelegramMessageId = message.MessageId;
+                existing.OriginalMessage = message.Text;
+                existing.TelegramTimestamp = message.Timestamp.EnsureUtc();
+                existing.ProcessedTimestamp = DateTime.UtcNow;
+                existing.EntryPrice = parsed.EntryPrice;
+                existing.StopLoss = parsed.StopLoss;
+                existing.Targets = [.. parsed.Targets];
+                existing.ExpiryDate = parsed.ExpiryDate;
+                await context.SaveChangesAsync();
+
+                _logger.LogInformation(
+                    "Message {MessageId} from {Channel} revised existing signal {SignalId} ({Index} {Strike}{OptionType}): entry={Entry} sl={Sl} targets=[{Targets}].",
+                    message.MessageId, message.SenderName, existing.Id, existing.Index, existing.Strike,
+                    existing.OptionType, existing.EntryPrice, existing.StopLoss, string.Join("/", existing.Targets));
+
+                await _hub.Clients.All.SendAsync(SignalStatusChangedEvent, new
+                {
+                    existing.Id,
+                    Status = existing.Status.ToString()
+                });
+                return;
+            }
 
             var signal = new TradingSignal
             {
@@ -656,6 +735,94 @@ public sealed partial class TelegramListenerService(
 
         return true;
     }
+
+    /// <summary>
+    /// Applies a tagged (reply) follow-up message that only quotes Target / stop-loss
+    /// levels for a call posted earlier, e.g. the "Vip Group" channel posts
+    /// "SENSEX 10 SEP 76300 PE ABOVE :- 300 STOPLOSS :- 260" and then replies to it with
+    /// "Target 320/350". The original signal (and any still-open position created from it)
+    /// is updated with the quoted levels.
+    ///
+    /// Safety: only messages that reply to a known signal AND name no contract of their own
+    /// (no CE/PE/CALL/PUT) are treated as updates, so a fresh signal posted as a reply is
+    /// still parsed normally.
+    /// </summary>
+    private async Task<bool> TryHandleFollowUpUpdateAsync(TradingDbContext context, TelegramMessage message)
+    {
+        if (!message.ReplyToMessageId.HasValue)
+            return false;
+
+        var text = message.Text ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(text) || ContractHintRegex().IsMatch(text))
+            return false;
+
+        var targetMatch = FollowUpTargetRegex().Match(text);
+        var slMatch = FollowUpStopLossRegex().Match(text);
+        if (!targetMatch.Success && !slMatch.Success)
+            return false;
+
+        var targets = targetMatch.Success ? ParseLevels(targetMatch.Groups[1].Value) : [];
+        decimal? stopLoss = slMatch.Success &&
+            decimal.TryParse(slMatch.Groups[1].Value, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var sl) && sl > 0
+            ? sl
+            : null;
+
+        if (targets.Count == 0 && stopLoss is null)
+            return false;
+
+        var signal = await context.TradingSignals
+            .FirstOrDefaultAsync(s => s.TelegramMessageId == message.ReplyToMessageId.Value);
+
+        if (signal is null)
+            return false;
+
+        if (targets.Count > 0) signal.Targets = [.. targets];
+        if (stopLoss is not null) signal.StopLoss = stopLoss.Value;
+
+        var openPositions = await context.Positions
+            .Where(p => p.SignalId == signal.Id && p.ClosedAt == null)
+            .ToListAsync();
+
+        foreach (var position in openPositions)
+        {
+            if (targets.Count > 0) position.Targets = [.. targets];
+            if (stopLoss is not null) position.StopLoss = stopLoss.Value;
+        }
+
+        await context.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "Follow-up message {MessageId} from {Channel} updated signal {SignalId} (targets: [{Targets}], SL: {StopLoss}) and {PositionCount} open position(s).",
+            message.MessageId, message.SenderName, signal.Id,
+            string.Join("/", targets), stopLoss?.ToString() ?? "unchanged", openPositions.Count);
+
+        await _hub.Clients.All.SendAsync(SignalStatusChangedEvent, new
+        {
+            signal.Id,
+            Status = signal.Status.ToString()
+        });
+
+        return true;
+    }
+
+    /// <summary>
+    /// Splits a quoted level list ("320/350", "320 350 400+") into positive decimals.
+    /// </summary>
+    private static List<decimal> ParseLevels(string raw) =>
+        [.. raw.Split(['/', ' ', '+', ',', '\t'], StringSplitOptions.RemoveEmptyEntries)
+              .Select(p => decimal.TryParse(p.Trim(), System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0m)
+              .Where(v => v > 0)];
+
+    [GeneratedRegex(@"\b(CE|PE|CALL|PUT)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ContractHintRegex();
+
+    [GeneratedRegex(@"(?:TARGETS?|TGT)[^\dA-Z]*(\d[\d\s/+.]*)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex FollowUpTargetRegex();
+
+    [GeneratedRegex(@"(?:SL|STOPLOSS)[^\dA-Z]*?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex FollowUpStopLossRegex();
 
     private static string BuildContractTag(TradingSignal signal)
     {

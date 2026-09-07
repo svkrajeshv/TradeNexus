@@ -420,6 +420,15 @@ public sealed class CmpStreamingService(
                     _highLowDateIst = todayIst;
                 }
 
+                // Staleness guard for every signal parked waiting for something to happen
+                // (activation message or entry crossing). Runs before the broker/price checks:
+                // it must not depend on a live connection or a quotable contract, otherwise the
+                // signal stays "Cancelling..." in the UI forever.
+                await ExpireStaleAwaitingSignalsAsync(
+                    db,
+                    scope.ServiceProvider.GetRequiredService<ISettingsService>(),
+                    stoppingToken);
+
                 if (!broker.IsConnected)
                 {
                     await Task.Delay(Cadence, stoppingToken);
@@ -565,8 +574,6 @@ public sealed class CmpStreamingService(
                     var entryOffset = await settings.GetSettingAsync<decimal?>("EntryPriceOffset") ?? 0m;
                     var orderVariety = await settings.GetSettingAsync<string>("OrderVariety") ?? "Robo";
                     var isMarketOrder = string.Equals(orderVariety, "Market", StringComparison.OrdinalIgnoreCase);
-                    // Staleness cutoff follows the same setting used for pending order auto-cancel.
-                    var stalenessMinutes = await settings.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
                     // When enabled, a signal must first be seen trading BELOW the trigger
                     // before an upward cross can fire it (true breakout confirmation).
                     var requireCrossFromBelow = await settings.GetSettingAsync<bool?>("RequireEntryCrossFromBelow") ?? true;
@@ -585,50 +592,6 @@ public sealed class CmpStreamingService(
 
                     foreach (var sig in awaitingSignals)
                     {
-                        // Staleness guard: expire signals older than the configured cutoff (0 = disabled)
-                        var signalAge = DateTime.UtcNow - sig.TelegramTimestamp.EnsureUtc();
-                        if (stalenessMinutes > 0 && signalAge > TimeSpan.FromMinutes(stalenessMinutes))
-                        {
-                            sig.Status = SignalStatus.Failed;
-                            var reason = $"Expired: {signalAge.TotalMinutes:0.0}/{stalenessMinutes} min stale";
-                            _logger.LogWarning(
-                                "AwaitingEntry signal {Id} expired — {Age:0.0} min old (>{Cutoff} min staleness cutoff)",
-                                sig.Id, signalAge.TotalMinutes, stalenessMinutes);
-
-                            var defaultAccId = await db.TradingAccounts
-                                .AsNoTracking()
-                                .Where(a => a.IsEnabled)
-                                .Select(a => a.Id)
-                                .FirstOrDefaultAsync(stoppingToken);
-
-                            if (defaultAccId > 0)
-                            {
-                                db.Orders.Add(new Order
-                                {
-                                    SignalId = sig.Id,
-                                    TradingAccountId = defaultAccId,
-                                    Symbol = sig.Symbol ?? sig.Index,
-                                    Quantity = 0,
-                                    Price = sig.EntryPrice,
-                                    Side = sig.Action == SignalAction.Buy ? OrderSide.Buy : OrderSide.Sell,
-                                    OrderType = OrderType.Limit,
-                                    ProductType = ProductType.Nrml,
-                                    Status = OrderStatus.Rejected,
-                                    ErrorMessage = reason,
-                                    CreatedAt = DateTime.UtcNow
-                                });
-                            }
-
-                            await db.SaveChangesAsync(stoppingToken);
-
-                            await _hub.Clients.All.SendAsync("SignalStatusChanged", new
-                            {
-                                sig.Id,
-                                Status = sig.Status.ToString()
-                            }, stoppingToken);
-                            continue;
-                        }
-
                         if (!crossingEnabled)
                             continue;
 
@@ -743,6 +706,80 @@ public sealed class CmpStreamingService(
     ///     Uses the signal's expiry if present, otherwise the nearest future expiry.
     ///  3. Else fall back to a composite key (won't produce ticks but keeps grouping stable).
     /// </summary>
+    /// <summary>
+    /// Fails every signal that has been parked in <see cref="SignalStatus.AwaitingEntry"/> or
+    /// <see cref="SignalStatus.AwaitingActivation"/> longer than the "Pending Order Auto-Cancel"
+    /// window (<c>PendingOrderTimeoutMinutes</c>, 0 = disabled) — the same window the dashboard
+    /// counts down before it shows "Cancelling...". AwaitingActivation signals used to be left
+    /// untouched, so a call whose channel never posted the activation message stayed live
+    /// indefinitely with the countdown stuck at "Cancelling...".
+    /// </summary>
+    private async Task ExpireStaleAwaitingSignalsAsync(TradingDbContext db, ISettingsService settings, CancellationToken ct)
+    {
+        var stalenessMinutes = await settings.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
+        if (stalenessMinutes <= 0)
+            return;
+
+        var cutoff = DateTime.UtcNow - TimeSpan.FromMinutes(stalenessMinutes);
+        var stale = await db.TradingSignals
+            .Where(s => (s.Status == SignalStatus.AwaitingEntry || s.Status == SignalStatus.AwaitingActivation) &&
+                        s.TelegramTimestamp < cutoff)
+            .ToListAsync(ct);
+
+        if (stale.Count == 0)
+            return;
+
+        var defaultAccId = await db.TradingAccounts
+            .AsNoTracking()
+            .Where(a => a.IsEnabled)
+            .Select(a => a.Id)
+            .FirstOrDefaultAsync(ct);
+
+        foreach (var sig in stale)
+        {
+            var previousStatus = sig.Status;
+            var signalAge = DateTime.UtcNow - sig.TelegramTimestamp.EnsureUtc();
+            var reason = $"Expired: {signalAge.TotalMinutes:0.0}/{stalenessMinutes} min stale";
+
+            sig.Status = SignalStatus.Failed;
+
+            _logger.LogWarning(
+                "{Status} signal {Id} expired — {Age:0.0} min old (>{Cutoff} min staleness cutoff)",
+                previousStatus, sig.Id, signalAge.TotalMinutes, stalenessMinutes);
+
+            if (defaultAccId > 0)
+            {
+                db.Orders.Add(new Order
+                {
+                    SignalId = sig.Id,
+                    TradingAccountId = defaultAccId,
+                    Symbol = sig.Symbol ?? sig.Index,
+                    Quantity = 0,
+                    Price = sig.EntryPrice,
+                    Side = sig.Action == SignalAction.Buy ? OrderSide.Buy : OrderSide.Sell,
+                    OrderType = OrderType.Limit,
+                    ProductType = ProductType.Nrml,
+                    Status = OrderStatus.Rejected,
+                    ErrorMessage = reason,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+
+            _entryArmedSignals.TryRemove(sig.Id, out _);
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        foreach (var sig in stale)
+        {
+            await _hub.Clients.All.SendAsync("SignalStatusChanged", new
+            {
+                sig.Id,
+                Status = sig.Status.ToString()
+            }, ct);
+        }
+    }
+
     private string ResolveTradingSymbol(TradingSignal signal)
     {
         var stored = signal.Symbol?.Trim();

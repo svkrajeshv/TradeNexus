@@ -133,6 +133,7 @@ internal static class ServiceCollectionExtensions
         services.AddScoped<IChannelSignalParser, Parser.Channels.TradeWithPihuParser>();
         services.AddScoped<IChannelSignalParser, Parser.Channels.TradeWithMohitAgrawalParser>();
         services.AddScoped<IChannelSignalParser, Parser.Channels.BankniftyExpressParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.VipGroupParser>();
         services.AddScoped<IChannelSignalParser, Parser.Channels.GujaratiTraderParser>();
         services.AddScoped<IChannelSignalParser, Parser.Channels.McxSignalParser>();
         services.AddScoped<SignalParserResolver>();
