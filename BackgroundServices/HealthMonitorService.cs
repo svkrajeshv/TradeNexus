@@ -477,11 +477,19 @@ public sealed class CmpStreamingService(
                     var entry = _instrumentMaster.FindByTradingSymbol(sym);
                     if (entry is not null && !string.IsNullOrWhiteSpace(entry.Token))
                     {
-                        _tokenBySymbol[sym] = (entry.Token, entry.ExchangeSegment ?? "NFO");
-                        subs.Add((entry.Token, entry.ExchangeSegment ?? "NFO"));
+                        // A blank exch_seg must not default an MCX contract to NFO: the WS
+                        // exchangeType would then be 2 (NSE_FO) and no tick would ever arrive,
+                        // leaving the CMP column empty for commodity signals.
+                        var fallbackExch = MarketSegments.ForTradingSymbol(sym) == MarketSegment.Commodity ? "MCX" : "NFO";
+                        var exch = string.IsNullOrWhiteSpace(entry.ExchangeSegment)
+                            ? fallbackExch
+                            : entry.ExchangeSegment;
+
+                        _tokenBySymbol[sym] = (entry.Token, exch);
+                        subs.Add((entry.Token, exch));
                         _logger.LogInformation(
                             "CMP: added {Symbol} (token={Token}, {Exch}) to broker watchlist",
-                            sym, entry.Token, entry.ExchangeSegment ?? "NFO");
+                            sym, entry.Token, exch);
                     }
                     else
                     {
@@ -791,7 +799,12 @@ public sealed class CmpStreamingService(
 
         try
         {
-            var expiry = signal.ExpiryDate != default ? signal.ExpiryDate : DateTimeExtensions.IstToday();
+            // Commodities always trade the nearest listed expiry, so the parsed date (an
+            // equity expiry pattern that happened to match) must not anchor the lookup.
+            var isCommodity = MarketSegments.IsCommodity(signal.Index);
+            var expiry = !isCommodity && signal.ExpiryDate != default
+                ? signal.ExpiryDate
+                : DateTimeExtensions.IstToday();
             var optType = signal.OptionType.ToString().ToUpperInvariant();
             var entry = _instrumentMaster.FindOption(signal.Index, expiry, signal.Strike, optType);
             if (entry is not null && !string.IsNullOrWhiteSpace(entry.TradingSymbol))

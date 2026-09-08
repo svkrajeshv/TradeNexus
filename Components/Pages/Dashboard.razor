@@ -734,6 +734,9 @@
 
             _hub.On<JsonElement>("SignalReceived", async payload =>
             {
+                if (_disposed)
+                    return;
+
                 await InvokeAsync(async () =>
                 {
                     await RefreshAsync();
@@ -750,16 +753,25 @@
 
             _hub.On<JsonElement>("SignalStatusChanged", async _ =>
             {
+                if (_disposed)
+                    return;
+
                 await InvokeAsync(RefreshAsync);
             });
 
             _hub.On<JsonElement>("PositionChanged", async _ =>
             {
+                if (_disposed)
+                    return;
+
                 await InvokeAsync(RefreshAsync);
             });
 
             _hub.On<JsonElement>("HealthTick", payload =>
             {
+                if (_disposed)
+                    return;
+
                 _ = InvokeAsync(() =>
                 {
                     if (payload.ValueKind != JsonValueKind.Object)
@@ -882,6 +894,9 @@
 
             _hub.Reconnecting += reconnectingError =>
             {
+                if (_disposed)
+                    return Task.CompletedTask;
+
                 // While the hub is down no HealthTick arrives, so the live cards silently
                 // fall back to DB figures. Say so rather than showing stale numbers.
                 _ = InvokeAsync(() =>
@@ -894,6 +909,9 @@
 
             _hub.Reconnected += connectionId =>
             {
+                if (_disposed)
+                    return Task.CompletedTask;
+
                 _ = InvokeAsync(async () =>
                 {
                     _hubError = null;
@@ -904,6 +922,9 @@
 
             _hub.Closed += ex =>
             {
+                if (_disposed)
+                    return Task.CompletedTask;
+
                 _ = InvokeAsync(() =>
                 {
                     _hubError = ex is null
@@ -968,6 +989,13 @@
 
     private async Task RefreshAsync()
     {
+        // A hub callback can be dispatched after the user has navigated away: the
+        // circuit disposes this component and its scoped IServiceProvider, but an
+        // in-flight SignalR handler still runs and would resolve DbFactory /
+        // SignalService from that disposed scope (ObjectDisposedException).
+        if (_disposed)
+            return;
+
         try
         {
             var allRecent = await SignalService.GetRecentSignalsAsync(50);
@@ -1048,6 +1076,11 @@
             SyncEdits();
             _refreshError = null;
             StateHasChanged();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The circuit was torn down mid-refresh. Nothing is left to render, and
+            // surfacing this as a refresh failure would be misleading.
         }
         catch (Exception ex)
         {

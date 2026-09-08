@@ -5,6 +5,7 @@ using NexusApp.Helpers;
 using NexusApp.Hubs;
 using NexusApp.Interfaces;
 using NexusApp.Models;
+using System.Linq;
 
 namespace NexusApp.BackgroundServices;
 
@@ -23,23 +24,16 @@ namespace NexusApp.BackgroundServices;
 /// Emits <c>OrderStatusChanged</c> on the SignalR hub whenever anything changes
 /// so the Orders grid updates live.
 /// </summary>
-public sealed class OrderSyncService : BackgroundService
+public sealed class OrderSyncService(
+    ILogger<OrderSyncService> logger,
+    IServiceProvider services,
+    IHubContext<TradingHub> hub) : BackgroundService
 {
     private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(5);
 
-    private readonly ILogger<OrderSyncService> _logger;
-    private readonly IServiceProvider _services;
-    private readonly IHubContext<TradingHub> _hub;
-
-    public OrderSyncService(
-        ILogger<OrderSyncService> logger,
-        IServiceProvider services,
-        IHubContext<TradingHub> hub)
-    {
-        _logger = logger;
-        _services = services;
-        _hub = hub;
-    }
+    private readonly ILogger<OrderSyncService> _logger = logger;
+    private readonly IServiceProvider _services = services;
+    private readonly IHubContext<TradingHub> _hub = hub;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -90,11 +84,10 @@ public sealed class OrderSyncService : BackgroundService
         // Resting broker-side target orders (Sell LIMIT / MIS) are deliberately long-lived —
         // they must survive until the target fills or an exit cancels them, so the stale
         // timeout must never touch them.
-        staleOrders = staleOrders
+        staleOrders = [.. staleOrders
             .Where(o => !o.BrokerId.StartsWith("REJ-", StringComparison.OrdinalIgnoreCase) &&
                         !o.BrokerId.StartsWith("Paper", StringComparison.OrdinalIgnoreCase) &&
-                        !RestingTargetOrders.IsRestingTarget(o))
-            .ToList();
+                        !RestingTargetOrders.IsRestingTarget(o))];
         if (staleOrders.Count == 0)
             return;
 
@@ -153,14 +146,14 @@ public sealed class OrderSyncService : BackgroundService
         _logger.LogInformation("Auto-cancelled {Count} stale pending order(s)", cancelled.Count);
 
         // Notify via Telegram & SignalR
-        foreach (var order in cancelled)
+        if (notifications is not null)
         {
-            if (notifications is not null)
+            foreach (var order in cancelled)
             {
                 await notifications.SendOrderNotificationAsync(
-                    order.Symbol,
-                    "AUTO-CANCELLED",
-                    $"Order {order.BrokerId} auto-cancelled after pending for >{timeoutMinutes} min");
+                                order.Symbol,
+                                "AUTO-CANCELLED",
+                                $"Order {order.BrokerId} auto-cancelled after pending for >{timeoutMinutes} min");
 
                 var tgMsg = $@"⏰ ORDER AUTO-CANCELLED (TIMEOUT)
 
@@ -170,11 +163,11 @@ public sealed class OrderSyncService : BackgroundService
 • Reason: {order.ErrorMessage}
 • Time: {DateTime.UtcNow.ToIstString("hh:mm:ss tt")} IST";
 
-                await notifications.SendTelegramCustomNotificationAsync(tgMsg);
+                    await notifications.SendTelegramCustomNotificationAsync(tgMsg);
+                }
             }
-        }
 
-        try
+            try
         {
             await _hub.Clients.All.SendAsync("OrderStatusChanged",
                 cancelled.Select(o => new
@@ -446,7 +439,7 @@ public sealed class OrderSyncService : BackgroundService
 
                     var qty = order.FilledQuantity is > 0 ? order.FilledQuantity.Value : order.Quantity;
                     var slValue = signal is { StopLoss: > 0 } ? signal.StopLoss : (decimal?)null;
-                    var targetList = signal?.Targets.ToList() ?? new List<decimal>();
+                    var targetList = signal?.Targets.ToList() ?? [];
 
                     db.Positions.Add(new Position
                     {
@@ -506,8 +499,15 @@ public sealed class OrderSyncService : BackgroundService
             using var scope = _services.CreateScope();
             var settings = scope.ServiceProvider.GetRequiredService<ISettingsService>();
 
+            // A Robo order carries its own broker-side target, so it needs no resting
+            // order; Market orders opt out. The order's ProductType is the reliable
+            // signal here rather than the global setting: MCX and BSE F&O orders are
+            // downgraded from Robo to a plain Limit at placement time (bracket orders
+            // are blocked on those exchanges), and those downgraded orders do need a
+            // resting target even though OrderVariety still reads "Robo".
             var variety = await settings.GetSettingAsync<string>("OrderVariety") ?? string.Empty;
-            if (!string.Equals(variety, "Limit", StringComparison.OrdinalIgnoreCase))
+            var isMarket = string.Equals(variety, "Market", StringComparison.OrdinalIgnoreCase);
+            if (isMarket || order.ProductType == ProductType.Mos)
                 return;
 
             // Only targets above the fill make sense for a long exit; take the nearest one.
@@ -541,7 +541,7 @@ public sealed class OrderSyncService : BackgroundService
                 var instrumentMaster = scope.ServiceProvider.GetService<NexusApp.Brokers.AngelOne.AngelInstrumentMaster>();
                 if (instrumentMaster is not null)
                 {
-                    await instrumentMaster.EnsureLoadedAsync();
+                    await instrumentMaster.EnsureLoadedAsync(ct);
                     var entry = instrumentMaster.FindByTradingSymbol(order.Symbol);
                     if (entry is not null)
                     {

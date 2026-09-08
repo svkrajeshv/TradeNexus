@@ -189,7 +189,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                     {
                         token = entry.Token;
                         tradingSymbol = entry.TradingSymbol;
-                        exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? "NFO" : entry.ExchangeSegment;
+                        exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? InferExchange(entry.TradingSymbol) : entry.ExchangeSegment;
                     }
                 }
                 catch (Exception ex)
@@ -279,7 +279,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             var entry = _instrumentMaster.FindByTradingSymbol(symbol);
             if (entry is not null && !string.IsNullOrWhiteSpace(entry.Token))
             {
-                var exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? "NFO" : entry.ExchangeSegment;
+                var exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? InferExchange(entry.TradingSymbol) : entry.ExchangeSegment;
                 await _webSocket.UnsubscribeAsync([(entry.Token, exchange)]);
             }
         }
@@ -620,6 +620,8 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
     private static string InferExchange(string symbol)
     {
         var s = (symbol ?? string.Empty).ToUpperInvariant();
+        if (MarketSegments.ForTradingSymbol(s) == MarketSegment.Commodity)
+            return "MCX";
         return s.Contains("SENSEX") || s.Contains("BANKEX") ? "BFO" : "NFO";
     }
 

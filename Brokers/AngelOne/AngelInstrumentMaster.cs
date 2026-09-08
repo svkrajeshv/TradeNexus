@@ -478,6 +478,17 @@ public sealed class AngelInstrumentMaster
                 continue;
             }
 
+            // MCX commodity chains are small (a few hundred contracts in total) and the
+            // signals routinely quote deep-OTM strikes. Pruning to a median-centred ATM
+            // window drops those strikes from the NEAREST expiry while leaving them listed
+            // on a farther one, which makes FindOption's cross-expiry fallback silently
+            // roll the order onto the wrong series. Retain commodities in full.
+            if (MarketSegments.IsCommodity(g.Key.Name))
+            {
+                retained.AddRange(sorted);
+                continue;
+            }
+
             // ATM ≈ median strike of what the exchange has listed.
             var atm = sorted[sorted.Count / 2].StrikeScaled;
 

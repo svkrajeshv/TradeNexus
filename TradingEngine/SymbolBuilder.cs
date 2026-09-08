@@ -1,10 +1,8 @@
-using System.Globalization;
-using Microsoft.Extensions.Logging;
 using NexusApp.Brokers.AngelOne;
 using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Models;
-using System.Linq;
+using System.Globalization;
 
 namespace NexusApp.TradingEngine;
 
@@ -41,6 +39,18 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
     /// </summary>
     public async Task<ResolvedSymbol> ResolveAsync(ParsedSignal signal, DateTime? expiryOverride = null)
     {
+        // Commodity signals quote a level, not a series: the channel's "17 SEP" style
+        // date is the *equity* expiry pattern accidentally matching and points at a
+        // far-dated (or non-existent) MCX contract. MCX options are always traded on
+        // the nearest listed expiry, so the parsed date is deliberately discarded here.
+        if (MarketSegments.IsCommodity(signal.Index) && expiryOverride is not null)
+        {
+            _logger.LogInformation(
+                "Ignoring parsed expiry {Parsed:yyyy-MM-dd} for commodity {Index}; MCX always uses the nearest listed expiry.",
+                expiryOverride.Value, signal.Index);
+            expiryOverride = null;
+        }
+
         var expiry = expiryOverride ?? await ResolveNearestExpiryAsync(signal.Index);
         var candidates = BuildCandidates(signal.Index, signal.Strike, signal.OptionType, expiry);
         var optionType = signal.OptionType == OptionType.Ce ? "CE" : "PE";
@@ -108,7 +118,9 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
                         SymbolToken = instrument.SymbolToken,
                         LotSize = instrument.LotSize > 0 ? instrument.LotSize : DefaultLotSize(signal.Index),
                         Token = instrument.Token,
-                        Exchange = instrument.ExchangeSegment,
+                        Exchange = string.IsNullOrWhiteSpace(instrument.ExchangeSegment)
+                            ? ExchangeFor(signal.Index)
+                            : instrument.ExchangeSegment,
                         Expiry = expiry,
                         Source = SymbolSource.Broker
                     };
@@ -190,7 +202,7 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
             SymbolToken = entry.Token,
             LotSize = entry.LotSize > 0 ? entry.LotSize : DefaultLotSize(entry.Name),
             Token = tokenInt,
-            Exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? "NFO" : entry.ExchangeSegment,
+            Exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? ExchangeFor(entry.Name) : entry.ExchangeSegment,
             Expiry = entry.ExpiryDate == default ? expiry : entry.ExpiryDate,
             Source = source
         };

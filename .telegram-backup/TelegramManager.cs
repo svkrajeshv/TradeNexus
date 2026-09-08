@@ -190,7 +190,11 @@ public sealed class TelegramManager
     /// <summary>Returns the broadcast channels the connected user has joined.</summary>
     public IReadOnlyList<AvailableChannel> ListAvailableChannels() => _client.ListAvailableChannels();
 
-    public Task<IReadOnlyList<AvailableChannel>> RefreshAvailableChannelsAsync() => _client.RefreshAvailableChannelsAsync();
+    /// <summary>
+    /// Re-queries Telegram for the joined channels, bypassing the dialog-load cool-down.
+    /// </summary>
+    public Task<IReadOnlyList<AvailableChannel>> RefreshAvailableChannelsAsync() =>
+        _client.RefreshAvailableChannelsAsync();
 
     /// <summary>
     /// Sends a trade notification via Telegram if integration is enabled.

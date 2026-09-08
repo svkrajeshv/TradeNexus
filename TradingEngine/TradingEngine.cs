@@ -360,6 +360,17 @@ public class TradingEngine(
                 isRobo = false;
             }
 
+            // MCX blocks bracket orders outright at the RMS layer
+            // ("RMS:Blocked for mcx_fo BO Remarks: bo product block block type: ALL"),
+            // so commodity orders are downgraded to a plain Limit order managed by the app.
+            if (isRobo && string.Equals(resolved.Exchange, "MCX", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "Bracket (Robo) orders are blocked on MCX ({Symbol}); falling back to Limit order",
+                    resolved.Symbol);
+                isRobo = false;
+            }
+
             var entryOrderType = isMarket ? OrderType.Market : OrderType.Limit;
             var trailingSLPoints = await _settings.GetSettingAsync<decimal?>("TrailingStopLossPoints") ?? 0m;
 

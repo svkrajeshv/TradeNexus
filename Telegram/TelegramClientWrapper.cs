@@ -117,8 +117,20 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
 
             _me = await _client.LoginUserIfNeeded();
 
-            var dialogs = await _client.Messages_GetAllDialogs();
-            _chats = dialogs.chats;
+            // Telegram intermittently answers this call with "500 RPC_CALL_FAIL" - a
+            // server-side hiccup, not an auth problem. The login itself is valid, so keep
+            // the session and start with an empty dialog cache instead of tearing
+            // everything down; RefreshDialogsAsync can populate it later.
+            try
+            {
+                var dialogs = await _client.Messages_GetAllDialogs();
+                _chats = dialogs.chats;
+            }
+            catch (Exception dialogEx)
+            {
+                _chats = new Dictionary<long, ChatBase>();
+                _logger.LogWarning(dialogEx, "Telegram returned an error while loading the dialog list; continuing with an empty channel list");
+            }
 
             State = TelegramConnectionState.Connected;
             _logger.LogInformation(
@@ -199,6 +211,28 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
             }
         }
         return list.OrderBy(c => c.Title, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>
+    /// Re-fetches the dialog list from Telegram and returns the refreshed channel list.
+    /// Used by the UI when the initial fetch failed (e.g. "500 RPC_CALL_FAIL").
+    /// </summary>
+    public async Task<IReadOnlyList<AvailableChannel>> RefreshAvailableChannelsAsync()
+    {
+        if (_client is null || _me is null) return ListAvailableChannels();
+
+        try
+        {
+            var dialogs = await _client.Messages_GetAllDialogs();
+            _chats = dialogs.chats;
+            _logger.LogInformation("Refreshed Telegram dialog list, {ChatCount} chats/channels available", ChatCount);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to refresh the Telegram dialog list");
+        }
+
+        return ListAvailableChannels();
     }
 
     public Task<bool> DisconnectAsync()

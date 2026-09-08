@@ -157,7 +157,10 @@
                     </MudStack>
                     @if (!AvailableToAdd.Any())
                     {
-                        <MudText Typo="Typo.caption" Color="Color.Secondary">No broadcast channels found.</MudText>
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">
+                            No broadcast channels found. Telegram sometimes refuses to return the joined-chat list
+                            (500 RPC_CALL_FAIL); type the channel title or @@username above to add it manually.
+                        </MudText>
                     }
                     else
                     {
@@ -376,9 +379,22 @@
         _refreshing = true;
         try
         {
+            // Re-query Telegram rather than re-reading the in-memory cache: when the initial
+            // dialog fetch failed the cache is empty and a plain re-read would change nothing.
             _available = await Manager.RefreshAvailableChannelsAsync();
+
             if (_available.Count == 0)
-                Snackbar.Add("Telegram returned no channels. Try again in a moment.", Severity.Warning);
+            {
+                Snackbar.Add("Telegram did not return any joined channels. Add the channel manually by title or @username.", Severity.Warning);
+            }
+            else
+            {
+                Snackbar.Add($"Found {_available.Count} joined channel(s).", Severity.Success);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not refresh channel list: {ex.Message}", Severity.Error);
         }
         finally
         {
