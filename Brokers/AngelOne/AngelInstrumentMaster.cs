@@ -299,6 +299,30 @@ public sealed class AngelInstrumentMaster
     }
 
     /// <summary>
+    /// True when a master row may be indexed for the given underlying.
+    /// <para>
+    /// Angel's master lists the <b>same</b> commodity names on more than one segment:
+    /// MCX carries the real commodity contracts, while <c>NCO</c> (NSE Commodity, shown
+    /// as NSECMD in the order book) and <c>NCDEX</c> carry look-alike rows with identical
+    /// <c>name</c> values but different tokens, expiries and lot sizes. For example
+    /// CRUDEOIL 8700 PE exists as both:
+    /// </para>
+    /// <code>
+    /// CRUDEOIL17SEP268700PE  token=576535  MCX  expiry=17SEP2026  lotsize=100
+    /// CRUDEOIL26SEP8700PE    token=135733  NCO  expiry=10SEP2026  lotsize=1
+    /// </code>
+    /// <para>
+    /// Every lookup here matches on <c>name</c> alone, so without this guard the NCO row
+    /// wins whenever its expiry is nearer — which is what booked commodity orders on the
+    /// NSECMD segment with a lot size of 1. Commodities are therefore accepted only from
+    /// MCX; equity underlyings are unaffected.
+    /// </para>
+    /// </summary>
+    private static bool IsAllowedSegment(string name, string exchangeSegment) =>
+        !MarketSegments.IsCommodity(name) ||
+        exchangeSegment.Equals("MCX", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Underlyings we actually trade. Non-listed index/stock options are dropped
     /// from the in-memory index to save memory (~90% reduction).
     /// <para>
@@ -313,8 +337,9 @@ public sealed class AngelInstrumentMaster
     {
         // NSE / BSE index options
         "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX",
-        // MCX commodity options
-        "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"
+        // MCX commodity options (mini/micro contracts are separate instruments)
+        "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER",
+        "CRUDEOILM", "NATGASMINI", "GOLDM", "SILVERM", "SILVERMIC"
     };
 
     /// <summary>
@@ -368,6 +393,15 @@ public sealed class AngelInstrumentMaster
                     if (string.IsNullOrWhiteSpace(name) || !SupportedUnderlyings.Contains(name))
                         continue;
 
+                    // Commodity names are duplicated on NCO/NCDEX with different tokens and
+                    // lot sizes; keep only the MCX rows so those look-alikes can never be
+                    // resolved by a name-based lookup.
+                    var seg = el.TryGetProperty("exch_seg", out var s) && s.ValueKind == JsonValueKind.String
+                        ? s.GetString() ?? string.Empty
+                        : string.Empty;
+                    if (!IsAllowedSegment(name!, seg))
+                        continue;
+
                     el.WriteTo(writer);
                     kept++;
                 }
@@ -418,6 +452,11 @@ public sealed class AngelInstrumentMaster
                 // Drop unsupported underlyings and far-dated expiries entirely.
                 if (!SupportedUnderlyings.Contains(entry.Name))
                     continue;
+                // A commodity must come from MCX: the NCO/NCDEX look-alikes carry the same
+                // name but a different token, expiry and lot size. This also protects a
+                // cache written before the download filter above existed.
+                if (!IsAllowedSegment(entry.Name, entry.ExchangeSegment))
+                    continue;
                 if (entry.ExpiryDate == default ||
                     entry.ExpiryDate < today ||
                     entry.ExpiryDate > maxExpiryDate)
@@ -435,6 +474,8 @@ public sealed class AngelInstrumentMaster
                 // else — the ~28k equities, stock F&O, currency and commodity rows — is
                 // dropped to save memory and speed up load/indexing.
                 if (!SupportedUnderlyings.Contains(entry.Name))
+                    continue;
+                if (!IsAllowedSegment(entry.Name, entry.ExchangeSegment))
                     continue;
 
                 byTs[entry.TradingSymbol] = entry;
@@ -553,6 +594,36 @@ public sealed class AngelInstrumentMaster
         }
 
         return nearest;
+    }
+
+    /// <summary>
+    /// Returns the listed expiry for the given underlying that falls in the requested
+    /// month, or <c>null</c> when that month has no listed contract. Used for monthly
+    /// contracts (MCX commodities) where the signal names only the month ("EXPIRY - SEP")
+    /// and the exact expiry day varies per commodity.
+    /// </summary>
+    public DateTime? ExpiryInMonth(string underlying, int year, int month)
+    {
+        if (_optionIndex.Count == 0)
+            return null;
+
+        var name = (underlying ?? string.Empty).Trim().ToUpperInvariant();
+        if (name.Length == 0 || month is < 1 or > 12)
+            return null;
+
+        DateTime? earliest = null;
+        for (var i = 0; i < _optionIndex.Count; i++)
+        {
+            var e = _optionIndex[i];
+            if (!e.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (e.ExpiryDate == default || e.ExpiryDate.Year != year || e.ExpiryDate.Month != month)
+                continue;
+            if (earliest is null || e.ExpiryDate.Date < earliest.Value)
+                earliest = e.ExpiryDate.Date;
+        }
+
+        return earliest;
     }
 
     /// <summary>

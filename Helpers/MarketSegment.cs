@@ -31,19 +31,73 @@ public static class MarketSegments
     /// whitelist rather than "all of MCX": the instrument master is filtered against
     /// this set, and admitting every commodity would undo the ~90% memory reduction
     /// that filter exists to provide.
+    /// <para>
+    /// The "mini" contracts (GOLDM, SILVERM, SILVERMIC, CRUDEOILM, NATGASMINI) are
+    /// <b>separate instruments</b> with their own lot size, strike ladder and premium
+    /// range - not aliases of the full-size contract. They must be listed here in
+    /// their own right, otherwise a "GOLDM" signal degrades to a prefix match on
+    /// "GOLD" and books the wrong (far larger) series.
+    /// </para>
     /// </summary>
     public static readonly IReadOnlySet<string> CommodityUnderlyings =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"
+            // Full-size contracts
+            "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER",
+            // Mini / micro contracts - distinct instruments, not aliases
+            "CRUDEOILM", "NATGASMINI", "GOLDM", "SILVERM", "SILVERMIC"
         };
+
+    /// <summary>
+    /// Channel shorthand mapped to the exchange's tradingsymbol root.
+    /// <para>
+    /// Telegram channels quote MCX contracts loosely - "NATGAS" for NATURALGAS,
+    /// "GOLD MINI" for GOLDM - while the instrument master only ever carries the
+    /// exchange name. Aliases are resolved before segment/lot/expiry lookup so both
+    /// spellings converge on one canonical underlying.
+    /// </para>
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> UnderlyingAliases =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["NATGAS"] = "NATURALGAS",
+            ["NATURALGASMINI"] = "NATGASMINI",
+            ["NATGASMINI"] = "NATGASMINI",
+            ["GOLDMINI"] = "GOLDM",
+            ["GOLDMIN"] = "GOLDM",
+            ["CRUDEOILMINI"] = "CRUDEOILM",
+            ["SILVERMINI"] = "SILVERM",
+            ["SILVERMICRO"] = "SILVERMIC"
+        };
+
+    /// <summary>
+    /// Resolves channel shorthand to the exchange's underlying name. Returns the input
+    /// (trimmed and upper-cased) unchanged when it is not an alias, so equity indices
+    /// and already-canonical commodities pass straight through.
+    /// </summary>
+    public static string NormalizeUnderlying(string? underlying)
+    {
+        if (string.IsNullOrWhiteSpace(underlying))
+            return string.Empty;
+
+        var trimmed = underlying.Trim().ToUpperInvariant();
+        return UnderlyingAliases.TryGetValue(trimmed, out var canonical) ? canonical : trimmed;
+    }
+
+    /// <summary>
+    /// Every spelling a signal may use for a commodity - the canonical names plus the
+    /// channel aliases. Used to build the parser's underlying pattern so shorthand is
+    /// recognised at parse time rather than failing the whole signal.
+    /// </summary>
+    public static IEnumerable<string> CommodityUnderlyingTokens =>
+        CommodityUnderlyings.Concat(UnderlyingAliases.Keys).Distinct(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Returns the segment for an underlying, defaulting to
     /// <see cref="MarketSegment.Equity"/> for anything unrecognised.
     /// </summary>
     public static MarketSegment ForUnderlying(string? underlying) =>
-        !string.IsNullOrWhiteSpace(underlying) && CommodityUnderlyings.Contains(underlying.Trim())
+        !string.IsNullOrWhiteSpace(underlying) && CommodityUnderlyings.Contains(NormalizeUnderlying(underlying))
             ? MarketSegment.Commodity
             : MarketSegment.Equity;
 
@@ -74,5 +128,57 @@ public static class MarketSegments
         }
 
         return MarketSegment.Equity;
+    }
+
+    /// <summary>BSE index options, which route to the BFO segment rather than NFO.</summary>
+    private static readonly IReadOnlySet<string> BseUnderlyings =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "SENSEX", "BANKEX" };
+
+    /// <summary>
+    /// The exchange segment an <b>underlying</b> routes to: MCX for commodities,
+    /// BFO for BSE indices, NFO otherwise.
+    /// <para>
+    /// Single source of truth for exchange routing. Every order, quote, WebSocket
+    /// subscription and instrument search must derive its segment from here rather
+    /// than defaulting to "NFO": a commodity sent on NFO is silently matched against
+    /// an unrelated NSE scrip, which the broker then reports as segment NSECMD.
+    /// </para>
+    /// </summary>
+    public static string ExchangeForUnderlying(string? underlying)
+    {
+        var normalized = NormalizeUnderlying(underlying);
+        if (CommodityUnderlyings.Contains(normalized)) return "MCX";
+        if (BseUnderlyings.Contains(normalized)) return "BFO";
+        return "NFO";
+    }
+
+    /// <summary>
+    /// The exchange segment for a broker tradingsymbol (e.g. "CRUDEOIL17SEP268750CE"
+    /// -> MCX). Tradingsymbols always begin with the underlying, so the prefix decides
+    /// the routing. Falls back to NFO for anything unrecognised, preserving the
+    /// previous behaviour for equity contracts.
+    /// </summary>
+    public static string ExchangeForTradingSymbol(string? tradingSymbol)
+    {
+        if (string.IsNullOrWhiteSpace(tradingSymbol))
+            return "NFO";
+
+        var symbol = tradingSymbol.Trim();
+
+        // Longest-first so a mini contract ("GOLDM...") is never claimed by its
+        // full-size prefix ("GOLD...").
+        foreach (var commodity in CommodityUnderlyings.OrderByDescending(c => c.Length))
+        {
+            if (symbol.StartsWith(commodity, StringComparison.OrdinalIgnoreCase))
+                return "MCX";
+        }
+
+        foreach (var bse in BseUnderlyings)
+        {
+            if (symbol.StartsWith(bse, StringComparison.OrdinalIgnoreCase))
+                return "BFO";
+        }
+
+        return "NFO";
     }
 }

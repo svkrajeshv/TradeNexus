@@ -318,7 +318,7 @@
                                        DelayText="@FormatDelay(context.SignalDelayMs)"
                                        Staleness="@ToTuple(GetSignalStaleness(context))"
                                        StatusColor="@StatusColor(context.Status)"
-                                       IsEditable="@IsEditable(context)"
+                                       StatusReason="@GetStatusReason(context)"                                       IsEditable="@IsEditable(context)"
                                        IsPendingAutoExecution="@IsPendingAutoExecution(context)"
                                        OnSave="@(s => SaveAsync(s))"
                                        OnBuy="@(s => BuyAsync(s))"
@@ -362,7 +362,7 @@
                         <MudTh>Actions</MudTh>
                     </HeaderContent>
                     <RowTemplate>
-                        <MudTd DataLabel="Time">@context.ReceivedTimestamp.EnsureUtc().ToIstString("HH:mm:ss")</MudTd>
+                        <MudTd DataLabel="Time">@context.ReceivedTimestamp.ToIstString("hh:mm:ss tt")</MudTd>
                         <MudTd DataLabel="Channel">
                             <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
                                 @(string.IsNullOrWhiteSpace(context.ChannelName) ? "-" : context.ChannelName)
@@ -382,7 +382,11 @@
                         <MudTd DataLabel="Low">@GetTickValueDisplay(_lowBySignal, context.Id)</MudTd>
                         <MudTd DataLabel="High">@GetTickValueDisplay(_highBySignal, context.Id)</MudTd>
                         <MudTd DataLabel="Exit">@GetExitDisplay(context.Id)</MudTd>
-                        <MudTd DataLabel="Status"><MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip></MudTd>
+                        <MudTd DataLabel="Status">
+                            <MudTooltip Text="@GetStatusReason(context)" Placement="Placement.Top" Arrow="true" Disabled="@(string.IsNullOrWhiteSpace(GetStatusReason(context)))">
+                                <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
+                            </MudTooltip>
+                        </MudTd>
                         <MudTd DataLabel="Actions">
                             <MudButton Size="Size.Small"
                                        Color="Color.Default"
@@ -538,6 +542,8 @@
     private readonly Dictionary<int, decimal> _lowBySignal = new();
     private readonly Dictionary<int, decimal> _highBySignal = new();
     private readonly Dictionary<int, decimal> _exitBySignal = new();
+    /// <summary>Broker/engine failure text per signal id, shown as a tooltip on the status chip.</summary>
+    private readonly Dictionary<int, string> _failureReasonBySignal = new();
     private readonly Dictionary<int, int> _cmpTickDirBySignal = new();
     private readonly Dictionary<int, DateTime> _cmpTickAtBySignal = new();
     private readonly HashSet<int> _hiddenWatchlistSignalIds = new();
@@ -1040,6 +1046,25 @@
                     _exitBySignal.TryAdd(position.SignalId, position.ClosingPrice!.Value);
             }
 
+            // A signal only records that it failed, never why: the broker/engine message
+            // lives on the order it produced. Pull the newest error text per signal so the
+            // status chip can explain the failure in a tooltip.
+            var statusSignalIds = _signals.Select(s => s.Id).Concat(watchSignalIds).Distinct().ToList();
+            _failureReasonBySignal.Clear();
+            if (statusSignalIds.Count > 0)
+            {
+                var failedOrders = await db.Orders.AsNoTracking()
+                    .Where(o => statusSignalIds.Contains(o.SignalId) &&
+                                (o.Status == OrderStatus.Failed || o.Status == OrderStatus.Rejected) &&
+                                o.ErrorMessage != null && o.ErrorMessage != "")
+                    .OrderByDescending(o => o.CreatedAt)
+                    .Select(o => new { o.SignalId, o.ErrorMessage })
+                    .ToListAsync();
+
+                foreach (var order in failedOrders)
+                    _failureReasonBySignal.TryAdd(order.SignalId, order.ErrorMessage!);
+            }
+
             // Realised P&L is reported for the IST trading day, so the window is the
             // IST midnight boundary expressed in UTC (the storage timezone).
             var todayStart = todayIst.IstToUtc();
@@ -1101,6 +1126,21 @@
         SignalStatus.Pending => Color.Warning,
         _ => Color.Info
     };
+
+    /// <summary>
+    /// Tooltip text for a signal's status chip. Only failed signals carry an
+    /// explanation; when no order-level message was recorded a generic hint is shown
+    /// so the chip is never silently unexplained.
+    /// </summary>
+    private string? GetStatusReason(TradingSignal signal)
+    {
+        if (signal.Status != SignalStatus.Failed)
+            return null;
+
+        return _failureReasonBySignal.TryGetValue(signal.Id, out var reason)
+            ? reason
+            : "Execution failed - no broker error message was recorded for this signal.";
+    }
 
     private async Task BuyAsync(TradingSignal signal)
     {

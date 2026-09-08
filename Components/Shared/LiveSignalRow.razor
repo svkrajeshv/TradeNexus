@@ -10,7 +10,7 @@
 *@
 @using NexusApp.Models
 
-<MudTd DataLabel="Time">@Signal.ReceivedTimestamp.EnsureUtc().ToIstString("HH:mm:ss")</MudTd>
+<MudTd DataLabel="Time">@Signal.ReceivedTimestamp.ToIstString("hh:mm:ss tt")</MudTd>
 <MudTd DataLabel="Channel">
     <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
         @(string.IsNullOrWhiteSpace(Signal.ChannelName) ? "-" : Signal.ChannelName)
@@ -46,7 +46,16 @@
     }
 </MudTd>
 <MudTd DataLabel="Status">
-    <MudChip T="string" Size="Size.Small" Color="@StatusColor">@Signal.Status</MudChip>
+    @if (string.IsNullOrWhiteSpace(StatusReason))
+    {
+        <MudChip T="string" Size="Size.Small" Color="@StatusColor">@Signal.Status</MudChip>
+    }
+    else
+    {
+        <MudTooltip Text="@StatusReason" Placement="Placement.Top" Arrow="true">
+            <MudChip T="string" Size="Size.Small" Color="@StatusColor" Style="cursor:help;">@Signal.Status</MudChip>
+        </MudTooltip>
+    }
 </MudTd>
 <MudTd DataLabel="Actions">
     @if (IsEditable)
@@ -75,6 +84,8 @@
     [Parameter] public string DelayText { get; set; } = "-";
     [Parameter] public (string Text, Color Color)? Staleness { get; set; }
     [Parameter] public Color StatusColor { get; set; }
+    /// <summary>Optional explanation (e.g. broker rejection message) shown as a tooltip on the status chip.</summary>
+    [Parameter] public string? StatusReason { get; set; }
     [Parameter] public bool IsEditable { get; set; }
     [Parameter] public bool IsPendingAutoExecution { get; set; }
 
@@ -86,13 +97,13 @@
     // Snapshot of everything actually rendered above, so a parameter refresh that
     // changes none of these (e.g. an unrelated row's CmpTick) can be skipped.
     private (int Id, SignalStatus Status, string Cmp, bool Crossed, string Blink,
-        string Delay, string? StaleText, Color StaleColor, bool Editable, bool PendingAuto) _last;
+        string Delay, string? StaleText, Color StaleColor, bool Editable, bool PendingAuto, string? Reason) _last;
 
     protected override bool ShouldRender()
     {
         var current = (
             Signal.Id, Signal.Status, CmpDisplay, HasCrossed, BlinkClass,
-            DelayText, Staleness?.Text, Staleness?.Color ?? default, IsEditable, IsPendingAutoExecution);
+            DelayText, Staleness?.Text, Staleness?.Color ?? default, IsEditable, IsPendingAutoExecution, StatusReason);
 
         if (current == _last)
             return false;

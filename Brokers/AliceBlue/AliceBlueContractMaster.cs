@@ -24,8 +24,10 @@ public sealed class AliceBlueContractMaster
 {
     private const string BaseUrl = "https://v2api.aliceblueonline.com/restpy/static/contract_master";
 
-    // Exchanges we resolve contracts for (FnO index + stock options).
-    private static readonly string[] Exchanges = { "NFO", "BFO" };
+    // Exchanges we resolve contracts for (FnO index + stock options, plus MCX
+    // commodities — without MCX, commodity tradingsymbols resolve no token and the
+    // order is either rejected or routed to the wrong segment).
+    private static readonly string[] Exchanges = { "NFO", "BFO", "MCX" };
 
     private readonly HttpClient _httpClient;
     private readonly ILogger<AliceBlueContractMaster> _logger;

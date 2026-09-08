@@ -7,6 +7,7 @@ using NexusApp.Interfaces;
 using NexusApp.Models;
 using NexusApp.Parser;
 using NexusApp.Telegram;
+using NexusApp.TradingEngine;
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 
@@ -588,6 +589,39 @@ public sealed partial class TelegramListenerService(
                 ChannelName = message.SenderName
             };
             parsed.ChannelName = message.SenderName;
+
+            // Resolve the broker contract up-front so the Signals grid shows the actual
+            // tradingsymbol (e.g. CRUDEOIL16SEP268700PE) rather than the raw Telegram text.
+            // Previously Symbol was only populated at execution time, so a signal parked in
+            // AwaitingEntry/AwaitingActivation displayed nothing resolved and a mis-resolved
+            // contract could not be spotted until after the order had been sent.
+            try
+            {
+                var symbolBuilder = scope.ServiceProvider.GetRequiredService<SymbolBuilder>();
+                var resolved = await symbolBuilder.ResolveAsync(
+                    parsed,
+                    parsed.ExpiryDate == default ? null : parsed.ExpiryDate);
+
+                if (!string.IsNullOrWhiteSpace(resolved.Symbol))
+                {
+                    signal.Symbol = resolved.Symbol;
+                    if (signal.ExpiryDate == default)
+                        signal.ExpiryDate = resolved.Expiry;
+
+                    _logger.LogInformation(
+                        "Signal symbol resolved at parse time: {Index} {Strike} {OptionType} → {Symbol} (exchange={Exchange}, source={Source})",
+                        parsed.Index, parsed.Strike, parsed.OptionType,
+                        resolved.Symbol, resolved.Exchange, resolved.Source);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Never block ingestion on symbol resolution; the engine resolves again at
+                // execution time and will overwrite Symbol with the authoritative value.
+                _logger.LogWarning(ex,
+                    "Could not resolve symbol at parse time for {Index} {Strike} {OptionType}; the grid will show the parsed values until execution.",
+                    parsed.Index, parsed.Strike, parsed.OptionType);
+            }
 
             context.TradingSignals.Add(signal);
             await context.SaveChangesAsync();

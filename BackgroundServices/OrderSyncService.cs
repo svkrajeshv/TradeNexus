@@ -555,6 +555,11 @@ public sealed class OrderSyncService(
                 _logger.LogDebug(ex, "Instrument master lookup failed for resting target {Symbol}", order.Symbol);
             }
 
+            // Never leave the segment unset: the broker would fall back to NFO and the
+            // exchange would report the commodity order under NSECMD.
+            if (string.IsNullOrWhiteSpace(exchange))
+                exchange = MarketSegments.ExchangeForTradingSymbol(order.Symbol);
+
             var response = await broker.PlaceOrderAsync(new BrokerOrderRequest
             {
                 Symbol = order.Symbol,

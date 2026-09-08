@@ -7,8 +7,12 @@ namespace NexusApp.Parser.Channels;
 /// pipeline but skips positional "#BTST TRADE" messages, which must never be
 /// auto-executed.
 /// </summary>
-public class AbcBtstSignalParser(ILogger<AbcBtstSignalParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
+public partial class AbcBtstSignalParser(ILogger<AbcBtstSignalParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
 {
+    // Positional "#BTST TRADE" calls, which must never be auto-executed.
+    [GeneratedRegex(@"#?\bBTST\s+TRADE\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex BtstTradeRegex();
+
     public override int Priority => 10;
 
     // ABC BTST intraday signals are held until the "Active all friends" tag arrives.
@@ -31,7 +35,7 @@ public class AbcBtstSignalParser(ILogger<AbcBtstSignalParser> logger, IServiceSc
     public override bool ShouldSkip(string? message)
     {
         if (string.IsNullOrWhiteSpace(message)) return false;
-        return Regex.IsMatch(message, @"#?\bBTST\s+TRADE\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return BtstTradeRegex().IsMatch(message);
     }
 
     /// <summary>

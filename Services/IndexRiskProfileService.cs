@@ -1,3 +1,4 @@
+using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Models;
 
@@ -30,11 +31,19 @@ public class IndexRiskProfileService(ISettingsService settings) : IIndexRiskProf
             ["NATURALGAS"] = (5m, 10m, 25m, 50m),
             ["GOLD"] = (60m, 120m, 20m, 40m),
             ["SILVER"] = (50m, 100m, 22m, 45m),
+
+            // Mini / micro contracts. Premiums are quoted on the same scale as the
+            // full-size contract, so the point buffers match; only the lot size differs.
+            ["CRUDEOILM"] = (15m, 30m, 22m, 45m),
+            ["NATGASMINI"] = (5m, 10m, 25m, 50m),
+            ["GOLDM"] = (60m, 120m, 20m, 40m),
+            ["SILVERM"] = (50m, 100m, 22m, 45m),
+            ["SILVERMIC"] = (50m, 100m, 22m, 45m),
         };
 
     private async Task<IndexRiskProfile> GetProfileAsync(string index)
     {
-        var normalized = (index ?? string.Empty).ToUpperInvariant().Trim();
+        var normalized = MarketSegments.NormalizeUnderlying(index);
         var (SlPts, TgtPts, SlPct, TgtPct) = BaselineProfiles.TryGetValue(normalized, out var baseVal)
             ? baseVal
             : (SlPts: 25m, TgtPts: 50m, SlPct: 20m, TgtPct: 40m);

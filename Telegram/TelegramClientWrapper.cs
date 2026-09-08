@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using Microsoft.Extensions.Logging;
 using TL;
 using WTelegram;
 
@@ -23,9 +22,9 @@ public enum TelegramConnectionState
 /// Provides an event-driven stream of new messages, best-effort polling fallback,
 /// and an interactive login flow (verification code / 2FA password) suitable for a UI.
 /// </summary>
-public sealed class TelegramClientWrapper : IAsyncDisposable
+public sealed class TelegramClientWrapper(ILogger<TelegramClientWrapper> logger) : IAsyncDisposable
 {
-    private readonly ILogger<TelegramClientWrapper> _logger;
+    private readonly ILogger<TelegramClientWrapper> _logger = logger;
 
     private Client? _client;
     private User? _me;
@@ -63,17 +62,20 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
     public long MeId => _me?.id ?? 0;
     public int ChatCount => _chats?.Count ?? 0;
 
-    public TelegramClientWrapper(ILogger<TelegramClientWrapper> logger)
-    {
-        _logger = logger;
-    }
-
     public void SetVerificationCode(string code)
     {
         _verificationCode = code;
         if (_codeGate.CurrentCount == 0)
         {
-            try { _codeGate.Release(); } catch (SemaphoreFullException) { }
+            try
+            {
+                _codeGate.Release();
+            }
+            catch (SemaphoreFullException)
+            {
+                // The waiter was released between the count check and this call; the
+                // code is already stored, so there is nothing left to signal.
+            }
         }
     }
 
@@ -82,7 +84,15 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
         _twoFactorPassword = password;
         if (_passwordGate.CurrentCount == 0)
         {
-            try { _passwordGate.Release(); } catch (SemaphoreFullException) { }
+            try
+            {
+                _passwordGate.Release();
+            }
+            catch (SemaphoreFullException)
+            {
+                // The waiter was released between the count check and this call; the
+                // password is already stored, so there is nothing left to signal.
+            }
         }
     }
 
@@ -102,12 +112,11 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
 
             var configuredSessionPath = !string.IsNullOrWhiteSpace(sessionPath) ? sessionPath! : _sessionPath;
             _sessionPath = ResolveSessionPath(configuredSessionPath);
-
             if (_client is not null)
             {
-                _client.Dispose();
-                _client = null;
+                await _client.DisposeAsync();
             }
+            _client = null;
 
             State = TelegramConnectionState.Connecting;
             _logger.LogInformation("Initializing Telegram client for {Phone} using session file {SessionPath}", MaskPhone(phoneNumber), _sessionPath);
@@ -128,7 +137,7 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
             }
             catch (Exception dialogEx)
             {
-                _chats = new Dictionary<long, ChatBase>();
+                _chats = [];
                 _logger.LogWarning(dialogEx, "Telegram returned an error while loading the dialog list; continuing with an empty channel list");
             }
 
@@ -141,7 +150,10 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _client?.Dispose();
+            if (_client is not null)
+            {
+                await _client.DisposeAsync();
+            }
             _client = null;
             _me = null;
             _chats = null;
@@ -196,7 +208,7 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
     /// </summary>
     public IReadOnlyList<AvailableChannel> ListAvailableChannels()
     {
-        if (_chats is null) return Array.Empty<AvailableChannel>();
+        if (_chats is null) return [];
         var list = new List<AvailableChannel>();
         foreach (var kv in _chats)
         {
@@ -210,7 +222,7 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
                 });
             }
         }
-        return list.OrderBy(c => c.Title, StringComparer.OrdinalIgnoreCase).ToList();
+        return [.. list.OrderBy(c => c.Title, StringComparer.OrdinalIgnoreCase)];
     }
 
     /// <summary>
@@ -287,8 +299,8 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
 
             await _client.Messages_ForwardMessages(
                 from_peer: fromPeer,
-                id: new[] { messageId },
-                random_id: new[] { Random.Shared.NextInt64() },
+                id: [messageId],
+                random_id: [Random.Shared.NextInt64()],
                 to_peer: toPeer,
                 drop_author: dropAuthor
             );
@@ -495,18 +507,14 @@ public sealed class TelegramClientWrapper : IAsyncDisposable
 
             // If a session file exists in the current working directory / app base directory,
             // copy it to the persistent appDataRoot if appDataRoot doesn't have one yet.
-            try
-            {
-                var localFile = Path.Combine(AppContext.BaseDirectory, normalized);
-                if (File.Exists(localFile) && !File.Exists(resolvedPath))
-                {
-                    EnsureSessionDirectoryExists(resolvedPath);
-                    File.Copy(localFile, resolvedPath, overwrite: false);
-                }
-            }
-            catch { }
-        }
 
+            var localFile = Path.Combine(AppContext.BaseDirectory, normalized);
+            if (File.Exists(localFile) && !File.Exists(resolvedPath))
+            {
+                EnsureSessionDirectoryExists(resolvedPath);
+                File.Copy(localFile, resolvedPath, overwrite: false);
+            }
+        }
         EnsureSessionDirectoryExists(resolvedPath);
         return resolvedPath;
     }

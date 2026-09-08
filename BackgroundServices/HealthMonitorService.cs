@@ -480,9 +480,8 @@ public sealed class CmpStreamingService(
                         // A blank exch_seg must not default an MCX contract to NFO: the WS
                         // exchangeType would then be 2 (NSE_FO) and no tick would ever arrive,
                         // leaving the CMP column empty for commodity signals.
-                        var fallbackExch = MarketSegments.ForTradingSymbol(sym) == MarketSegment.Commodity ? "MCX" : "NFO";
                         var exch = string.IsNullOrWhiteSpace(entry.ExchangeSegment)
-                            ? fallbackExch
+                            ? MarketSegments.ExchangeForTradingSymbol(sym)
                             : entry.ExchangeSegment;
 
                         _tokenBySymbol[sym] = (entry.Token, exch);
@@ -799,12 +798,15 @@ public sealed class CmpStreamingService(
 
         try
         {
-            // Commodities always trade the nearest listed expiry, so the parsed date (an
-            // equity expiry pattern that happened to match) must not anchor the lookup.
-            var isCommodity = MarketSegments.IsCommodity(signal.Index);
-            var expiry = !isCommodity && signal.ExpiryDate != default
-                ? signal.ExpiryDate
-                : DateTimeExtensions.IstToday();
+            // A commodity signal's expiry is only a month marker ("EXPIRY - SEP"), so it
+            // is mapped onto the contract listed in that month rather than used as-is.
+            var expiry = DateTimeExtensions.IstToday();
+            if (signal.ExpiryDate != default)
+            {
+                expiry = MarketSegments.IsCommodity(signal.Index)
+                    ? _instrumentMaster.ExpiryInMonth(signal.Index, signal.ExpiryDate.Year, signal.ExpiryDate.Month) ?? expiry
+                    : signal.ExpiryDate;
+            }
             var optType = signal.OptionType.ToString().ToUpperInvariant();
             var entry = _instrumentMaster.FindOption(signal.Index, expiry, signal.Strike, optType);
             if (entry is not null && !string.IsNullOrWhiteSpace(entry.TradingSymbol))

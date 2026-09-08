@@ -34,7 +34,7 @@ namespace NexusApp.Parser.Channels;
 /// </list>
 /// </para>
 /// </summary>
-public class McxSignalParser(
+public partial class McxSignalParser(
     ILogger<McxSignalParser> logger,
     IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
 {
@@ -43,7 +43,17 @@ public class McxSignalParser(
     /// <c>PricePattern</c> shape so emoji, arrows and punctuation between the keyword
     /// and the number are skipped.
     /// </summary>
-    private const string NearLevelPattern = @"NEAR\s*LEVEL[^\d]*?(\d+(?:\.\d+)?)";
+    [GeneratedRegex(@"NEAR\s*LEVEL[^\d]*?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase)]
+    private static partial Regex NearLevelRegex();
+
+    /// <summary>
+    /// "EXPIRY - SEP" / "EXPIRY: AUGUST". Month only, with no day - the base
+    /// <c>ExpiryPattern</c> requires a leading day and would otherwise capture an
+    /// unrelated number from the message.
+    /// </summary>
+    [GeneratedRegex(@"EXPIRY[^A-Z0-9]*(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)", RegexOptions.IgnoreCase)]
+    private static partial Regex MonthOnlyExpiryRegex();
+
 
     /// <summary>
     /// Above the generic keyword parsers so an MCX channel is never claimed by a
@@ -89,7 +99,7 @@ public class McxSignalParser(
     /// </summary>
     protected override bool ParseEntryPrice(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, NearLevelPattern, RegexOptions.IgnoreCase);
+        var match = NearLevelRegex().Match(message);
         if (match.Success && decimal.TryParse(match.Groups[1].Value, out var price) && price > 0)
         {
             signal.EntryPrice = price;
@@ -97,5 +107,32 @@ public class McxSignalParser(
         }
 
         return base.ParseEntryPrice(message, signal);
+    }
+
+    /// <summary>
+    /// Expiry is quoted as a bare month ("EXPIRY - SEP"), not a date, because MCX
+    /// options are monthly contracts whose expiry day differs per commodity. The
+    /// month is recorded as the last day of that month: it is a *month marker*, not a
+    /// tradable date, and <see cref="TradingEngine.SymbolBuilder"/> maps it onto the
+    /// contract actually listed in that month. The last day is used (rather than the
+    /// first) so the marker never looks like a past expiry mid-month.
+    /// </summary>
+    protected override bool ParseExpiryDate(string message, ParsedSignal signal)
+    {
+        var match = MonthOnlyExpiryRegex().Match(message);
+        if (match.Success)
+        {
+            var month = ParseMonth(match.Groups[1].Value);
+            if (month > 0)
+            {
+                var istToday = DateTimeExtensions.IstToday();
+                var year = month < istToday.Month ? istToday.Year + 1 : istToday.Year;
+
+                signal.ExpiryDate = new DateTime(year, month, DateTime.DaysInMonth(year, month), 0, 0, 0, DateTimeKind.Unspecified);
+                return true;
+            }
+        }
+
+        return base.ParseExpiryDate(message, signal);
     }
 }

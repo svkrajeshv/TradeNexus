@@ -48,7 +48,18 @@
             <MudTd>
                 <MudChip T="string" Size="Size.Small" Color="@(context.Action == SignalAction.Buy ? Color.Success : Color.Error)">@context.Action</MudChip>
             </MudTd>
-            <MudTd Style="white-space:nowrap;">@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
+            <MudTd Style="white-space:nowrap;">
+                @if (!string.IsNullOrWhiteSpace(context.Symbol))
+                {
+                    <MudTooltip Text="@($"Parsed from signal: {context.Index} {FormatStrike(context.Strike)} {context.OptionType.ToString().ToUpper()}")">
+                        <span>@context.Symbol</span>
+                    </MudTooltip>
+                }
+                else
+                {
+                    @($"{context.Index} {FormatStrike(context.Strike)} {context.OptionType.ToString().ToUpper()}")
+                }
+            </MudTd>
             <MudTd>@context.EntryPrice</MudTd>
             <MudTd>@context.StopLoss</MudTd>
             <MudTd Style="white-space:nowrap;">@string.Join(" / ", context.Targets)</MudTd>

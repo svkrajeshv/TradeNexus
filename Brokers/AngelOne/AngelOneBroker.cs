@@ -86,15 +86,21 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
     {
         try
         {
+            // The exchange must be derived from the symbol, not hard-coded: searching an
+            // MCX commodity option on "NFO" makes Angel return an unrelated equity/NSE
+            // match, which is then booked and subscribed on the wrong segment (the CMP
+            // column shows the equity price and no option tick ever arrives).
+            var searchExchange = InferExchange(symbol);
+
             // Angel One SearchScrip: exchange + searchscrip
-            var result = await _apiClient.SearchScripAsync("NFO", symbol);
+            var result = await _apiClient.SearchScripAsync(searchExchange, symbol);
             if (result == null)
                 return null;
 
             var instrument = new BrokerInstrument
             {
                 Symbol          = symbol,
-                ExchangeSegment = "NFO"
+                ExchangeSegment = searchExchange
             };
 
             // Extract symboltoken from search response (handles array/object/nested payload variants).
@@ -142,7 +148,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                     var cached = new CachedInstrument(
                         instrument.Symbol,
                         instrument.SymbolToken!,
-                        string.IsNullOrWhiteSpace(instrument.ExchangeSegment) ? "NFO" : instrument.ExchangeSegment);
+                        string.IsNullOrWhiteSpace(instrument.ExchangeSegment) ? InferExchange(instrument.Symbol) : instrument.ExchangeSegment);
                     _instrumentCache[instrument.Symbol] = cached;
                     _instrumentCache[symbol] = cached;
                     _instrumentCache[NormalizeKey(instrument.Symbol)] = cached;
@@ -234,7 +240,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             {
                 try
                 {
-                    _ = _webSocket.SubscribeAsync([(token!, exchange ?? "NFO")]);
+                    _ = _webSocket.SubscribeAsync([(token!, exchange ?? InferExchange(tradingSymbol ?? symbol))]);
                     var wsLtp = _webSocket.GetLastLtp(token!);
                     if (wsLtp > 0)
                         return wsLtp;
@@ -247,7 +253,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
 
             // Fallback: no tick cached yet (just subscribed / illiquid) or WS unavailable —
             // fetch a one-off REST quote so the first read isn't blocked waiting for a tick.
-            var result = await _apiClient.GetLtpAsync(exchange ?? "NFO", tradingSymbol!, token!);
+            var result = await _apiClient.GetLtpAsync(exchange ?? InferExchange(tradingSymbol!), tradingSymbol!, token!);
             if (result is null)
                 return 0m;
 
@@ -369,8 +375,11 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                     {
                         symbolToken = entry.Token;
                         tradingSymbol = entry.TradingSymbol;
-                        if (!string.IsNullOrWhiteSpace(entry.ExchangeSegment))
-                            exchange = entry.ExchangeSegment;
+                        // Re-derive from the resolved tradingsymbol: a blank exch_seg would
+                        // otherwise leave a commodity on whatever the caller defaulted to.
+                        exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment)
+                            ? InferExchange(entry.TradingSymbol)
+                            : entry.ExchangeSegment;
                         _logger.LogInformation("Resolved symbol token from instrument master: {Symbol} → token={Token}", tradingSymbol, symbolToken);
                     }
                 }
@@ -394,6 +403,32 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             }
 
             var isRobo = string.Equals(request.Variety, "ROBO", StringComparison.OrdinalIgnoreCase);
+
+            // Final segment reconciliation. The value may have come from the request, the
+            // instrument cache or the master, any of which can disagree with the contract
+            // actually being traded. A commodity may only ever be booked on MCX: booking it
+            // on NSECMD both prices it against an unrelated NSE scrip and makes the caller's
+            // MCX bracket-order downgrade ineffective, producing "BO:Set Rule Command Not
+            // Executed" from Angel's RMS.
+            var expectedExchange = InferExchange(tradingSymbol);
+            if (!string.Equals(exchange, expectedExchange, StringComparison.OrdinalIgnoreCase) &&
+                MarketSegments.ForTradingSymbol(tradingSymbol) == MarketSegment.Commodity)
+            {
+                _logger.LogWarning(
+                    "Correcting exchange segment for {Symbol}: {Wrong} → {Correct} (commodities must be booked on MCX)",
+                    tradingSymbol, exchange, expectedExchange);
+                exchange = expectedExchange;
+            }
+
+            // Bracket orders are blocked by Angel RMS on MCX; never emit a BO leg for a
+            // commodity even if an upstream caller still asked for one.
+            if (isRobo && string.Equals(exchange, "MCX", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "Bracket (ROBO) orders are not supported on MCX; placing {Symbol} as a regular order instead",
+                    tradingSymbol);
+                isRobo = false;
+            }
 
             object orderRequest;
             if (isRobo)
@@ -617,16 +652,19 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         return false;
     }
 
-    private static string InferExchange(string symbol)
-    {
-        var s = (symbol ?? string.Empty).ToUpperInvariant();
-        if (MarketSegments.ForTradingSymbol(s) == MarketSegment.Commodity)
-            return "MCX";
-        return s.Contains("SENSEX") || s.Contains("BANKEX") ? "BFO" : "NFO";
-    }
+    private static string InferExchange(string symbol) =>
+        MarketSegments.ExchangeForTradingSymbol(symbol);
 
+    /// <summary>
+    /// Underlyings recognised when decomposing a tradingsymbol, ordered longest-first so
+    /// a mini contract ("GOLDM…", "SILVERMIC…") is never claimed by its full-size prefix
+    /// ("GOLD…", "SILVER…"). Commodities are included so MCX contracts can be resolved by
+    /// the structured instrument-master lookup rather than aborting the order.
+    /// </summary>
     private static readonly string[] KnownUnderlyings =
-        ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTY"];
+        [.. new[] { "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTY" }
+            .Concat(MarketSegments.CommodityUnderlyings)
+            .OrderByDescending(u => u.Length)];
 
     /// <summary>
     /// Decomposes an Angel option tradingsymbol into its parts. Handles both

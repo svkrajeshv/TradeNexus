@@ -22,13 +22,15 @@ namespace NexusApp.Parser.Channels;
 /// There is no activation message, so the order triggers via the standard entry-price
 /// crossing flow once the CMP reaches the buy price.
 /// </summary>
-public class TradeWithMohitAgrawalParser(ILogger<TradeWithMohitAgrawalParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
+public partial class TradeWithMohitAgrawalParser(ILogger<TradeWithMohitAgrawalParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
 {
     // "Buy Range : 400-430" — captures the low (group 1) and high (group 2).
-    private const string BuyRangePattern = @"BUY\s*RANGE[^\d]*?(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)";
+    [GeneratedRegex(@"BUY\s*RANGE[^\d]*?(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase)]
+    private static partial Regex BuyRangeRegex();
 
     // "Horizon: Intraday" — only these signals are tradable for this channel.
-    private const string IntradayHorizonPattern = @"HORIZON[^A-Z]*INTRADAY";
+    [GeneratedRegex(@"HORIZON[^A-Z]*INTRADAY", RegexOptions.IgnoreCase)]
+    private static partial Regex IntradayHorizonRegex();
 
     public override int Priority => 10;
 
@@ -50,7 +52,7 @@ public class TradeWithMohitAgrawalParser(ILogger<TradeWithMohitAgrawalParser> lo
     public override bool ShouldSkip(string? message)
     {
         if (string.IsNullOrWhiteSpace(message)) return true;
-        return !Regex.IsMatch(message, IntradayHorizonPattern, RegexOptions.IgnoreCase);
+        return !IntradayHorizonRegex().IsMatch(message);
     }
 
     /// <summary>
@@ -59,7 +61,7 @@ public class TradeWithMohitAgrawalParser(ILogger<TradeWithMohitAgrawalParser> lo
     /// </summary>
     protected override bool ParseEntryPrice(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, BuyRangePattern, RegexOptions.IgnoreCase);
+        var match = BuyRangeRegex().Match(message);
         if (match.Success
             && decimal.TryParse(match.Groups[1].Value, out var low)
             && decimal.TryParse(match.Groups[2].Value, out var high))
@@ -81,10 +83,10 @@ public class TradeWithMohitAgrawalParser(ILogger<TradeWithMohitAgrawalParser> lo
     /// </summary>
     protected override bool ParseTargets(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, TargetPattern, RegexOptions.IgnoreCase);
+        var match = TargetRegex().Match(message);
         if (match.Success)
         {
-            var first = Regex.Match(match.Groups[1].Value.Trim(), @"^\d+(?:\.\d+)?");
+            var first = LeadingNumberRegex().Match(match.Groups[1].Value.Trim());
             if (first.Success && decimal.TryParse(first.Value, out var target) && target > 0)
             {
                 signal.Targets.Add(target);

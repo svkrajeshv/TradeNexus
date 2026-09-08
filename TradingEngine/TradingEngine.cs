@@ -361,9 +361,22 @@ public class TradingEngine(
             }
 
             // MCX blocks bracket orders outright at the RMS layer
-            // ("RMS:Blocked for mcx_fo BO Remarks: bo product block block type: ALL"),
+            // ("RMS:Blocked for mcx_fo BO Remarks: bo product block block type: ALL", and
+            // "BO:Set Rule Command Not Executed" when the BO legs cannot be registered),
             // so commodity orders are downgraded to a plain Limit order managed by the app.
-            if (isRobo && string.Equals(resolved.Exchange, "MCX", StringComparison.OrdinalIgnoreCase))
+            //
+            // The check is deliberately NOT based on resolved.Exchange alone. If symbol
+            // resolution ever mis-routes a commodity (e.g. it lands on NSECMD), the
+            // exchange string would not read "MCX", this guard would be skipped, and a BO
+            // order would be sent for a contract that can never accept one. Deciding from
+            // the underlying/tradingsymbol keeps the downgrade correct even when the
+            // segment is wrong.
+            var isCommodityOrder =
+                string.Equals(resolved.Exchange, "MCX", StringComparison.OrdinalIgnoreCase) ||
+                MarketSegments.IsCommodity(signal.Index) ||
+                MarketSegments.ForTradingSymbol(resolved.Symbol) == MarketSegment.Commodity;
+
+            if (isRobo && isCommodityOrder)
             {
                 _logger.LogWarning(
                     "Bracket (Robo) orders are blocked on MCX ({Symbol}); falling back to Limit order",
@@ -1306,6 +1319,11 @@ public class TradingEngine(
                 {
                     _logger.LogDebug(ex, "Instrument master lookup failed for square-off {Symbol}; broker will fall back to cache", position.Symbol);
                 }
+
+                // Never leave the segment unset: the broker would fall back to NFO and the
+                // exchange would report the commodity order under NSECMD.
+                if (string.IsNullOrWhiteSpace(exchange))
+                    exchange = MarketSegments.ExchangeForTradingSymbol(position.Symbol);
 
                 var response = await accountBroker.PlaceOrderAsync(new BrokerOrderRequest
                 {

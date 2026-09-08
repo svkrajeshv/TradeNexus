@@ -32,15 +32,15 @@ namespace NexusApp.Parser.Channels;
 /// stored signal by <c>TelegramListenerService.TryHandleFollowUpUpdateAsync</c>.
 /// No activation message is required.
 /// </summary>
-public class VipGroupParser(ILogger<VipGroupParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
+public partial class VipGroupParser(ILogger<VipGroupParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
 {
     /// <summary>
     /// Matches "NEAR 155-60", "NEAR :- 155 - 160", "NEAR 155–60" (en dash) and the
     /// single-level form "NEAR 155". The second group is optional so both shapes are
     /// handled by one pattern.
     /// </summary>
-    private const string NearZonePattern =
-        @"NEAR[^\d]*?(\d+(?:\.\d+)?)(?:\s*[-–—]\s*(\d+(?:\.\d+)?))?";
+    [GeneratedRegex(@"NEAR[^\d]*?(\d+(?:\.\d+)?)(?:\s*[-–—]\s*(\d+(?:\.\d+)?))?", RegexOptions.IgnoreCase)]
+    private static partial Regex NearZoneRegex();
 
     /// <summary>
     /// Higher than the generic keyword parsers (priority 10) so an explicit channel
@@ -72,8 +72,7 @@ public class VipGroupParser(ILogger<VipGroupParser> logger, IServiceScopeFactory
         if (base.ParseAction(message, signal))
             return true;
 
-        if (Regex.IsMatch(message, PricePattern, RegexOptions.IgnoreCase) ||
-            Regex.IsMatch(message, NearZonePattern, RegexOptions.IgnoreCase))
+        if (PriceRegex().IsMatch(message) || NearZoneRegex().IsMatch(message))
         {
             signal.Action = SignalAction.Buy;
             return true;
@@ -88,7 +87,7 @@ public class VipGroupParser(ILogger<VipGroupParser> logger, IServiceScopeFactory
     /// </summary>
     protected override bool ParseEntryPrice(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, NearZonePattern, RegexOptions.IgnoreCase);
+        var match = NearZoneRegex().Match(message);
         if (match.Success && decimal.TryParse(match.Groups[1].Value, out var low) && low > 0)
         {
             var entry = low;

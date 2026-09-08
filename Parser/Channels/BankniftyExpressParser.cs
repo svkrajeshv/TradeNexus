@@ -54,7 +54,7 @@ public class BankniftyExpressParser(ILogger<BankniftyExpressParser> logger, ISer
         if (base.ParseAction(message, signal))
             return true;
 
-        if (Regex.IsMatch(message, PricePattern, RegexOptions.IgnoreCase))
+        if (PriceRegex().IsMatch(message))
         {
             signal.Action = SignalAction.Buy;
             return true;
