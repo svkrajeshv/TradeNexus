@@ -133,7 +133,7 @@ public sealed class HealthMonitorService(
                 }
 
                 // Cache before broadcasting so a page that renders between two ticks
-                // can pick the figures up immediately instead of waiting 30s.
+                // can pick the figures up immediately instead of waiting for the next one.
                 _healthSnapshots.Latest = new NexusApp.Services.HealthSnapshot(
                     broker.IsConnected,
                     pnl is { } snap && snap.BrokerAvailable,
@@ -319,14 +319,14 @@ public sealed class HealthMonitorService(
             return (false, 0m, 0m);
 
         // Preferred path: figures derived from the slow broker snapshot re-marked by
-        // SmartStream ticks. Avoids a getPosition call on every 30s health tick, which
+        // SmartStream ticks. Avoids a getPosition call on every health tick, which
         // is what pushed the account into Angel One's access-rate limit.
         var tracker = services.GetService<BrokerPnlTracker>();
         if (tracker?.TryGetLivePnl() is { } live)
             return (true, live.Unrealized, live.Realized);
 
         // Fallback only: outside the session the book is static, so a direct
-        // getPosition on every 30s tick would burn rate-limit budget for figures
+        // getPosition on every tick would burn rate-limit budget for figures
         // that cannot have changed. Report unavailable instead of polling.
         if (!await IsPollingWindowAsync())
             return (false, 0m, 0m);

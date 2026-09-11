@@ -114,25 +114,25 @@ public static class MarketSegments
     /// collide with the equity indices.
     /// </para>
     /// </summary>
-    public static MarketSegment ForTradingSymbol(string? tradingSymbol)
-    {
-        if (string.IsNullOrWhiteSpace(tradingSymbol))
-            return MarketSegment.Equity;
-
-        var symbol = tradingSymbol.Trim();
-        foreach (var _ in from commodity in CommodityUnderlyings
-                          where symbol.StartsWith(commodity, StringComparison.OrdinalIgnoreCase)
-                          select new { })
-        {
-            return MarketSegment.Commodity;
-        }
-
-        return MarketSegment.Equity;
-    }
+    public static MarketSegment ForTradingSymbol(string? tradingSymbol) =>
+        string.Equals(ExchangeForTradingSymbol(tradingSymbol), "MCX", StringComparison.OrdinalIgnoreCase)
+            ? MarketSegment.Commodity
+            : MarketSegment.Equity;
 
     /// <summary>BSE index options, which route to the BFO segment rather than NFO.</summary>
     private static readonly IReadOnlySet<string> BseUnderlyings =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "SENSEX", "BANKEX" };
+
+    /// <summary>
+    /// Commodity underlyings ordered longest-first so a mini contract ("GOLDM") is
+    /// never claimed by its full-size prefix ("GOLD") during a prefix match.
+    /// </summary>
+    private static readonly string[] CommodityPrefixes =
+        [.. CommodityUnderlyings.OrderByDescending(c => c.Length)];
+
+    /// <summary>True for the BSE indices whose options expire on a Thursday and route to BFO.</summary>
+    public static bool IsBseUnderlying(string? underlying) =>
+        BseUnderlyings.Contains(NormalizeUnderlying(underlying));
 
     /// <summary>
     /// The exchange segment an <b>underlying</b> routes to: MCX for commodities,
@@ -165,9 +165,7 @@ public static class MarketSegments
 
         var symbol = tradingSymbol.Trim();
 
-        // Longest-first so a mini contract ("GOLDM...") is never claimed by its
-        // full-size prefix ("GOLD...").
-        foreach (var commodity in CommodityUnderlyings.OrderByDescending(c => c.Length))
+        foreach (var commodity in CommodityPrefixes)
         {
             if (symbol.StartsWith(commodity, StringComparison.OrdinalIgnoreCase))
                 return "MCX";

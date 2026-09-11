@@ -62,26 +62,6 @@ public partial class VipGroupParser(ILogger<VipGroupParser> logger, IServiceScop
     }
 
     /// <summary>
-    /// This channel never writes a BUY/SELL keyword — the direction is implied by
-    /// "ABOVE :- 300" / "NEAR 155-60" (go long once the premium trades at that level).
-    /// The base pipeline aborts the parse when no keyword is found, so fall back to Buy
-    /// whenever the message carries either entry form.
-    /// </summary>
-    protected override bool ParseAction(string message, ParsedSignal signal)
-    {
-        if (base.ParseAction(message, signal))
-            return true;
-
-        if (PriceRegex().IsMatch(message) || NearZoneRegex().IsMatch(message))
-        {
-            signal.Action = SignalAction.Buy;
-            return true;
-        }
-
-        return false;
-    }
-
-    /// <summary>
     /// Entry is the midpoint of the quoted "NEAR" zone (157.5 for "NEAR 155-60"), or the
     /// single level when no range is given. Falls back to the base ABOVE / BUY parsing.
     /// </summary>

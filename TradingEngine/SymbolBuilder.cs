@@ -14,11 +14,6 @@ namespace NexusApp.TradingEngine;
 /// </summary>
 public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger, AngelInstrumentMaster? instrumentMaster = null)
 {
-    private static readonly HashSet<string> BseIndices = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "SENSEX", "BANKEX"
-    };
-
     private static readonly string[] MonthAbbrev =
     [
         "JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"
@@ -315,7 +310,7 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
     ///   • NSE indices (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY) → Tuesday
     /// </summary>
     public static DayOfWeek ExpiryWeekdayFor(string index) =>
-        BseIndices.Contains(index) ? DayOfWeek.Thursday : DayOfWeek.Tuesday;
+        MarketSegments.IsBseUnderlying(index) ? DayOfWeek.Thursday : DayOfWeek.Tuesday;
 
     /// <summary>
     /// Returns the correct nearest expiry for the index based on the current

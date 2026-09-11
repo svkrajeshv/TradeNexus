@@ -405,7 +405,6 @@ public sealed class AngelOneWebSocketClient : IAsyncDisposable
         try
         {
             var mode = data[0];
-            // var exchangeType = data[1];
             var tokenBytes = new ReadOnlySpan<byte>(data, 2, 25);
             var nullIdx = tokenBytes.IndexOf((byte)0);
             var tokenLen = nullIdx >= 0 ? nullIdx : tokenBytes.Length;

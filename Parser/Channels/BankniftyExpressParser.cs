@@ -1,6 +1,5 @@
 using NexusApp.Interfaces;
 using NexusApp.Models;
-using System.Text.RegularExpressions;
 
 namespace NexusApp.Parser.Channels;
 
@@ -41,25 +40,5 @@ public class BankniftyExpressParser(ILogger<BankniftyExpressParser> logger, ISer
         var normalized = channelName.Replace("_", " ").ToLowerInvariant();
         return normalized.Contains("banknifty express") ||
                (normalized.Contains("banknifty") && normalized.Contains("express"));
-    }
-
-    /// <summary>
-    /// This channel never writes a BUY/SELL keyword — the direction is implied by
-    /// "ABOVE :- 368" (go long once the premium trades above that level). The base
-    /// pipeline aborts the entire parse when no keyword is found, so fall back to Buy
-    /// whenever the message carries an ABOVE entry level.
-    /// </summary>
-    protected override bool ParseAction(string message, ParsedSignal signal)
-    {
-        if (base.ParseAction(message, signal))
-            return true;
-
-        if (PriceRegex().IsMatch(message))
-        {
-            signal.Action = SignalAction.Buy;
-            return true;
-        }
-
-        return false;
     }
 }
