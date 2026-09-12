@@ -1,0 +1,15 @@
+{
+  // Configures the Visual Studio JavaScript language service for the site's static
+  // scripts. Without this the editor falls back to its implicit defaults (older
+  // language target, no DOM library), which produces spurious warnings for modern
+  // syntax and browser globals. Kept at the project root so it is not published
+  // with the wwwroot content.
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": [ "dom", "dom.iterable", "es2022" ],
+    "checkJs": false,
+    "noEmit": true
+  },
+  "include": [ "wwwroot/js/**/*.js" ],
+  "exclude": [ "node_modules", "bin", "obj", "wwwroot/lib" ]
+}
