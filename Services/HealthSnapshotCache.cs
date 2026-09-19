@@ -8,7 +8,8 @@ public sealed record HealthSnapshot(
     bool BrokerPnlAvailable,
     decimal LiveUnrealized,
     decimal LiveRealized,
-    DateTime TimestampUtc);
+    DateTime TimestampUtc,
+    List<NexusApp.Interfaces.BrokerPosition>? BrokerPositions = null);
 
 /// <summary>
 /// Keeps the most recent <see cref="HealthSnapshot"/> so a page that loads (or a

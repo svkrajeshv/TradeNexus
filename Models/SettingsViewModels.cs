@@ -24,6 +24,7 @@ public class IndexRiskProfileVm
     public MarketSegment Segment { get; set; }
     public decimal DefaultSlPoints { get; set; }
     public decimal DefaultTargetPoints { get; set; }
+    public decimal OverrideTargetPoints { get; set; } = 15m;
     public decimal SlPercent { get; set; }
     public decimal TargetPercent { get; set; }
 }

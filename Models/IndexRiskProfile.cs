@@ -8,4 +8,5 @@ public record IndexRiskProfile(
     decimal DefaultSlPoints,
     decimal DefaultTargetPoints,
     decimal SlPercent,
-    decimal TargetPercent);
+    decimal TargetPercent,
+    decimal OverrideTargetPoints = 15m);

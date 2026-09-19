@@ -78,6 +78,57 @@ public sealed class BrokerPnlTracker(ILogger<BrokerPnlTracker> logger, IServiceP
         return (unrealized, realized, openCount);
     }
 
+    /// <summary>
+    /// Returns the current snapshot of open broker positions (Quantity != 0) with
+    /// unrealised P&amp;L re-marked from the latest SmartStream LTP tick.
+    /// Used by the Dashboard to render broker-terminal positions that may have no
+    /// corresponding local Position row (manual trades, carry-forward legs, etc.).
+    /// </summary>
+    public List<BrokerPosition> GetOpenPositions()
+    {
+        List<BrokerPosition> snapshot;
+        lock (_gate)
+        {
+            if (_snapshotAtUtc is null)
+                return [];
+            snapshot = _snapshot;
+        }
+
+        var result = new List<BrokerPosition>();
+        foreach (var position in snapshot)
+        {
+            if (position.Quantity == 0m)
+                continue;
+
+            // Build a copy with freshly-marked unrealised P&L so the grid
+            // shows real-time figures, not the stale REST snapshot value.
+            var marked = new BrokerPosition
+            {
+                Symbol = position.Symbol,
+                Quantity = position.Quantity,
+                AveragePrice = position.AveragePrice,
+                CurrentPrice = position.CurrentPrice,
+                RealizedPnL = position.RealizedPnL,
+                OpenedAt = position.OpenedAt,
+                SymbolToken = position.SymbolToken,
+                Exchange = position.Exchange,
+                UnrealizedPnL = MarkToMarket(position)
+            };
+
+            // Update CurrentPrice from SmartStream tick if available
+            if (!string.IsNullOrWhiteSpace(position.SymbolToken))
+            {
+                var ltp = _ws.GetLastLtp(position.SymbolToken);
+                if (ltp > 0m)
+                    marked.CurrentPrice = ltp;
+            }
+
+            result.Add(marked);
+        }
+
+        return result;
+    }
+
     private decimal MarkToMarket(BrokerPosition position)
     {
         if (position.AveragePrice <= 0m || string.IsNullOrWhiteSpace(position.SymbolToken))

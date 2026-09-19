@@ -388,7 +388,8 @@ public class PaperTradingEngine(
     INotificationService notifications,
     ILogger<PaperTradingEngine> logger,
     IHubContext<TradingHub> hub,
-    ISettingsService settings)
+    ISettingsService settings,
+    IIndexRiskProfileService? riskProfiles = null)
 {
     private const string PaperTradingAccountName = "Paper Trading Account";
     private const string PositionChangedEvent = "PositionChanged";
@@ -399,6 +400,7 @@ public class PaperTradingEngine(
     private readonly ILogger<PaperTradingEngine> _logger = logger;
     private readonly IHubContext<TradingHub> _hub = hub;
     private readonly ISettingsService _settings = settings;
+    private readonly IIndexRiskProfileService? _riskProfiles = riskProfiles;
 
     /// <summary>
     /// Simulates order execution without broker
@@ -460,6 +462,24 @@ public class PaperTradingEngine(
             var signal = await _context.TradingSignals.FindAsync(order.SignalId);
             var stopLoss = signal?.StopLoss;
             var targets = signal?.Targets.ToList() ?? [];
+
+            if (_riskProfiles is not null)
+            {
+                var overridePts = await _riskProfiles.GetOverrideTargetPointsAsync(signal?.Index);
+                if (overridePts > 0 && currentPrice > 0)
+                {
+                    var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                    var tgt = isBuy ? currentPrice + overridePts : Math.Max(0.05m, currentPrice - overridePts);
+                    targets = [tgt];
+                }
+                else if (targets.Count == 0 && currentPrice > 0)
+                {
+                    var profile = await _riskProfiles.GetProfileAsync(signal?.Index);
+                    var defPts = profile is { DefaultTargetPoints: > 0 } ? profile.DefaultTargetPoints : 20m;
+                    var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                    targets = [isBuy ? currentPrice + defPts : Math.Max(0.05m, currentPrice - defPts)];
+                }
+            }
 
             // Create position
             var position = new Position

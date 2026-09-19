@@ -4,13 +4,29 @@
 @using NexusApp.Data
 @using NexusApp.Models
 @using NexusApp.Helpers
+@using System.Globalization
+@using System.Text
 @inject IDbContextFactory<TradingDbContext> DbFactory
 @inject NexusApp.Services.TradeHistoryService TradeHistory
 @inject ISnackbar Snackbar
+@inject IJSRuntime JS
 
 <PageTitle>NexusApp - PNL Statements</PageTitle>
 
-<MudText Typo="Typo.h4" Class="mb-4">PNL Statements</MudText>
+<MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-4">
+    <MudText Typo="Typo.h4">PNL Statements</MudText>
+    <MudButtonGroup Color="Color.Success" Variant="Variant.Filled">
+        <MudButton StartIcon="@Icons.Material.Filled.Download"
+                   OnClick="() => DownloadAsync(false)"
+                   Disabled="_downloading || _rows.Count == 0">
+            @(_downloading ? "Preparing..." : $"Download Statement ({FilteredRows.Count})")
+        </MudButton>
+        <MudMenu Icon="@Icons.Material.Filled.ArrowDropDown" Disabled="_downloading || _rows.Count == 0">
+            <MudMenuItem OnClick="() => DownloadAsync(false)">Full Statement (Summary + Trades)</MudMenuItem>
+            <MudMenuItem OnClick="() => DownloadAsync(true)">Trades Only (Clean CSV)</MudMenuItem>
+        </MudMenu>
+    </MudButtonGroup>
+</MudStack>
 
 <MudPaper Class="pa-4 mb-4" Elevation="2">
     <MudGrid Spacing="2" Justify="Justify.FlexStart">
@@ -233,11 +249,20 @@
 <MudPaper Class="pa-4" Elevation="2">
     <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-2">
         <MudText Typo="Typo.h6">Executed Trades</MudText>
-        <MudToggleGroup T="string" @bind-Value="_rowsBookFilter" Color="Color.Primary" Size="Size.Small">
-            <MudToggleItem Value="@AllBooks">All</MudToggleItem>
-            <MudToggleItem Value="@LiveBook">Live</MudToggleItem>
-            <MudToggleItem Value="@PaperBook">Paper</MudToggleItem>
-        </MudToggleGroup>
+        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
+            <MudToggleGroup T="string" @bind-Value="_rowsBookFilter" Color="Color.Primary" Size="Size.Small">
+                <MudToggleItem Value="@AllBooks">All</MudToggleItem>
+                <MudToggleItem Value="@LiveBook">Live</MudToggleItem>
+                <MudToggleItem Value="@PaperBook">Paper</MudToggleItem>
+            </MudToggleGroup>
+            <MudTooltip Text="Download executed trades as CSV">
+                <MudIconButton Icon="@Icons.Material.Filled.Download"
+                               Color="Color.Primary"
+                               Size="Size.Small"
+                               OnClick="() => DownloadAsync(true)"
+                               Disabled="_downloading || FilteredRows.Count == 0" />
+            </MudTooltip>
+        </MudStack>
     </MudStack>
     @if (FilteredRows.Count == 0)
     {
@@ -396,6 +421,7 @@
                 where h.ClosedAt >= fromUtc && h.ClosedAt < toUtc
                 select new TradeRow
                 {
+                    OpenedAt = h.OpenedAt,
                     ClosedAt = h.ClosedAt,
                     Channel = h.ChannelName != null && h.ChannelName != string.Empty ? h.ChannelName : UnknownChannel,
                     Terminal = h.TerminalName != null && h.TerminalName != string.Empty ? h.TerminalName : UnknownTerminal,
@@ -498,6 +524,7 @@
 
     private sealed class TradeRow
     {
+        public DateTime OpenedAt { get; set; }
         public DateTime ClosedAt { get; set; }
         public string Channel { get; set; } = string.Empty;
         public string Terminal { get; set; } = string.Empty;
@@ -538,5 +565,225 @@
         public int Losses { get; set; }
         public double WinRate { get; set; }
         public decimal NetPnL { get; set; }
+    }
+
+    private bool _downloading;
+
+    private async Task DownloadAsync(bool tradesOnly = false)
+    {
+        if (_downloading) return;
+        _downloading = true;
+
+        try
+        {
+            var rows = FilteredRows;
+            if (rows.Count == 0)
+            {
+                Snackbar.Add("No trades to download in the selected range.", Severity.Info);
+                return;
+            }
+
+            var csv = tradesOnly
+                ? BuildTradesOnlyCsv(rows)
+                : BuildFullStatementCsv(rows);
+
+            var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(csv)).ToArray();
+            var fromStr = (_fromDate ?? DefaultFromDate()).ToString("yyyyMMdd");
+            var toStr = (_toDate ?? IstToday()).ToString("yyyyMMdd");
+            var fileName = tradesOnly
+                ? $"pnl-trades-{fromStr}-to-{toStr}.csv"
+                : $"pnl-statement-{fromStr}-to-{toStr}.csv";
+
+            await JS.InvokeVoidAsync("NexusApp.downloadFile", fileName, "text/csv", Convert.ToBase64String(bytes));
+            Snackbar.Add($"Downloaded {rows.Count} trades to {fileName}", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Download failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _downloading = false;
+        }
+    }
+
+    private string BuildTradesOnlyCsv(List<TradeRow> rows)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(string.Join(",",
+            "Trade #",
+            "Opened (IST)",
+            "Closed (IST)",
+            "Book",
+            "Channel",
+            "Terminal",
+            "Symbol",
+            "Quantity",
+            "Entry Price",
+            "Exit Price",
+            "Points Captured",
+            "Realized PnL (INR)",
+            "Return (%)",
+            "Outcome"));
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var r = rows[i];
+            var points = r.Quantity > 0 ? r.RealizedPnL / r.Quantity : 0m;
+            var returnPct = (r.EntryPrice > 0 && r.Quantity > 0)
+                ? (r.RealizedPnL / (r.EntryPrice * r.Quantity)) * 100m
+                : 0m;
+            var outcome = r.RealizedPnL > 0 ? "WIN" : (r.RealizedPnL < 0 ? "LOSS" : "BREAKEVEN");
+
+            sb.AppendLine(string.Join(",",
+                Csv(i + 1),
+                Csv(r.OpenedAt.ToIstString()),
+                Csv(r.ClosedAt.ToIstString()),
+                Csv(r.IsPaper ? "PAPER" : "LIVE"),
+                Csv(r.Channel),
+                Csv(r.Terminal),
+                Csv(r.Symbol),
+                Csv(r.Quantity),
+                Csv(r.EntryPrice),
+                Csv(r.ExitPrice),
+                Csv(points),
+                Csv(r.RealizedPnL),
+                Csv(returnPct.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+                Csv(outcome)));
+        }
+
+        return sb.ToString();
+    }
+
+    private string BuildFullStatementCsv(List<TradeRow> rows)
+    {
+        var sb = new StringBuilder();
+        var fromText = (_fromDate ?? DefaultFromDate()).ToString("dd-MMM-yyyy");
+        var toText = (_toDate ?? IstToday()).ToString("dd-MMM-yyyy");
+
+        sb.AppendLine("# ==============================================================================");
+        sb.AppendLine("# NEXUSAPP — P&L STATEMENT");
+        sb.AppendLine("# ==============================================================================");
+        sb.AppendLine($"# Statement Period: {fromText} to {toText} (IST)");
+        sb.AppendLine($"# Generated At: {DateTime.UtcNow.ToIstString()} IST");
+        sb.AppendLine($"# Channel Filter: {(_selectedChannel == AllChannels ? "All Channels" : _selectedChannel)}");
+        sb.AppendLine($"# Terminal Filter: {(_selectedTerminal == AllTerminals ? "All Terminals" : _selectedTerminal)}");
+        sb.AppendLine($"# Book Filter: {_rowsBookFilter.ToUpperInvariant()}");
+        sb.AppendLine("# ==============================================================================");
+        sb.AppendLine();
+
+        sb.AppendLine("# EXECUTIVE SUMMARY");
+        sb.AppendLine(string.Join(",", "Book", "Trades", "Wins", "Losses", "Win Rate (%)", "Net Realized PnL (INR)"));
+        sb.AppendLine(string.Join(",",
+            "Overall (All)",
+            Csv(_totalTrades),
+            Csv(_wins),
+            Csv(_losses),
+            Csv(_winRate.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+            Csv(_totalPnL)));
+        sb.AppendLine(string.Join(",",
+            "Live Book",
+            Csv(_liveStats.Trades),
+            Csv(_liveStats.Wins),
+            Csv(_liveStats.Losses),
+            Csv(_liveStats.WinRate.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+            Csv(_liveStats.NetPnL)));
+        sb.AppendLine(string.Join(",",
+            "Paper Book",
+            Csv(_paperStats.Trades),
+            Csv(_paperStats.Wins),
+            Csv(_paperStats.Losses),
+            Csv(_paperStats.WinRate.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+            Csv(_paperStats.NetPnL)));
+        sb.AppendLine();
+
+        sb.AppendLine("# PERFORMANCE BY CHANNEL");
+        sb.AppendLine(string.Join(",", "Channel", "Book", "Trades", "Wins", "Losses", "Win Rate (%)", "Net Realized PnL (INR)"));
+        foreach (var cs in FilteredChannelStats)
+        {
+            sb.AppendLine(string.Join(",",
+                Csv(cs.Channel),
+                Csv(cs.IsPaper ? "PAPER" : "LIVE"),
+                Csv(cs.Trades),
+                Csv(cs.Wins),
+                Csv(cs.Losses),
+                Csv(cs.WinRate.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+                Csv(cs.NetPnL)));
+        }
+        sb.AppendLine();
+
+        sb.AppendLine("# PERFORMANCE BY TERMINAL");
+        sb.AppendLine(string.Join(",", "Terminal", "Book", "Trades", "Wins", "Losses", "Win Rate (%)", "Net Realized PnL (INR)"));
+        foreach (var ts in FilteredTerminalStats)
+        {
+            sb.AppendLine(string.Join(",",
+                Csv(ts.Terminal),
+                Csv(ts.IsPaper ? "PAPER" : "LIVE"),
+                Csv(ts.Trades),
+                Csv(ts.Wins),
+                Csv(ts.Losses),
+                Csv(ts.WinRate.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+                Csv(ts.NetPnL)));
+        }
+        sb.AppendLine();
+
+        sb.AppendLine("# EXECUTED TRADES");
+        sb.AppendLine(string.Join(",",
+            "Trade #",
+            "Opened (IST)",
+            "Closed (IST)",
+            "Book",
+            "Channel",
+            "Terminal",
+            "Symbol",
+            "Quantity",
+            "Entry Price",
+            "Exit Price",
+            "Points Captured",
+            "Realized PnL (INR)",
+            "Return (%)",
+            "Outcome"));
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var r = rows[i];
+            var points = r.Quantity > 0 ? r.RealizedPnL / r.Quantity : 0m;
+            var returnPct = (r.EntryPrice > 0 && r.Quantity > 0)
+                ? (r.RealizedPnL / (r.EntryPrice * r.Quantity)) * 100m
+                : 0m;
+            var outcome = r.RealizedPnL > 0 ? "WIN" : (r.RealizedPnL < 0 ? "LOSS" : "BREAKEVEN");
+
+            sb.AppendLine(string.Join(",",
+                Csv(i + 1),
+                Csv(r.OpenedAt.ToIstString()),
+                Csv(r.ClosedAt.ToIstString()),
+                Csv(r.IsPaper ? "PAPER" : "LIVE"),
+                Csv(r.Channel),
+                Csv(r.Terminal),
+                Csv(r.Symbol),
+                Csv(r.Quantity),
+                Csv(r.EntryPrice),
+                Csv(r.ExitPrice),
+                Csv(points),
+                Csv(r.RealizedPnL),
+                Csv(returnPct.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+                Csv(outcome)));
+        }
+
+        return sb.ToString();
+    }
+
+    private static string Csv(object? value)
+    {
+        if (value is null) return string.Empty;
+
+        var text = value is IFormattable formattable
+            ? formattable.ToString(null, CultureInfo.InvariantCulture)
+            : value.ToString() ?? string.Empty;
+
+        if (text.IndexOfAny([',', '"', '\n', '\r']) < 0)
+            return text;
+
+        return $"\"{text.Replace("\"", "\"\"")}\"";
     }
 }

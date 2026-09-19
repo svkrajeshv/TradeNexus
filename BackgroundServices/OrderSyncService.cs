@@ -441,6 +441,26 @@ public sealed class OrderSyncService(
                     var slValue = signal is { StopLoss: > 0 } ? signal.StopLoss : (decimal?)null;
                     var targetList = signal?.Targets.ToList() ?? [];
 
+                    using var scope = _services.CreateScope();
+                    var riskProfileService = scope.ServiceProvider.GetService<IIndexRiskProfileService>();
+                    var overridePts = riskProfileService != null
+                        ? await riskProfileService.GetOverrideTargetPointsAsync(signal?.Index)
+                        : 0m;
+
+                    if (overridePts > 0 && fillPrice > 0)
+                    {
+                        var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                        var tgt = isBuy ? fillPrice + overridePts : Math.Max(0.05m, fillPrice - overridePts);
+                        targetList = [tgt];
+                    }
+                    else if (targetList.Count == 0 && fillPrice > 0)
+                    {
+                        var profile = riskProfileService != null ? await riskProfileService.GetProfileAsync(signal?.Index) : null;
+                        var defPts = profile is { DefaultTargetPoints: > 0 } ? profile.DefaultTargetPoints : 20m;
+                        var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                        targetList = [isBuy ? fillPrice + defPts : Math.Max(0.05m, fillPrice - defPts)];
+                    }
+
                     db.Positions.Add(new Position
                     {
                         TradingAccountId = order.TradingAccountId,

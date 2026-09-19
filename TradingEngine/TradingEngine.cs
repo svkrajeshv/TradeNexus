@@ -410,15 +410,51 @@ public class TradingEngine(
                 await _context.SaveChangesAsync();
             }
 
-            if (targetOffset > 0 && signalEntity.Targets.Count > 0)
+            var riskProfileService = _serviceProvider.GetService<IIndexRiskProfileService>();
+            var overrideTargetPts = riskProfileService is not null
+                ? await riskProfileService.GetOverrideTargetPointsAsync(signal.Index)
+                : 0m;
+
+            if (overrideTargetPts > 0)
             {
-                var adjustedTargets = signalEntity.Targets
-                    .Select(t => Math.Max(limitPrice + 1m, t - targetOffset))
-                    .ToList();
-                signalEntity.Targets = adjustedTargets;
+                var overrideTarget = signal.Action == SignalAction.Buy
+                    ? limitPrice + overrideTargetPts
+                    : Math.Max(0.05m, limitPrice - overrideTargetPts);
+                signalEntity.Targets = [overrideTarget];
+                signal.Targets = [overrideTarget];
                 priceAdjustments.Add(
-                    $"Target offset (-{targetOffset}): [{string.Join(", ", adjustedTargets)}]");
+                    $"Override target (+{overrideTargetPts} pts): [{overrideTarget}]");
                 await _context.SaveChangesAsync();
+            }
+            else
+            {
+                // Override target is 0: square off at signal targets or default target points
+                if (signalEntity.Targets.Count == 0)
+                {
+                    var profile = riskProfileService is not null ? await riskProfileService.GetProfileAsync(signal.Index) : null;
+                    var defTgtPts = profile is { DefaultTargetPoints: > 0 }
+                        ? profile.DefaultTargetPoints
+                        : (await _settings.GetSettingAsync<decimal?>("DefaultTargetPoints") ?? 20m);
+                    var defTarget = signal.Action == SignalAction.Buy
+                        ? limitPrice + defTgtPts
+                        : Math.Max(0.05m, limitPrice - defTgtPts);
+                    signalEntity.Targets = [defTarget];
+                    signal.Targets = [defTarget];
+                    priceAdjustments.Add($"Default target (+{defTgtPts} pts): [{defTarget}]");
+                    await _context.SaveChangesAsync();
+                }
+
+                if (targetOffset > 0 && signalEntity.Targets.Count > 0)
+                {
+                    var adjustedTargets = signalEntity.Targets
+                        .Select(t => Math.Max(limitPrice + 1m, t - targetOffset))
+                        .ToList();
+                    signalEntity.Targets = adjustedTargets;
+                    signal.Targets = adjustedTargets;
+                    priceAdjustments.Add(
+                        $"Target offset (-{targetOffset}): [{string.Join(", ", adjustedTargets)}]");
+                    await _context.SaveChangesAsync();
+                }
             }
 
             if (priceAdjustments.Count > 0)
@@ -1125,10 +1161,20 @@ public class TradingEngine(
     /// </summary>
     private async Task<TradingSignal> GetOrCreateBrokerSyncSignalAsync(string symbol)
     {
-        const string brokerSyncChannel = "Broker Sync";
         var istToday = DateTime.UtcNow.ToIst().Date;
         var utcDayStart = istToday.IstToUtc();
 
+        // If a genuine Telegram signal exists today for this contract, link to it so the position
+        // inherits the real channel name, entry, SL, and targets.
+        var realSignal = await _context.TradingSignals
+            .Where(s => s.Symbol == symbol && s.ReceivedTimestamp >= utcDayStart && s.ChannelName != "Broker Sync")
+            .OrderByDescending(s => s.ReceivedTimestamp)
+            .FirstOrDefaultAsync();
+
+        if (realSignal is not null)
+            return realSignal;
+
+        const string brokerSyncChannel = "Broker Sync";
         var existing = await _context.TradingSignals.FirstOrDefaultAsync(s =>
             s.Symbol == symbol &&
             s.ChannelName == brokerSyncChannel &&

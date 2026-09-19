@@ -784,14 +784,15 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         if (item.ValueKind != JsonValueKind.Object)
             return null;
 
-        foreach (var prop in item.EnumerateObject())
+        for (var i = 0; i < names.Length; i++)
         {
-            for (var i = 0; i < names.Length; i++)
+            var target = names[i];
+            foreach (var prop in item.EnumerateObject())
             {
-                if (!prop.Name.Equals(names[i], StringComparison.OrdinalIgnoreCase))
+                if (!prop.Name.Equals(target, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                return prop.Value.ValueKind switch
+                var str = prop.Value.ValueKind switch
                 {
                     JsonValueKind.String => prop.Value.GetString(),
                     // GetRawText covers both integral and fractional numbers; TryGetInt64
@@ -800,6 +801,9 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                     JsonValueKind.Number => prop.Value.GetRawText(),
                     _ => null
                 };
+
+                if (!string.IsNullOrWhiteSpace(str))
+                    return str;
             }
         }
 

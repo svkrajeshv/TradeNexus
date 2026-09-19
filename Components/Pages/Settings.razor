@@ -352,16 +352,16 @@
 
     private List<IndexRiskProfileVm> _indexProfiles =
     [
-        new() { Index = "NIFTY",      DefaultSlPoints = 20, DefaultTargetPoints = 35,  SlPercent = 18, TargetPercent = 35 },
-        new() { Index = "BANKNIFTY",  DefaultSlPoints = 40, DefaultTargetPoints = 70,  SlPercent = 20, TargetPercent = 40 },
-        new() { Index = "FINNIFTY",   DefaultSlPoints = 20, DefaultTargetPoints = 35,  SlPercent = 18, TargetPercent = 35 },
-        new() { Index = "MIDCPNIFTY", DefaultSlPoints = 15, DefaultTargetPoints = 25,  SlPercent = 15, TargetPercent = 30 },
-        new() { Index = "SENSEX",     DefaultSlPoints = 80, DefaultTargetPoints = 140, SlPercent = 25, TargetPercent = 50 },
-        new() { Index = "BANKEX",     DefaultSlPoints = 90, DefaultTargetPoints = 150, SlPercent = 25, TargetPercent = 50 },
-        new() { Index = "CRUDEOIL",   Segment = MarketSegment.Commodity, DefaultSlPoints = 15, DefaultTargetPoints = 30,  SlPercent = 22, TargetPercent = 45 },
-        new() { Index = "NATURALGAS", Segment = MarketSegment.Commodity, DefaultSlPoints = 5,  DefaultTargetPoints = 10,  SlPercent = 25, TargetPercent = 50 },
-        new() { Index = "GOLD",       Segment = MarketSegment.Commodity, DefaultSlPoints = 60, DefaultTargetPoints = 120, SlPercent = 20, TargetPercent = 40 },
-        new() { Index = "SILVER",     Segment = MarketSegment.Commodity, DefaultSlPoints = 50, DefaultTargetPoints = 100, SlPercent = 22, TargetPercent = 45 },
+        new() { Index = "NIFTY",      DefaultSlPoints = 20, DefaultTargetPoints = 35,  OverrideTargetPoints = 15, SlPercent = 18, TargetPercent = 35 },
+        new() { Index = "BANKNIFTY",  DefaultSlPoints = 40, DefaultTargetPoints = 70,  OverrideTargetPoints = 15, SlPercent = 20, TargetPercent = 40 },
+        new() { Index = "FINNIFTY",   DefaultSlPoints = 20, DefaultTargetPoints = 35,  OverrideTargetPoints = 15, SlPercent = 18, TargetPercent = 35 },
+        new() { Index = "MIDCPNIFTY", DefaultSlPoints = 15, DefaultTargetPoints = 25,  OverrideTargetPoints = 15, SlPercent = 15, TargetPercent = 30 },
+        new() { Index = "SENSEX",     DefaultSlPoints = 80, DefaultTargetPoints = 140, OverrideTargetPoints = 15, SlPercent = 25, TargetPercent = 50 },
+        new() { Index = "BANKEX",     DefaultSlPoints = 90, DefaultTargetPoints = 150, OverrideTargetPoints = 15, SlPercent = 25, TargetPercent = 50 },
+        new() { Index = "CRUDEOIL",   Segment = MarketSegment.Commodity, DefaultSlPoints = 15, DefaultTargetPoints = 30,  OverrideTargetPoints = 15, SlPercent = 22, TargetPercent = 45 },
+        new() { Index = "NATURALGAS", Segment = MarketSegment.Commodity, DefaultSlPoints = 5,  DefaultTargetPoints = 10,  OverrideTargetPoints = 15, SlPercent = 25, TargetPercent = 50 },
+        new() { Index = "GOLD",       Segment = MarketSegment.Commodity, DefaultSlPoints = 60, DefaultTargetPoints = 120, OverrideTargetPoints = 15, SlPercent = 20, TargetPercent = 40 },
+        new() { Index = "SILVER",     Segment = MarketSegment.Commodity, DefaultSlPoints = 50, DefaultTargetPoints = 100, OverrideTargetPoints = 15, SlPercent = 22, TargetPercent = 45 },
     ];
 
     private string _adminUsername = "admin";
@@ -444,6 +444,9 @@
                 var tgtPts = await SettingsService.GetSettingAsync<decimal?>($"Target.Points.{profile.Index}");
                 if (tgtPts.HasValue) profile.DefaultTargetPoints = tgtPts.Value;
 
+                var overrideTgt = await SettingsService.GetSettingAsync<decimal?>($"Target.Override.{profile.Index}");
+                if (overrideTgt.HasValue) profile.OverrideTargetPoints = overrideTgt.Value;
+
                 var slPct = await SettingsService.GetSettingAsync<decimal?>($"SL.Percent.{profile.Index}");
                 if (slPct.HasValue) profile.SlPercent = slPct.Value;
 
@@ -511,6 +514,7 @@
             {
                 await SettingsService.SetSettingAsync($"SL.Points.{profile.Index}", profile.DefaultSlPoints);
                 await SettingsService.SetSettingAsync($"Target.Points.{profile.Index}", profile.DefaultTargetPoints);
+                await SettingsService.SetSettingAsync($"Target.Override.{profile.Index}", profile.OverrideTargetPoints);
                 await SettingsService.SetSettingAsync($"SL.Percent.{profile.Index}", profile.SlPercent);
                 await SettingsService.SetSettingAsync($"Target.Percent.{profile.Index}", profile.TargetPercent);
             }

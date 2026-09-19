@@ -11,6 +11,8 @@
 @using NexusApp.Components.Shared
 @using NexusApp.Services
 @inject TradingSignalService SignalService
+@inject IServiceProvider ServiceProvider
+@inject IBroker Broker
 @inject IDbContextFactory<TradingDbContext> DbFactory
 @inject NavigationManager Nav
 @inject ISnackbar Snackbar
@@ -62,6 +64,39 @@
         width: 100%;
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
+    }
+    /* Vertical scroll and sticky headers for active/live signal grids */
+    .live-signals-table .mud-table-container,
+    .watchlist-table .mud-table-container {
+        max-height: 400px;
+        overflow-y: auto !important;
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch;
+    }
+    .live-signals-table .mud-table-head th,
+    .watchlist-table .mud-table-head th {
+        background-color: var(--mud-palette-surface) !important;
+        position: sticky;
+        top: 0;
+        z-index: 2;
+    }
+    .live-signals-table .mud-table-container::-webkit-scrollbar,
+    .watchlist-table .mud-table-container::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+    }
+    .live-signals-table .mud-table-container::-webkit-scrollbar-track,
+    .watchlist-table .mud-table-container::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    .live-signals-table .mud-table-container::-webkit-scrollbar-thumb,
+    .watchlist-table .mud-table-container::-webkit-scrollbar-thumb {
+        background-color: var(--mud-palette-lines-default);
+        border-radius: 4px;
+    }
+    .live-signals-table .mud-table-container::-webkit-scrollbar-thumb:hover,
+    .watchlist-table .mud-table-container::-webkit-scrollbar-thumb:hover {
+        background-color: var(--mud-palette-text-secondary);
     }
     /* Mobile card grid used by the Open Positions list. */
     .position-card {
@@ -299,7 +334,7 @@
             else
             {
                 <div class="table-scroll">
-                <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" Breakpoint="Breakpoint.Sm" RowStyleFunc="GetSignalRowStyle">
+                <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" Breakpoint="Breakpoint.Sm" RowStyleFunc="GetSignalRowStyle" FixedHeader="true">
                     <HeaderContent>
                         <MudTh>Time</MudTh>
                         <MudTh>Channel</MudTh>
@@ -348,7 +383,7 @@
             else
             {
                 <div class="table-scroll">
-                <MudTable Class="watchlist-table" Items="_watchlist" Dense="true" Hover="true" Bordered="false" Breakpoint="Breakpoint.Sm">
+                <MudTable Class="watchlist-table" Items="_watchlist" Dense="true" Hover="true" Bordered="false" Breakpoint="Breakpoint.Sm" FixedHeader="true">
                     <HeaderContent>
                         <MudTh>Time</MudTh>
                         <MudTh>Channel</MudTh>
@@ -414,7 +449,7 @@
                 <!-- Desktop Table View (hidden on mobile) -->
                 <div class="d-none d-sm-flex flex-column">
                     <div class="grid-height-box table-scroll">
-                    <MudTable Items="DisplayPositions" Dense="true" Hover="true" RowClassFunc="@GetPositionRowClass">
+                    <MudTable Items="CombinedPositions" Dense="true" Hover="true" RowClassFunc="@GetPositionRowClass" T="object">
                         <HeaderContent>
                             <MudTh>Symbol</MudTh>
                             <MudTh>Book</MudTh>
@@ -428,37 +463,81 @@
                             <MudTh>Action</MudTh>
                         </HeaderContent>
                         <RowTemplate>
-                            <MudTd>@context.Symbol</MudTd>
-                            <MudTd>
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
-                                         Color="@(BookScope.IsPaper(context) ? Color.Tertiary : Color.Success)">
-                                    @(BookScope.IsPaper(context) ? "PAPER" : "LIVE")
-                                </MudChip>
-                            </MudTd>
-                            <MudTd>
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
-                                    @(string.IsNullOrWhiteSpace(context.Signal?.ChannelName) ? "-" : context.Signal.ChannelName)
-                                </MudChip>
-                            </MudTd>
-                            <MudTd>@context.Quantity</MudTd>
-                            <MudTd>@context.EntryPrice</MudTd>
-                            <MudTd>@context.CurrentPrice</MudTd>
-                            <MudTd>@(context.StopLoss?.ToString("0.##") ?? "-")</MudTd>
-                            <MudTd>@(context.Targets.Count > 0 ? context.Targets[0].ToString("0.##") : "-")</MudTd>
-                            <MudTd>
-                                <MudText Color="@(context.UnrealizedPnL >= 0 ? Color.Success : Color.Error)">
-                                    @context.UnrealizedPnL.ToString("N2")
-                                </MudText>
-                            </MudTd>
-                            <MudTd>
-                                <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
-                                           StartIcon="@Icons.Material.Filled.Close"
-                                           OnClick="@(() => SquareOffPositionAsync(context))">
-                                    Square Off
-                                </MudButton>
-                            </MudTd>
+                            @if (context is NexusApp.Models.Position localPos)
+                            {
+                                <MudTd>@localPos.Symbol</MudTd>
+                                <MudTd>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
+                                             Color="@(BookScope.IsPaper(localPos) ? Color.Tertiary : Color.Success)">
+                                        @(BookScope.IsPaper(localPos) ? "PAPER" : "LIVE")
+                                    </MudChip>
+                                </MudTd>
+                                <MudTd>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                        @(string.IsNullOrWhiteSpace(localPos.Signal?.ChannelName) ? "-" : localPos.Signal.ChannelName)
+                                    </MudChip>
+                                </MudTd>
+                                <MudTd>@localPos.Quantity</MudTd>
+                                <MudTd>@localPos.EntryPrice</MudTd>
+                                <MudTd>@localPos.CurrentPrice</MudTd>
+                                <MudTd>@(localPos.StopLoss?.ToString("0.##") ?? "-")</MudTd>
+                                <MudTd>@(localPos.Targets.Count > 0 ? localPos.Targets[0].ToString("0.##") : "-")</MudTd>
+                                <MudTd>
+                                    <MudText Color="@(localPos.UnrealizedPnL >= 0 ? Color.Success : Color.Error)">
+                                        @localPos.UnrealizedPnL.ToString("N2")
+                                    </MudText>
+                                </MudTd>
+                                <MudTd>
+                                    <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
+                                               StartIcon="@Icons.Material.Filled.Close"
+                                               OnClick="@(() => SquareOffPositionAsync(localPos))">
+                                        Square Off
+                                    </MudButton>
+                                </MudTd>
+                            }
+                            else if (context is BrokerPositionVm brokerPos)
+                            {
+                                var matchedSignal = FindMatchingSignal(brokerPos.Symbol);
+                                <MudTd>@brokerPos.Symbol</MudTd>
+                                <MudTd>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
+                                             Color="Color.Info">
+                                        BROKER
+                                    </MudChip>
+                                </MudTd>
+                                <MudTd>
+                                    @if (!string.IsNullOrWhiteSpace(matchedSignal?.ChannelName))
+                                    {
+                                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                            @matchedSignal.ChannelName
+                                        </MudChip>
+                                    }
+                                    else
+                                    {
+                                        <span>-</span>
+                                    }
+                                </MudTd>
+                                <MudTd>@brokerPos.Quantity</MudTd>
+                                <MudTd>@brokerPos.AvgPrice.ToString("0.##")</MudTd>
+                                <MudTd>@brokerPos.LTP.ToString("0.##")</MudTd>
+                                <MudTd>@(matchedSignal?.StopLoss > 0 ? matchedSignal.StopLoss.ToString("0.##") : "-")</MudTd>
+                                <MudTd>@(matchedSignal?.Targets.Count > 0 ? matchedSignal.Targets[0].ToString("0.##") : "-")</MudTd>
+                                <MudTd>
+                                    <MudText Color="@(brokerPos.PnL >= 0 ? Color.Success : Color.Error)">
+                                        @brokerPos.PnL.ToString("N2")
+                                    </MudText>
+                                </MudTd>
+                                <MudTd>
+                                    <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
+                                               StartIcon="@Icons.Material.Filled.Close"
+                                               OnClick="@(() => SquareOffBrokerPositionAsync(brokerPos))">
+                                        Square Off
+                                    </MudButton>
+                                </MudTd>
+                            }
                         </RowTemplate>
                     </MudTable>
+
                     </div>
                 </div>
 
@@ -524,6 +603,77 @@
                                 </div>
                             </div>
                         }
+                        @foreach (var bp in BrokerOnlyPositions)
+                        {
+                            var matchedSignal = FindMatchingSignal(bp.Symbol);
+                            <div class="position-card position-card--live" style="border-left-color: var(--mud-palette-info);">
+                                <div class="watchlist-card-full d-flex justify-space-between align-center">
+                                    <div class="watchlist-card-value" style="font-weight:600;">@bp.Symbol</div>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
+                                             Color="Color.Info">
+                                        BROKER
+                                    </MudChip>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Channel</div>
+                                    <div class="watchlist-card-value">
+                                        @if (!string.IsNullOrWhiteSpace(matchedSignal?.ChannelName))
+                                        {
+                                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                                @matchedSignal.ChannelName
+                                            </MudChip>
+                                        }
+                                        else
+                                        {
+                                            <span>-</span>
+                                        }
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Qty</div>
+                                    <div class="watchlist-card-value">@bp.Quantity</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Avg Price</div>
+                                    <div class="watchlist-card-value">@bp.AvgPrice.ToString("0.##")</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">LTP</div>
+                                    <div class="watchlist-card-value">@bp.LTP.ToString("0.##")</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">SL</div>
+                                    <div class="watchlist-card-value">@(matchedSignal?.StopLoss > 0 ? matchedSignal.StopLoss.ToString("0.##") : "-")</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Target 1</div>
+                                    <div class="watchlist-card-value">@(matchedSignal?.Targets.Count > 0 ? matchedSignal.Targets[0].ToString("0.##") : "-")</div>
+                                </div>
+
+                                <div class="watchlist-card-full">
+                                    <div class="watchlist-card-label">P&amp;L</div>
+                                    <div class="watchlist-card-value">
+                                        <MudText Color="@(bp.PnL >= 0 ? Color.Success : Color.Error)" style="font-weight: 600; font-size: 0.95rem;">
+                                            ₹@bp.PnL.ToString("N2")
+                                        </MudText>
+                                    </div>
+                                </div>
+
+                                <div class="watchlist-card-full">
+                                    <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
+                                               StartIcon="@Icons.Material.Filled.Close"
+                                               OnClick="@(() => SquareOffBrokerPositionAsync(bp))">
+                                        Square Off
+                                    </MudButton>
+                                </div>
+                            </div>
+                        }
                     </MudStack>
                 </div>
             }
@@ -583,6 +733,27 @@
     private decimal _liveUnrealizedTick;
     private decimal _liveRealizedTick;
 
+    /// <summary>
+    /// Lightweight view-model for broker-terminal positions that have no local
+    /// Position row (manual trades, carry-forward legs, non-NexusApp orders).
+    /// </summary>
+    private sealed record BrokerPositionVm(
+        string Symbol, decimal Quantity, decimal AvgPrice, decimal LTP, decimal PnL);
+
+    /// <summary>
+    /// Open positions from the broker position book, refreshed every 1s from the
+    /// BrokerPnlTick hub event. Only positions whose symbol does not match any
+    /// local DB position are shown (de-duplicated).
+    /// </summary>
+    private List<BrokerPositionVm> _brokerPositions = new();
+
+    private TradingSignal? FindMatchingSignal(string symbol)
+    {
+        if (string.IsNullOrWhiteSpace(symbol)) return null;
+        return _signals.FirstOrDefault(s => string.Equals(s.Symbol, symbol, StringComparison.OrdinalIgnoreCase))
+            ?? _watchlist.FirstOrDefault(s => string.Equals(s.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static bool IsPaperPosition(NexusApp.Models.Position p) => BookScope.IsPaper(p);
 
     private IEnumerable<NexusApp.Models.Position> ScopedPositions => _pnlMode switch
@@ -592,10 +763,25 @@
         _ => _positions
     };
 
+    /// <summary>
+    /// Broker-only positions that have no matching local DB row. Paper mode
+    /// never shows broker positions; Live and All modes do.
+    /// </summary>
+    private IEnumerable<BrokerPositionVm> BrokerOnlyPositions => _pnlMode switch
+    {
+        PnlMode.Paper => Enumerable.Empty<BrokerPositionVm>(),
+        _ => _brokerPositions.Where(bp =>
+            !_positions.Any(p => p.ClosedAt == null &&
+                string.Equals(p.Symbol, bp.Symbol, StringComparison.OrdinalIgnoreCase)))
+    };
+
     private IEnumerable<NexusApp.Models.Position> DisplayPositions =>
         ScopedPositions.Take(DisplayPositionLimit);
 
-    private int _openPositions => ScopedPositions.Count();
+    private IEnumerable<object> CombinedPositions =>
+        DisplayPositions.Cast<object>().Concat(BrokerOnlyPositions.Cast<object>());
+
+    private int _openPositions => ScopedPositions.Count() + BrokerOnlyPositions.Count();
 
     private int _executedToday => _pnlMode switch
     {
@@ -729,6 +915,15 @@
             _hasBrokerTick = false;
         }
 
+        // Seed broker positions from the cached snapshot so the grid renders
+        // on first load without waiting for the next BrokerPnlTick.
+        if (snapshot.BrokerPositions is { Count: > 0 })
+        {
+            _brokerPositions = snapshot.BrokerPositions
+                .Select(bp => new BrokerPositionVm(bp.Symbol, bp.Quantity, bp.AveragePrice, bp.CurrentPrice, bp.UnrealizedPnL))
+                .ToList();
+        }
+
         _mtmAtIst = snapshot.TimestampUtc.ToIst();
     }
 
@@ -809,6 +1004,9 @@
                         }
 
                         _hasBrokerTick = applied;
+
+                        // Parse broker positions for the Open Positions grid.
+                        ParseBrokerPositions(payload);
                     }
                     else
                     {
@@ -817,10 +1015,45 @@
                         _hasBrokerTick = false;
                         _liveUnrealizedTick = 0m;
                         _liveRealizedTick = 0m;
+                        _brokerPositions = new();
                     }
 
                     // Read as DateTimeOffset: System.Text.Json returns Kind=Local for a
                     // "Z" instant, which would be double-shifted by ToIst().
+                    if (TryGetProp(payload, out var tsProp, "Timestamp", "timestamp") &&
+                        tsProp.TryGetDateTimeOffset(out var tsOffset))
+                        _mtmAtIst = tsOffset.UtcDateTime.ToIst();
+
+                    StateHasChanged();
+                });
+            });
+
+            // BrokerPnlTick fires every 1s (from CmpStreamingService), carrying live
+            // P&L aggregates and broker open positions. This eliminates the 10s
+            // HealthTick cadence as the bottleneck for MTM and grid updates.
+            _hub.On<JsonElement>("BrokerPnlTick", payload =>
+            {
+                if (_disposed)
+                    return;
+
+                _ = InvokeAsync(() =>
+                {
+                    if (payload.ValueKind != JsonValueKind.Object)
+                        return;
+
+                    if (TryGetProp(payload, out var liveUnrealProp, "LiveUnrealized", "liveUnrealized") &&
+                        TryGetDecimal(liveUnrealProp, out var liveUnreal))
+                        _liveUnrealizedTick = liveUnreal;
+
+                    if (TryGetProp(payload, out var liveRealProp, "LiveRealized", "liveRealized") &&
+                        TryGetDecimal(liveRealProp, out var liveReal))
+                        _liveRealizedTick = liveReal;
+
+                    _hasBrokerTick = true;
+
+                    // Parse broker open positions for the grid.
+                    ParseBrokerPositions(payload);
+
                     if (TryGetProp(payload, out var tsProp, "Timestamp", "timestamp") &&
                         tsProp.TryGetDateTimeOffset(out var tsOffset))
                         _mtmAtIst = tsOffset.UtcDateTime.ToIst();
@@ -1234,6 +1467,36 @@
         }
     }
 
+    private async Task SquareOffBrokerPositionAsync(BrokerPositionVm pos)
+    {
+        try
+        {
+            var request = new BrokerOrderRequest
+            {
+                Symbol = pos.Symbol,
+                Quantity = Math.Abs(pos.Quantity),
+                Side = pos.Quantity > 0 ? OrderSide.Sell : OrderSide.Buy,
+                OrderType = OrderType.Market,
+                ProductType = ProductType.Mis,
+                Exchange = NexusApp.Helpers.MarketSegments.ExchangeForTradingSymbol(pos.Symbol)
+            };
+
+            var response = await Broker.PlaceOrderAsync(request);
+            if (response.Success)
+            {
+                Snackbar.Add($"Square-off submitted for {pos.Symbol}.", Severity.Success);
+            }
+            else
+            {
+                Snackbar.Add($"Square-off failed for {pos.Symbol}: {response.ErrorMessage}", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Square-off failed: {ex.Message}", Severity.Error);
+        }
+    }
+
     private async Task SaveAsync(TradingSignal signal)
     {
         await PersistEditedValuesAsync(signal, showSuccess: true);
@@ -1271,6 +1534,55 @@
         _watchlist = _watchlist.Where(s => s.Id != signal.Id).ToList();
         SyncEdits();
         StateHasChanged();
+    }
+
+    /// <summary>
+    /// Extracts the <c>BrokerPositions</c> / <c>Positions</c> array from a hub
+    /// payload and updates <see cref="_brokerPositions"/>.  Called from both
+    /// <c>HealthTick</c> (10s cadence) and <c>BrokerPnlTick</c> (1s cadence).
+    /// </summary>
+    private void ParseBrokerPositions(JsonElement payload)
+    {
+        JsonElement arr;
+        // BrokerPnlTick uses "Positions"/"positions"; HealthTick uses "BrokerPositions"/"brokerPositions".
+        if (!TryGetProp(payload, out arr, "Positions", "positions", "BrokerPositions", "brokerPositions") ||
+            arr.ValueKind != JsonValueKind.Array)
+            return;
+
+        var list = new List<BrokerPositionVm>();
+        foreach (var item in arr.EnumerateArray())
+        {
+            if (!TryGetProp(item, out var symProp, "Symbol", "symbol") ||
+                symProp.ValueKind != JsonValueKind.String)
+                continue;
+
+            var symbol = symProp.GetString();
+            if (string.IsNullOrWhiteSpace(symbol))
+                continue;
+
+            TryGetDecimal(TryGetPropValue(item, "Quantity", "quantity"), out var qty);
+            TryGetDecimal(TryGetPropValue(item, "AvgPrice", "avgPrice"), out var avgPrice);
+            TryGetDecimal(TryGetPropValue(item, "LTP", "ltp"), out var ltp);
+            TryGetDecimal(TryGetPropValue(item, "PnL", "pnL", "pnl"), out var pnl);
+
+            list.Add(new BrokerPositionVm(symbol, qty, avgPrice, ltp, pnl));
+        }
+
+        _brokerPositions = list;
+    }
+
+    /// <summary>
+    /// Helper to extract a property value from a JsonElement, returning <c>default</c>
+    /// when none of the candidate names are found.
+    /// </summary>
+    private static JsonElement TryGetPropValue(JsonElement obj, params string[] names)
+    {
+        for (var i = 0; i < names.Length; i++)
+        {
+            if (obj.TryGetProperty(names[i], out var val))
+                return val;
+        }
+        return default;
     }
 
     public async ValueTask DisposeAsync()
@@ -1537,8 +1849,14 @@
     /// Colors the whole Open Positions row by book (live vs paper) so the two are
     /// distinguishable at a glance on desktop without reading the Book chip text.
     /// </summary>
-    private static string GetPositionRowClass(NexusApp.Models.Position position, int rowNumber) =>
-        BookScope.IsPaper(position) ? "position-row--paper" : "position-row--live";
+    private static string GetPositionRowClass(object positionObj, int rowNumber)
+    {
+        if (positionObj is NexusApp.Models.Position position)
+            return BookScope.IsPaper(position) ? "position-row--paper" : "position-row--live";
+        
+        // Broker position Vm
+        return "position-row--live";
+    }
 
     private string GetCmpBlinkClass(TradingSignal signal)
     {

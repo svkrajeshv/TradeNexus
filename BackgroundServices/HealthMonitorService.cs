@@ -119,6 +119,23 @@ public sealed class HealthMonitorService(
                         tick["LiveUnrealized"] = liveUnrealized;
                         tick["LiveRealized"] = liveRealized;
                         tick["LiveNetPnL"] = liveUnrealized + liveRealized;
+
+                        // Include broker open positions so the Dashboard grid can
+                        // render terminal positions that have no local DB row.
+                        var tracker = scope.ServiceProvider.GetService<BrokerPnlTracker>();
+                        if (tracker is not null)
+                        {
+                            tick["BrokerPositions"] = tracker.GetOpenPositions()
+                                .Select(bp => new
+                                {
+                                    bp.Symbol,
+                                    bp.Quantity,
+                                    AvgPrice = bp.AveragePrice,
+                                    LTP = bp.CurrentPrice,
+                                    PnL = bp.UnrealizedPnL
+                                })
+                                .ToList();
+                        }
                     }
                     else
                     {
@@ -134,12 +151,14 @@ public sealed class HealthMonitorService(
 
                 // Cache before broadcasting so a page that renders between two ticks
                 // can pick the figures up immediately instead of waiting for the next one.
+                var cachedTracker = scope.ServiceProvider.GetService<BrokerPnlTracker>();
                 _healthSnapshots.Latest = new NexusApp.Services.HealthSnapshot(
                     broker.IsConnected,
                     pnl is { } snap && snap.BrokerAvailable,
                     pnl?.BrokerUnrealized ?? 0m,
                     pnl?.BrokerRealized ?? 0m,
-                    DateTime.UtcNow);
+                    DateTime.UtcNow,
+                    cachedTracker?.GetOpenPositions());
 
                 await _hub.Clients.All.SendAsync("HealthTick", tick, stoppingToken);
 
@@ -355,9 +374,10 @@ public sealed class CmpStreamingService(
     IServiceProvider serviceProvider,
     IHubContext<TradingHub> hub,
     AngelOneWebSocketClient ws,
-    AngelInstrumentMaster instrumentMaster) : BackgroundService
+    AngelInstrumentMaster instrumentMaster,
+    BrokerPnlTracker brokerPnlTracker) : BackgroundService
 {
-    private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan Cadence = TimeSpan.FromMilliseconds(250);
 
     private readonly ILogger<CmpStreamingService> _logger = logger;
     private readonly IServiceProvider _serviceProvider = serviceProvider;
@@ -566,6 +586,33 @@ public sealed class CmpStreamingService(
                 if (ticks.Count > 0)
                 {
                     await _hub.Clients.All.SendAsync("CmpTick", ticks, stoppingToken);
+                }
+
+                // Push live broker P&L and open positions on every 1s CMP tick so the
+                // Dashboard stat cards and Open Positions grid update continuously,
+                // without waiting for the 10s HealthTick cadence.
+                var livePnl = brokerPnlTracker.TryGetLivePnl();
+                if (livePnl is { } pnl)
+                {
+                    var brokerOpenPositions = brokerPnlTracker.GetOpenPositions()
+                        .Select(p => new
+                        {
+                            p.Symbol,
+                            p.Quantity,
+                            AvgPrice = p.AveragePrice,
+                            LTP = p.CurrentPrice,
+                            PnL = p.UnrealizedPnL
+                        })
+                        .ToList();
+
+                    await _hub.Clients.All.SendAsync("BrokerPnlTick", new
+                    {
+                        LiveUnrealized = pnl.Unrealized,
+                        LiveRealized = pnl.Realized,
+                        OpenCount = pnl.OpenCount,
+                        Positions = brokerOpenPositions,
+                        Timestamp = DateTime.UtcNow
+                    }, stoppingToken);
                 }
 
                 // --- Entry Price Crossing Trigger ---
