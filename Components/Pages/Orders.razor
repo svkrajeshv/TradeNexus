@@ -3,12 +3,17 @@
 @using Microsoft.EntityFrameworkCore
 @using MudBlazor
 @using NexusApp.Data
+@using NexusApp.Helpers
 @using NexusApp.Interfaces
 @using NexusApp.Models
+@using System.Globalization
+@using System.Text
 @inject IDbContextFactory<TradingDbContext> DbFactory
 @inject IBroker Broker
 @inject ISnackbar Snackbar
 @inject NavigationManager Nav
+@inject IJSRuntime JS
+@inject NexusApp.Services.HubConnectionFactory HubFactory
 @implements IAsyncDisposable
 
 <PageTitle>NexusApp - Orders</PageTitle>
@@ -31,6 +36,13 @@
     </MudSelect>
     <MudButton OnClick="LoadAsync" Color="Color.Primary" Variant="Variant.Filled">Refresh</MudButton>
     <MudSpacer />
+    <MudButton StartIcon="@Icons.Material.Filled.Download"
+               OnClick="DownloadOrdersAsync"
+               Color="Color.Primary"
+               Variant="Variant.Outlined"
+               Disabled="_downloading || _orders.Count == 0">
+        @(_downloading ? "Preparing..." : $"Download ({_orders.Count})")
+    </MudButton>
     <MudButton StartIcon="@Icons.Material.Filled.CancelPresentation"
                OnClick="CancelAllOpenAsync"
                Color="Color.Error"
@@ -52,9 +64,8 @@
             <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnQty)">Qty @SortIndicator(_sortColumnQty)</MudButton></MudTh>
             <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnPrice)">Price @SortIndicator(_sortColumnPrice)</MudButton></MudTh>
             <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnFilled)">Filled @SortIndicator(_sortColumnFilled)</MudButton></MudTh>
-            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnStatus)">Status @SortIndicator(_sortColumnStatus)</MudButton></MudTh>
             <MudTh Style="min-width:200px; max-width:260px;">Remarks</MudTh>
-            <MudTh>Actions</MudTh>
+            <MudTh><MudButton Variant="Variant.Text" Size="Size.Small" Class="pa-0 text-none" OnClick="() => ToggleSort(_sortColumnStatus)">Status @SortIndicator(_sortColumnStatus)</MudButton></MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd Style="white-space:nowrap;">@context.CreatedAt.ToIstString("hh:mm:ss tt")</MudTd>
@@ -83,9 +94,6 @@
             <MudTd>@context.Quantity</MudTd>
             <MudTd>@context.Price</MudTd>
             <MudTd>@(context.ExecutedPrice?.ToString() ?? "-")</MudTd>
-            <MudTd>
-                <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
-            </MudTd>
             <MudTd Style="min-width:200px; max-width:260px;">
                 @if (string.IsNullOrWhiteSpace(context.ErrorMessage))
                 {
@@ -103,15 +111,7 @@
                 }
             </MudTd>
             <MudTd>
-                @if (IsCancellable(context))
-                {
-                    <MudButton Size="Size.Small"
-                               Variant="Variant.Text"
-                               Color="Color.Error"
-                               OnClick="@(() => CancelOneAsync(context))">
-                        Cancel
-                    </MudButton>
-                }
+                <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
             </MudTd>
         </RowTemplate>
     </MudTable>
@@ -122,6 +122,7 @@
     private string _filter = "all";
     private List<Order> _orders = new();
     private bool _cancelling;
+    private bool _downloading;
     private HubConnection? _hub;
 
     private const string _sortColumnTime = "time";
@@ -194,10 +195,7 @@
         await LoadAsync();
         try
         {
-            _hub = new HubConnectionBuilder()
-                .WithUrl(Nav.ToAbsoluteUri("/tradingHub"))
-                .WithAutomaticReconnect()
-                .Build();
+            _hub = HubFactory.Create(Nav);
             _hub.On("OrderStatusChanged", async () =>
             {
                 await InvokeAsync(async () =>
@@ -258,6 +256,146 @@
     {
         _filter = value;
         await LoadAsync();
+    }
+
+    /// <summary>
+    /// Exports the currently filtered/sorted orders as a CSV, enriching each row with
+    /// the originating signal and the matching position's entry/exit timings.
+    /// </summary>
+    private async Task DownloadOrdersAsync()
+    {
+        if (_downloading) return;
+        _downloading = true;
+
+        try
+        {
+            var orders = SortedOrders.ToList();
+            if (orders.Count == 0)
+            {
+                Snackbar.Add("Nothing to download.", Severity.Info);
+                return;
+            }
+
+            var positions = await LoadPositionsForAsync(orders);
+            var csv = BuildCsv(orders, positions);
+
+            var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(csv)).ToArray();
+            var fileName = $"orders-{DateTimeExtensions.IstNow():yyyyMMdd-HHmmss}.csv";
+
+            await JS.InvokeVoidAsync("NexusApp.downloadFile", fileName, "text/csv", Convert.ToBase64String(bytes));
+            Snackbar.Add($"Downloaded {orders.Count} orders.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Download failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _downloading = false;
+        }
+    }
+
+    /// <summary>
+    /// Positions are keyed by signal + account, so a single lookup covers every exported
+    /// order and gives us the real entry (opened) and exit (closed) timings.
+    /// </summary>
+    private async Task<Dictionary<(int SignalId, int TradingAccountId), NexusApp.Models.Position>> LoadPositionsForAsync(List<Order> orders)
+    {
+        var signalIds = orders.Select(o => o.SignalId).Distinct().ToList();
+
+        using var db = await DbFactory.CreateDbContextAsync();
+        var positions = await db.Positions.AsNoTracking()
+            .Where(p => signalIds.Contains(p.SignalId))
+            .ToListAsync();
+
+        return positions
+            .GroupBy(p => (p.SignalId, p.TradingAccountId))
+            .ToDictionary(g => g.Key, g => g.OrderBy(p => p.OpenedAt).First());
+    }
+
+    private static string BuildCsv(List<Order> orders, Dictionary<(int, int), NexusApp.Models.Position> positions)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(string.Join(",",
+            "Order Id", "Order Time (IST)", "Executed At (IST)", "Status", "Account", "Broker", "Client Id",
+            "Broker Order Id", "Symbol", "Side", "Order Type", "Product", "Quantity", "Price", "Executed Price",
+            "Filled Quantity", "Remarks",
+            "Signal Id", "Channel", "Signal Action", "Index", "Strike", "Option Type", "Signal Entry Price",
+            "Signal Stop Loss", "Signal Targets", "Expiry Date", "Signal Status", "Signal Symbol",
+            "Telegram Time (IST)", "Received (IST)", "Processed (IST)", "Signal Delay (ms)",
+            "Entry Time (IST)", "Entry Price", "Exit Time (IST)", "Exit Price", "Position Quantity",
+            "Position Stop Loss", "Position Targets", "Realized PnL"));
+
+        foreach (var o in orders)
+        {
+            positions.TryGetValue((o.SignalId, o.TradingAccountId), out var position);
+            var signal = o.Signal;
+
+            sb.AppendLine(string.Join(",",
+                Csv(o.Id),
+                Csv(o.CreatedAt.ToIstString()),
+                Csv(o.ExecutedAt.ToIstString()),
+                Csv(o.Status),
+                Csv(o.TradingAccount?.Name),
+                Csv(o.TradingAccount?.BrokerType),
+                Csv(o.TradingAccount?.ClientId),
+                Csv(o.BrokerId),
+                Csv(o.Symbol),
+                Csv(o.Side),
+                Csv(o.OrderType),
+                Csv(o.ProductType),
+                Csv(o.Quantity),
+                Csv(o.Price),
+                Csv(o.ExecutedPrice),
+                Csv(o.FilledQuantity),
+                Csv(o.ErrorMessage),
+
+                Csv(o.SignalId),
+                Csv(signal?.ChannelName),
+                Csv(signal?.Action),
+                Csv(signal?.Index),
+                Csv(signal?.Strike),
+                Csv(signal?.OptionType),
+                Csv(signal?.EntryPrice),
+                Csv(signal?.StopLoss),
+                Csv(signal is null ? null : string.Join(" | ", signal.Targets)),
+                Csv(signal?.ExpiryDate.ToIstString("yyyy-MM-dd")),
+                Csv(signal?.Status),
+                Csv(signal?.Symbol),
+                Csv(signal?.TelegramTimestamp.ToIstString()),
+                Csv(signal?.ReceivedTimestamp.ToIstString()),
+                Csv(signal?.ProcessedTimestamp.ToIstString()),
+                Csv(signal?.SignalDelayMs),
+
+                Csv(position?.OpenedAt.ToIstString()),
+                Csv(position?.EntryPrice),
+                Csv(position?.ClosedAt.ToIstString()),
+                Csv(position?.ClosingPrice),
+                Csv(position?.Quantity),
+                Csv(position?.StopLoss),
+                Csv(position is null ? null : string.Join(" | ", position.Targets)),
+                Csv(position?.RealizedPnL)));
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Escapes a value for CSV: invariant formatting plus quoting when the text
+    /// contains a separator, quote or newline.
+    /// </summary>
+    private static string Csv(object? value)
+    {
+        if (value is null) return string.Empty;
+
+        var text = value is IFormattable formattable
+            ? formattable.ToString(null, CultureInfo.InvariantCulture)
+            : value.ToString() ?? string.Empty;
+
+        if (text.IndexOfAny([',', '"', '\n', '\r']) < 0)
+            return text;
+
+        return $"\"{text.Replace("\"", "\"\"")}\"";
     }
 
     private async Task CancelOneAsync(Order order)

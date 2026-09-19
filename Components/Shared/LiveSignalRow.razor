@@ -1,0 +1,117 @@
+@* 
+    Renders a single row of the Dashboard's Live Signals grid.
+    Extracted from Dashboard.razor's MudTable RowTemplate so each row can gate its
+    own re-render via ShouldRender(): the parent grid re-renders on every CmpTick
+    (1s) and HealthTick (10s) hub event, but most rows have nothing to redraw on a
+    given tick (their CMP/delay/staleness/status did not change). Comparing the
+    handful of primitive values actually displayed lets ShouldRender skip the
+    (relatively expensive) MudChip/MudButton render tree diff for unaffected rows,
+    instead of the whole table doing that work on every row every tick.
+*@
+@using NexusApp.Models
+
+<MudTd DataLabel="Time">@Signal.ReceivedTimestamp.ToIstString("hh:mm:ss tt")</MudTd>
+<MudTd DataLabel="Channel">
+    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+        @(string.IsNullOrWhiteSpace(Signal.ChannelName) ? "-" : Signal.ChannelName)
+    </MudChip>
+</MudTd>
+<MudTd DataLabel="Signal">
+    @Signal.Action @Signal.Index @FormatStrike(Signal.Strike) @Signal.OptionType.ToString().ToUpper()
+</MudTd>
+<MudTd DataLabel="Signal Values">
+    <MudStack Row="true" Spacing="1" Wrap="Wrap.Wrap">
+        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">Entry: @Signal.EntryPrice.ToString("0.##")</MudChip>
+        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">SL: @Signal.StopLoss.ToString("0.##")</MudChip>
+        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">T: @string.Join(" / ", Signal.Targets.Select(t => t.ToString("0.##")))</MudChip>
+    </MudStack>
+</MudTd>
+<MudTd DataLabel="CMP">
+    <MudChip T="string"
+             Color="@(HasCrossed ? Color.Success : Color.Info)"
+             Variant="Variant.Filled"
+             Size="Size.Small"
+             Class="@BlinkClass">
+        CMP: @CmpDisplay
+    </MudChip>
+</MudTd>
+<MudTd DataLabel="Delay">
+    @DelayText
+    @if (Staleness is { } s)
+    {
+        <br />
+        <MudText Typo="Typo.caption" Color="s.Color" Style="white-space:nowrap;">
+            &#9201; @s.Text
+        </MudText>
+    }
+</MudTd>
+<MudTd DataLabel="Status">
+    @if (string.IsNullOrWhiteSpace(StatusReason))
+    {
+        <MudChip T="string" Size="Size.Small" Color="@StatusColor">@Signal.Status</MudChip>
+    }
+    else
+    {
+        <MudTooltip Text="@StatusReason" Placement="Placement.Top" Arrow="true">
+            <MudChip T="string" Size="Size.Small" Color="@StatusColor" Style="cursor:help;">@Signal.Status</MudChip>
+        </MudTooltip>
+    }
+</MudTd>
+<MudTd DataLabel="Actions">
+    @if (IsEditable)
+    {
+        <MudStack Row="true" Spacing="1" Wrap="Wrap.Wrap">
+            <MudButton Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined"
+                       Style="min-width:56px" OnClick="@(() => OnSave.InvokeAsync(Signal))">Save</MudButton>
+            <MudButton Size="Size.Small" Color="Color.Success" Variant="Variant.Filled"
+                       Style="min-width:52px" OnClick="@(() => OnBuy.InvokeAsync(Signal))">BUY</MudButton>
+            <MudButton Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined"
+                       Style="min-width:64px" OnClick="@(() => OnIgnore.InvokeAsync(Signal))">Ignore</MudButton>
+        </MudStack>
+    }
+    else if (IsPendingAutoExecution)
+    {
+        <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Outlined"
+                   Style="min-width:64px" OnClick="@(() => OnCancelPendingAuto.InvokeAsync(Signal))">Cancel</MudButton>
+    }
+</MudTd>
+
+@code {
+    [Parameter, EditorRequired] public TradingSignal Signal { get; set; } = null!;
+    [Parameter] public string CmpDisplay { get; set; } = "—";
+    [Parameter] public bool HasCrossed { get; set; }
+    [Parameter] public string BlinkClass { get; set; } = string.Empty;
+    [Parameter] public string DelayText { get; set; } = "-";
+    [Parameter] public (string Text, Color Color)? Staleness { get; set; }
+    [Parameter] public Color StatusColor { get; set; }
+    /// <summary>Optional explanation (e.g. broker rejection message) shown as a tooltip on the status chip.</summary>
+    [Parameter] public string? StatusReason { get; set; }
+    [Parameter] public bool IsEditable { get; set; }
+    [Parameter] public bool IsPendingAutoExecution { get; set; }
+
+    [Parameter] public EventCallback<TradingSignal> OnSave { get; set; }
+    [Parameter] public EventCallback<TradingSignal> OnBuy { get; set; }
+    [Parameter] public EventCallback<TradingSignal> OnIgnore { get; set; }
+    [Parameter] public EventCallback<TradingSignal> OnCancelPendingAuto { get; set; }
+
+    // Snapshot of everything actually rendered above, so a parameter refresh that
+    // changes none of these (e.g. an unrelated row's CmpTick) can be skipped.
+    private (int Id, SignalStatus Status, string Cmp, bool Crossed, string Blink,
+        string Delay, string? StaleText, Color StaleColor, bool Editable, bool PendingAuto, string? Reason) _last;
+
+    protected override bool ShouldRender()
+    {
+        var current = (
+            Signal.Id, Signal.Status, CmpDisplay, HasCrossed, BlinkClass,
+            DelayText, Staleness?.Text, Staleness?.Color ?? default, IsEditable, IsPendingAutoExecution, StatusReason);
+
+        if (current == _last)
+            return false;
+
+        _last = current;
+        return true;
+    }
+
+    private static string FormatStrike(decimal strike) =>
+        strike.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+}

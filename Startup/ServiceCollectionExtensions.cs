@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using MudBlazor.Services;
 using NexusApp.BackgroundServices;
@@ -55,12 +56,38 @@ internal static class ServiceCollectionExtensions
     private static void AddPersistence(this IServiceCollection services, IConfiguration configuration)
     {
         var connectionString = configuration.GetConnectionString("DefaultConnection") ?? "Data Source=trading.db";
+        connectionString = ResolvePersistenceConnectionString(connectionString);
+
         var busyTimeoutInterceptor = new SqliteBusyTimeoutInterceptor();
         services.AddDbContext<TradingDbContext>(options =>
             options.UseSqlite(connectionString).AddInterceptors(busyTimeoutInterceptor));
         services.AddDbContextFactory<TradingDbContext>(
             options => options.UseSqlite(connectionString).AddInterceptors(busyTimeoutInterceptor),
             lifetime: ServiceLifetime.Scoped);
+    }
+
+    private static string ResolvePersistenceConnectionString(string connectionString)
+    {
+        var sqliteBuilder = new SqliteConnectionStringBuilder(connectionString);
+
+        if (string.IsNullOrWhiteSpace(sqliteBuilder.DataSource) || Path.IsPathRooted(sqliteBuilder.DataSource))
+        {
+            return connectionString;
+        }
+
+        var appServiceHome = Environment.GetEnvironmentVariable("HOME");
+        var runningOnAzureAppService = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID"))
+            && !string.IsNullOrWhiteSpace(appServiceHome);
+
+        if (!runningOnAzureAppService)
+        {
+            return connectionString;
+        }
+
+        var persistentDataFolder = Path.Combine(appServiceHome!, "data");
+        Directory.CreateDirectory(persistentDataFolder);
+        sqliteBuilder.DataSource = Path.Combine(persistentDataFolder, sqliteBuilder.DataSource);
+        return sqliteBuilder.ToString();
     }
 
     private static void AddAppAuthentication(this IServiceCollection services)
@@ -89,19 +116,26 @@ internal static class ServiceCollectionExtensions
 
     private static void AddDomainServices(this IServiceCollection services)
     {
+        services.AddSingleton<HubConnectionFactory>();
         services.AddScoped<ISettingsService, SettingsService>();
+        services.AddScoped<IIndexRiskProfileService, IndexRiskProfileService>();
         services.AddScoped<DataCleanupService>();
         services.AddScoped<TradeHistoryService>();
+        services.AddScoped<PositionAuditService>();
         services.AddScoped<ITradingAccountService, TradingAccountService>();
         services.AddScoped<TradingSignalService>();
         services.AddScoped<ISignalParser, SignalParser>();
         // Channel-aware signal parser strategies (highest priority wins).
         services.AddScoped<SignalParser>();
         services.AddScoped<IChannelSignalParser, SignalParser>();
-        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.AbcBtstSignalParser>();
-        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.IntradayNiftyParser>();
-        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.TradeWithPihuParser>();
-        services.AddScoped<IChannelSignalParser, NexusApp.Parser.Channels.TradeWithMohitAgrawalParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.AbcBtstSignalParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.IntradayNiftyParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.TradeWithPihuParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.TradeWithMohitAgrawalParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.BankniftyExpressParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.VipGroupParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.GujaratiTraderParser>();
+        services.AddScoped<IChannelSignalParser, Parser.Channels.McxSignalParser>();
         services.AddScoped<SignalParserResolver>();
         services.AddScoped<RiskManager>();
         services.AddScoped<PaperTradingEngine>();
@@ -148,20 +182,20 @@ internal static class ServiceCollectionExtensions
             var httpFactory = sp.GetRequiredService<IHttpClientFactory>();
             var apiUrl = configuration[$"{AliceBlueClientName}:ApiUrl"]
                 ?? "https://ant.aliceblueonline.com/rest/AliceBlueAPIService";
-            return new NexusApp.Brokers.AliceBlue.AliceBlueApiClient(
+            return new Brokers.AliceBlue.AliceBlueApiClient(
                 httpFactory.CreateClient(AliceBlueClientName),
-                sp.GetRequiredService<ILogger<NexusApp.Brokers.AliceBlue.AliceBlueApiClient>>(),
+                sp.GetRequiredService<ILogger<Brokers.AliceBlue.AliceBlueApiClient>>(),
                 apiUrl);
         });
-        services.AddSingleton<NexusApp.Brokers.AliceBlue.AliceBlueContractMaster>();
-        services.AddSingleton<NexusApp.Brokers.AliceBlue.AliceBlueBroker>(sp => new NexusApp.Brokers.AliceBlue.AliceBlueBroker(
-            sp.GetRequiredService<NexusApp.Brokers.AliceBlue.AliceBlueApiClient>(),
-            sp.GetRequiredService<ILogger<NexusApp.Brokers.AliceBlue.AliceBlueBroker>>(),
-            sp.GetRequiredService<NexusApp.Brokers.AliceBlue.AliceBlueContractMaster>()));
-        services.AddKeyedSingleton<IBroker, NexusApp.Brokers.AliceBlue.AliceBlueBroker>(
-            AliceBlueClientName, (sp, key) => sp.GetRequiredService<NexusApp.Brokers.AliceBlue.AliceBlueBroker>());
+        services.AddSingleton<Brokers.AliceBlue.AliceBlueContractMaster>();
+        services.AddSingleton<Brokers.AliceBlue.AliceBlueBroker>(sp => new Brokers.AliceBlue.AliceBlueBroker(
+            sp.GetRequiredService<Brokers.AliceBlue.AliceBlueApiClient>(),
+            sp.GetRequiredService<ILogger<Brokers.AliceBlue.AliceBlueBroker>>(),
+            sp.GetRequiredService<Brokers.AliceBlue.AliceBlueContractMaster>()));
+        services.AddKeyedSingleton<IBroker, Brokers.AliceBlue.AliceBlueBroker>(
+            AliceBlueClientName, (sp, key) => sp.GetRequiredService<Brokers.AliceBlue.AliceBlueBroker>());
 
-        services.AddSingleton<IBroker, NexusApp.Brokers.RoutingBroker>();
+        services.AddSingleton<IBroker, Brokers.RoutingBroker>();
     }
 
     private static void AddHostedServices(this IServiceCollection services)
@@ -171,6 +205,10 @@ internal static class ServiceCollectionExtensions
         services.AddSingleton<TelegramManager>();
         services.AddHostedService<TelegramListenerService>();
         services.AddHostedService<BrokerAutoConnectService>();
+        services.AddSingleton<BrokerPnlTracker>();
+        services.AddHostedService(sp => sp.GetRequiredService<BrokerPnlTracker>());
+        services.AddSingleton<HealthSnapshotCache>();
+        services.AddSingleton<McxToggle>();
         services.AddHostedService<HealthMonitorService>();
         services.AddHostedService<CmpStreamingService>();
         services.AddHostedService<OrderSyncService>();

@@ -16,11 +16,12 @@ namespace NexusApp.Parser.Channels;
 /// (DefaultTargetPoints, default 20; DefaultStopLossPoints, default 50) instead of
 /// failing to parse the signal.
 /// </summary>
-public class TradeWithPihuParser(ILogger<TradeWithPihuParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
+public partial class TradeWithPihuParser(ILogger<TradeWithPihuParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
 {
     // Handles "Buy near 83", "Buy around 83", "Buy @ 83" — the base only handles
     // the "ABOVE" keyword and the plain "BUY NNN" form.
-    private const string NearPricePattern = @"(?:NEAR|AROUND|@)[^\d]*?(\d+(?:\.\d+)?)";
+    [GeneratedRegex(@"(?:NEAR|AROUND|@)[^\d]*?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase)]
+    private static partial Regex NearPriceRegex();
 
     public override int Priority => 10;
 
@@ -43,7 +44,7 @@ public class TradeWithPihuParser(ILogger<TradeWithPihuParser> logger, IServiceSc
     {
         if (base.ParseEntryPrice(message, signal)) return true;
 
-        var match = Regex.Match(message, NearPricePattern, RegexOptions.IgnoreCase);
+        var match = NearPriceRegex().Match(message);
         if (match.Success && decimal.TryParse(match.Groups[1].Value, out var price) && price > 0)
         {
             signal.EntryPrice = price;

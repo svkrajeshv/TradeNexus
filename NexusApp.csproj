@@ -1,39 +1,61 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
-    <!-- Faster cold start: quick JIT (incl. loops) so startup isn't blocked by full optimization. -->
-    <TieredCompilation>true</TieredCompilation>
-    <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
-    <TieredCompilationQuickJitForLoops>true</TieredCompilationQuickJitForLoops>
-  </PropertyGroup>
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+		<TieredCompilation>true</TieredCompilation>
+		<TieredCompilationQuickJit>true</TieredCompilationQuickJit>
+		<TieredCompilationQuickJitForLoops>true</TieredCompilationQuickJitForLoops>
+	</PropertyGroup>
+	<PropertyGroup Condition="'$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' != ''">
+		<PublishReadyToRun>true</PublishReadyToRun>
+	</PropertyGroup>
 
-  <!-- Release publish only, AND only when a RuntimeIdentifier is specified.
-       R2R requires a RID; enabling it for a RID-less (framework-dependent) publish
-       fails the build, and a mismatched RID crashes the host on startup (503).
-       This condition keeps normal framework-dependent deploys unaffected. -->
-  <PropertyGroup Condition="'$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' != ''">
-    <PublishReadyToRun>true</PublishReadyToRun>
-  </PropertyGroup>
+	<ItemGroup>
+		<Content Remove="Logs/**" />
+		<None Remove="Logs/**" />
+		<Compile Remove="Logs/**" />
+		<EmbeddedResource Remove="Logs/**" />
+		<Watch Remove="Logs/**" />
+		<Content Remove="artifacts/**" />
+		<None Remove="artifacts/**" />
+		<Compile Remove="artifacts/**" />
+		<EmbeddedResource Remove="artifacts/**" />
+		<Watch Remove="artifacts/**" />
+	</ItemGroup>
+	<Target Name="RemovePublishedLogs" AfterTargets="Publish">
+		<ItemGroup>
+			<PublishedLogFiles Include="$(PublishDir)Logs/**/*" />
+		</ItemGroup>
+		<Delete Files="@(PublishedLogFiles)" ContinueOnError="true" />
+		<RemoveDir Directories="$(PublishDir)Logs" ContinueOnError="true" />
+		<Message Importance="high" Text="Cleared log files from publish output: $(PublishDir)Logs" />
+	</Target>
 
-  <ItemGroup>
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.9">
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-      <PrivateAssets>all</PrivateAssets>
-    </PackageReference>
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
-    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.0" />
-    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
-    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.0" />
-    <PackageReference Include="MudBlazor" Version="9.7.0" />
-    <PackageReference Include="Serilog" Version="4.4.0" />
-    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
-    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
-    <PackageReference Include="WTelegramClient" Version="4.4.7" />
-  </ItemGroup>
+	<ItemGroup>
+		<None Update="trading.db;trading.db-shm;trading.db-wal;telegram.session">
+			<CopyToOutputDirectory>Never</CopyToOutputDirectory>
+			<CopyToPublishDirectory>Never</CopyToPublishDirectory>
+		</None>
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.9">
+			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+			<PrivateAssets>all</PrivateAssets>
+		</PackageReference>
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
+		<PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.0" />
+		<PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+		<PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.0" />
+		<PackageReference Include="MudBlazor" Version="9.7.0" />
+		<PackageReference Include="Serilog" Version="4.4.0" />
+		<PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+		<PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+		<PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+		<PackageReference Include="WTelegramClient" Version="4.4.7" />
+	</ItemGroup>
 
 </Project>

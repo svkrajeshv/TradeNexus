@@ -1,8 +1,8 @@
-using System.Globalization;
-using Microsoft.Extensions.Logging;
 using NexusApp.Brokers.AngelOne;
+using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Models;
+using System.Globalization;
 
 namespace NexusApp.TradingEngine;
 
@@ -14,16 +14,6 @@ namespace NexusApp.TradingEngine;
 /// </summary>
 public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger, AngelInstrumentMaster? instrumentMaster = null)
 {
-    private static readonly HashSet<string> NseIndices = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"
-    };
-
-    private static readonly HashSet<string> BseIndices = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "SENSEX", "BANKEX"
-    };
-
     private static readonly string[] MonthAbbrev =
     [
         "JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"
@@ -44,6 +34,24 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
     /// </summary>
     public async Task<ResolvedSymbol> ResolveAsync(ParsedSignal signal, DateTime? expiryOverride = null)
     {
+        // Commodity channels quote a bare month ("EXPIRY - SEP"), not a series date:
+        // MCX options are monthly contracts whose expiry day differs per commodity, so
+        // the parsed date is only a month marker. Map it onto the contract actually
+        // listed in that month; when that month has none (or the master is unavailable)
+        // fall back to the nearest listed expiry, which is the previous behaviour.
+        if (MarketSegments.IsCommodity(signal.Index) && expiryOverride is not null)
+        {
+            var requested = expiryOverride.Value;
+            expiryOverride = await ResolveCommodityMonthExpiryAsync(signal.Index, requested);
+
+            if (expiryOverride is null)
+            {
+                _logger.LogInformation(
+                    "No listed {Index} contract for {Month:MMM yyyy}; falling back to the nearest listed expiry.",
+                    signal.Index, requested);
+            }
+        }
+
         var expiry = expiryOverride ?? await ResolveNearestExpiryAsync(signal.Index);
         var candidates = BuildCandidates(signal.Index, signal.Strike, signal.OptionType, expiry);
         var optionType = signal.OptionType == OptionType.Ce ? "CE" : "PE";
@@ -111,7 +119,7 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
                         SymbolToken = instrument.SymbolToken,
                         LotSize = instrument.LotSize > 0 ? instrument.LotSize : DefaultLotSize(signal.Index),
                         Token = instrument.Token,
-                        Exchange = instrument.ExchangeSegment,
+                        Exchange = NormalizeExchange(signal.Index, instrument.ExchangeSegment),
                         Expiry = expiry,
                         Source = SymbolSource.Broker
                     };
@@ -147,7 +155,7 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
             try
             {
                 await _instrumentMaster.EnsureLoadedAsync();
-                var listed = _instrumentMaster.NearestExpiry(index, DateTime.Today);
+                var listed = _instrumentMaster.NearestExpiry(index, DateTimeExtensions.IstToday());
                 if (listed is not null)
                 {
                     _logger.LogInformation(
@@ -168,7 +176,53 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
             }
         }
 
-        return NearestWeeklyExpiry(DateTime.Today, index);
+        // Commodity expiries are irregular and vary per commodity (CRUDEOIL ~19th,
+        // GOLD ~5th), so the equity weekday heuristic below would silently produce a
+        // date that does not correspond to any listed contract - and the caller would
+        // then book a wrong or non-existent series. Fail loudly instead.
+        if (MarketSegments.IsCommodity(index))
+        {
+            _logger.LogError(
+                "Cannot resolve expiry for commodity {Index}: no listed contract in the instrument master, " +
+                "and the weekday expiry heuristic does not apply to MCX.", index);
+            throw new InvalidOperationException(
+                $"Unable to resolve an MCX expiry for '{index}'. The instrument master has no listed contract for it.");
+        }
+
+        return NearestWeeklyExpiry(DateTimeExtensions.IstToday(), index);
+    }
+
+    /// <summary>
+    /// Maps a commodity signal's month marker ("EXPIRY - SEP") onto the contract
+    /// actually listed for that month in the instrument master. Returns <c>null</c>
+    /// when the master is unavailable or that month has no listed contract, so the
+    /// caller can fall back to the nearest listed expiry.
+    /// </summary>
+    private async Task<DateTime?> ResolveCommodityMonthExpiryAsync(string index, DateTime monthMarker)
+    {
+        if (_instrumentMaster is null)
+            return null;
+
+        try
+        {
+            await _instrumentMaster.EnsureLoadedAsync();
+            var listed = _instrumentMaster.ExpiryInMonth(index, monthMarker.Year, monthMarker.Month);
+            if (listed is not null)
+            {
+                _logger.LogInformation(
+                    "Monthly expiry for {Index} {Month:MMM yyyy} resolved from instrument master: {Expiry:yyyy-MM-dd}",
+                    index, monthMarker, listed.Value);
+            }
+
+            return listed;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to resolve the {Month:MMM yyyy} expiry for {Index} from the instrument master.",
+                monthMarker, index);
+            return null;
+        }
     }
 
     private static ResolvedSymbol ToResolved(AngelInstrumentMaster.MasterEntry entry, DateTime expiry, SymbolSource source)
@@ -180,7 +234,7 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
             SymbolToken = entry.Token,
             LotSize = entry.LotSize > 0 ? entry.LotSize : DefaultLotSize(entry.Name),
             Token = tokenInt,
-            Exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? "NFO" : entry.ExchangeSegment,
+            Exchange = NormalizeExchange(entry.Name, entry.ExchangeSegment),
             Expiry = entry.ExpiryDate == default ? expiry : entry.ExpiryDate,
             Source = source
         };
@@ -207,21 +261,29 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
         var strikeStr = strike.ToString("0", CultureInfo.InvariantCulture);
         var opt = type == OptionType.Ce ? "CE" : "PE";
 
-        var candidates = new List<string>(4)
-        {
-            $"{idx}{dd}{mon}{yy}{strikeStr}{opt}", // e.g. BANKNIFTY28JUL2657000CE
-            $"{idx}{yy}{mon}{strikeStr}{opt}",      // e.g. BANKNIFTY26JUL57000PE
-            $"{idx}{dd}{mon}{strikeStr}{opt}",      // occasional variant
-            BuildStandardSymbol(index, strike, type, expiry)
-        };
+        var candidates = MarketSegments.IsCommodity(idx)
+            ?
+            [
+                // MCX lists commodity options as {UNDERLYING}{dd}{MMM}{yy}{strike}{CE|PE}
+                // e.g. CRUDEOIL17NOV265900CE, with a monthly variant also in circulation.
+                $"{idx}{dd}{mon}{yy}{strikeStr}{opt}",
+                $"{idx}{mon}{yy}{strikeStr}{opt}",
+                $"{idx}{dd}{mon}{strikeStr}{opt}",
+                BuildStandardSymbol(index, strike, type, expiry)
+            ]
+            : new List<string>(4)
+            {
+                $"{idx}{dd}{mon}{yy}{strikeStr}{opt}", // e.g. BANKNIFTY28JUL2657000CE
+                $"{idx}{yy}{mon}{strikeStr}{opt}",      // e.g. BANKNIFTY26JUL57000PE
+                $"{idx}{dd}{mon}{strikeStr}{opt}",      // occasional variant
+                BuildStandardSymbol(index, strike, type, expiry)
+            };
 
         var dedup = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var ordered = new List<string>(candidates.Count);
-        foreach (var c in candidates)
-        {
-            if (dedup.Add(c))
-                ordered.Add(c);
-        }
+        ordered.AddRange(from c in candidates
+                         where dedup.Add(c)
+                         select c);
         return ordered;
     }
 
@@ -248,7 +310,7 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
     ///   • NSE indices (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY) → Tuesday
     /// </summary>
     public static DayOfWeek ExpiryWeekdayFor(string index) =>
-        BseIndices.Contains(index) ? DayOfWeek.Thursday : DayOfWeek.Tuesday;
+        MarketSegments.IsBseUnderlying(index) ? DayOfWeek.Thursday : DayOfWeek.Tuesday;
 
     /// <summary>
     /// Returns the correct nearest expiry for the index based on the current
@@ -284,7 +346,7 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
     /// <summary>Returns the last occurrence of <paramref name="weekday"/> in the given month.</summary>
     private static DateTime LastWeekdayOfMonth(int year, int month, DayOfWeek weekday)
     {
-        var d = new DateTime(year, month, DateTime.DaysInMonth(year, month));
+        var d = new DateTime(year, month, DateTime.DaysInMonth(year, month), 0, 0, 0, DateTimeKind.Unspecified);
         while (d.DayOfWeek != weekday)
             d = d.AddDays(-1);
         return d;
@@ -294,7 +356,7 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
     /// Provides reasonable default lot sizes for common indices. These will be
     /// overridden by broker-supplied data whenever the instrument master is available.
     /// </summary>
-    public static decimal DefaultLotSize(string index) => index.ToUpperInvariant() switch
+    public static decimal DefaultLotSize(string index) => MarketSegments.NormalizeUnderlying(index) switch
     {
         "NIFTY" => 75,
         "BANKNIFTY" => 30,
@@ -302,12 +364,47 @@ public sealed class SymbolBuilder(IBroker broker, ILogger<SymbolBuilder> logger,
         "MIDCPNIFTY" => 120,
         "SENSEX" => 20,
         "BANKEX" => 30,
+        // MCX commodity lot sizes. Last-resort fallbacks only: the instrument master's
+        // lotsize is authoritative and is preferred wherever it is available, because
+        // the exchange revises these periodically.
+        "CRUDEOIL" => 100,
+        "NATURALGAS" => 1250,
+        "GOLD" => 100,
+        "SILVER" => 30,
+        "CRUDEOILM" => 10,
+        "NATGASMINI" => 250,
+        "GOLDM" => 10,
+        "SILVERM" => 5,
+        "SILVERMIC" => 1,
         _ => 1
     };
 
     private static string ExchangeFor(string index) =>
-        BseIndices.Contains(index) ? "BFO" :
-        NseIndices.Contains(index) ? "NFO" : "NFO";
+        MarketSegments.ExchangeForUnderlying(index);
+
+    /// <summary>
+    /// Reconciles a broker/master supplied segment against the one the underlying
+    /// actually trades on. A commodity may only ever be booked on MCX: Angel's
+    /// searchScrip occasionally returns an unrelated NSE cash match for a commodity
+    /// name, and accepting that segment books the order as NSECMD, which then also
+    /// defeats the MCX bracket-order downgrade. The supplied value is honoured only
+    /// when it agrees with the underlying's own segment.
+    /// </summary>
+    private static string NormalizeExchange(string underlying, string? supplied)
+    {
+        var expected = MarketSegments.ExchangeForUnderlying(underlying);
+
+        if (string.IsNullOrWhiteSpace(supplied))
+            return expected;
+
+        if (MarketSegments.IsCommodity(underlying) &&
+            !string.Equals(supplied, "MCX", StringComparison.OrdinalIgnoreCase))
+        {
+            return expected;
+        }
+
+        return supplied!;
+    }
 }
 
 public sealed class ResolvedSymbol

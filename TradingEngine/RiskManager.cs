@@ -20,28 +20,31 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
     private readonly ILogger<RiskManager> _logger = logger;
 
     /// <summary>
-    /// Validates if account meets all risk criteria
+    /// Validates if account meets all risk criteria (both global portfolio limits and account-specific limits)
     /// </summary>
     public async Task<(bool IsValid, string Reason)> ValidateLimitsAsync(TradingAccount account)
     {
         try
         {
+            // Tier 2: Check global portfolio limits first (combined live + paper)
+            var (globalValid, globalReason) = await ValidateGlobalLimitsAsync();
+            if (!globalValid)
+            {
+                _logger.LogWarning("Account {Name} blocked by global limit: {Reason}", account.Name, globalReason);
+                return (false, globalReason);
+            }
+
             var todayIst = DateTime.UtcNow.ToIst().Date;
             var startOfDayUtc = todayIst.AddHours(-5.5);
             var endOfDayUtc = startOfDayUtc.AddDays(1);
 
-            // Fetch effective risk limits: prefer global settings if configured in Settings UI, fallback to account settings
-            var globalMaxLoss = await _settings.GetSettingAsync<decimal?>("DailyMaxLoss");
-            var globalMaxProfit = await _settings.GetSettingAsync<decimal?>("DailyMaxProfit");
-            var globalMaxPositions = await _settings.GetSettingAsync<int?>("MaxOpenPositions");
-            var globalMaxTrades = await _settings.GetSettingAsync<int?>("MaxTradesPerDay");
+            // Tier 1: Account-specific limits (configured per account on Accounts page)
+            var dailyMaxLoss = account.DailyMaxLoss;
+            var dailyMaxProfit = account.DailyMaxProfit;
+            var maxOpenPositions = account.MaxOpenPositions;
+            var maxTradesPerDay = account.MaxTradesPerDay;
 
-            var dailyMaxLoss = globalMaxLoss ?? account.DailyMaxLoss;
-            var dailyMaxProfit = globalMaxProfit ?? account.DailyMaxProfit;
-            var maxOpenPositions = globalMaxPositions ?? account.MaxOpenPositions;
-            var maxTradesPerDay = globalMaxTrades ?? account.MaxTradesPerDay;
-
-            // Calculate actual Daily P&L from closed and open positions today (IST)
+            // Calculate actual Daily P&L for THIS account from closed and open positions today (IST)
             var closedPositionsToday = await _context.Positions
                 .AsNoTracking()
                 .Where(p => p.TradingAccountId == account.Id
@@ -59,18 +62,18 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
             decimal unrealizedPnL = openPositionsList.Sum(p => p.UnrealizedPnL);
             decimal dailyPnL = realizedPnL + unrealizedPnL;
 
-            // Check daily loss limit
+            // Check account daily loss limit
             if (dailyMaxLoss > 0 && dailyPnL < -dailyMaxLoss)
             {
-                var reason = $"Daily max loss limit reached (P&L: ₹{dailyPnL:N2}, Limit: ₹{dailyMaxLoss:N2})";
+                var reason = $"Account daily max loss limit reached (P&L: ₹{dailyPnL:N2}, Limit: ₹{dailyMaxLoss:N2})";
                 _logger.LogWarning(AccountReasonLogTemplate, account.Name, reason);
                 return (false, reason);
             }
 
-            // Check daily profit limit
+            // Check account daily profit limit
             if (dailyMaxProfit > 0 && dailyPnL > dailyMaxProfit)
             {
-                var reason = $"Daily max profit target reached (P&L: ₹{dailyPnL:N2}, Limit: ₹{dailyMaxProfit:N2})";
+                var reason = $"Account daily max profit target reached (P&L: ₹{dailyPnL:N2}, Limit: ₹{dailyMaxProfit:N2})";
                 _logger.LogWarning(AccountReasonLogTemplate, account.Name, reason);
                 return (false, reason);
             }
@@ -148,14 +151,38 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
                 return false;
             }
 
-            // Check trading hours (9:15 AM – 3:30 PM IST for NSE/BSE) unless bypass is enabled.
+            // Check trading hours unless bypass is enabled. The window depends on the
+            // segment: NSE/BSE 09:15-15:30, MCX 09:00-23:30.
             var now = DateTime.UtcNow.ToIst();
-            var marketOpen  = new TimeSpan(9, 15, 0);
-            var marketClose = new TimeSpan(15, 30, 0);
+            var segment = MarketSegments.ForTradingSymbol(order.Symbol);
+
+            if (segment == MarketSegment.Commodity)
+            {
+                // Commodity orders are blocked outright unless the master toggle is on.
+                // This is the authoritative gate: the parser gate alone would not stop an
+                // already-parsed signal or a manually-entered commodity order.
+                var mcxEnabled = await _settings.GetSettingAsync<bool?>("Mcx.Enabled") ?? false;
+                if (!mcxEnabled)
+                {
+                    _logger.LogWarning("Commodity trading is disabled - blocking MCX order for {Symbol}.", order.Symbol);
+                    order.ErrorMessage = "Commodity (MCX) trading is disabled. Enable it in Settings \u2192 MCX to trade commodities.";
+                    return false;
+                }
+            }
+
+            var marketOpen = segment == MarketSegment.Commodity ? MarketHours.CommodityOpen : MarketHours.Open;
+            var marketClose = segment == MarketSegment.Commodity ? MarketHours.CommodityClose : MarketHours.Close;
 
             if (!bypassMarketHours && (now.TimeOfDay < marketOpen || now.TimeOfDay > marketClose))
             {
-                _logger.LogWarning("Trading outside market hours ({Time} IST). Market: 09:15–15:30", now.ToString("HH:mm"));
+                if (segment == MarketSegment.Commodity)
+                {
+                    _logger.LogWarning("Trading outside MCX market hours ({Time} IST). Market: 09:00\u201323:30", now.ToString("HH:mm"));
+                    order.ErrorMessage = $"MCX market is closed (current time: {now:hh:mm tt} IST). MCX hours are 09:00 AM to 11:30 PM. Enable 'Allow orders after market hours' in Settings to test.";
+                    return false;
+                }
+
+                _logger.LogWarning("Trading outside market hours ({Time} IST). Market: 09:15\u201315:30", now.ToString("HH:mm"));
                 order.ErrorMessage = $"Market is closed (current time: {now:hh:mm tt} IST). Market hours are 09:15 AM to 03:30 PM. Enable 'Allow orders after market hours' in Settings to test.";
                 return false;
             }
@@ -191,15 +218,11 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
             var startOfDayUtc = todayIst.AddHours(-5.5);
             var endOfDayUtc = startOfDayUtc.AddDays(1);
 
-            var globalMaxLoss = await _settings.GetSettingAsync<decimal?>("DailyMaxLoss");
-            var globalMaxProfit = await _settings.GetSettingAsync<decimal?>("DailyMaxProfit");
-            var globalMaxPositions = await _settings.GetSettingAsync<int?>("MaxOpenPositions");
-            var globalMaxTrades = await _settings.GetSettingAsync<int?>("MaxTradesPerDay");
-
-            var dailyMaxLoss = globalMaxLoss ?? account.DailyMaxLoss;
-            var dailyMaxProfit = globalMaxProfit ?? account.DailyMaxProfit;
-            var maxOpenPositions = globalMaxPositions ?? account.MaxOpenPositions;
-            var maxTradesPerDay = globalMaxTrades ?? account.MaxTradesPerDay;
+            // Tier 1: Per-account metrics
+            var dailyMaxLoss = account.DailyMaxLoss;
+            var dailyMaxProfit = account.DailyMaxProfit;
+            var maxOpenPositions = account.MaxOpenPositions;
+            var maxTradesPerDay = account.MaxTradesPerDay;
 
             var todayOrders = await _context.Orders
                 .Where(o => o.TradingAccountId == accountId
@@ -240,6 +263,86 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
             return new();
         }
     }
+
+    /// <summary>
+    /// Validates global portfolio limits across ALL accounts (live + paper combined)
+    /// </summary>
+    public async Task<(bool IsValid, string Reason)> ValidateGlobalLimitsAsync()
+    {
+        try
+        {
+            var metrics = await GetGlobalPortfolioRiskMetricsAsync();
+
+            if (metrics.DailyMaxLoss > 0 && metrics.DailyPnL <= -metrics.DailyMaxLoss)
+            {
+                var reason = $"Global portfolio daily max loss reached (Combined P&L: ₹{metrics.DailyPnL:N2}, Limit: ₹{metrics.DailyMaxLoss:N2})";
+                return (false, reason);
+            }
+
+            if (metrics.DailyMaxProfit > 0 && metrics.DailyPnL >= metrics.DailyMaxProfit)
+            {
+                var reason = $"Global portfolio daily max profit reached (Combined P&L: ₹{metrics.DailyPnL:N2}, Limit: ₹{metrics.DailyMaxProfit:N2})";
+                return (false, reason);
+            }
+
+            return (true, string.Empty);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validating global portfolio risk limits");
+            return (false, $"Global risk check error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Computes portfolio-wide risk metrics across all accounts (both live and paper combined).
+    /// </summary>
+    public async Task<GlobalRiskMetrics> GetGlobalPortfolioRiskMetricsAsync()
+    {
+        try
+        {
+            var todayIst = DateTime.UtcNow.ToIst().Date;
+            var startOfDayUtc = todayIst.AddHours(-5.5);
+            var endOfDayUtc = startOfDayUtc.AddDays(1);
+
+            var globalMaxLoss = await _settings.GetSettingAsync<decimal?>("DailyMaxLoss") ?? 0m;
+            var globalMaxProfit = await _settings.GetSettingAsync<decimal?>("DailyMaxProfit") ?? 0m;
+
+            // Aggregate closed P&L today across all accounts (live + paper)
+            var closedRealized = await _context.Positions
+                .AsNoTracking()
+                .Where(p => p.ClosedAt.HasValue
+                    && p.ClosedAt.Value >= startOfDayUtc
+                    && p.ClosedAt.Value < endOfDayUtc)
+                .SumAsync(p => p.RealizedPnL ?? 0m);
+
+            // Aggregate open unrealized P&L across all accounts (live + paper)
+            var openUnrealized = await _context.Positions
+                .AsNoTracking()
+                .Where(p => p.ClosedAt == null)
+                .SumAsync(p => p.UnrealizedPnL);
+
+            var combinedPnL = closedRealized + openUnrealized;
+
+            var openPositionsCount = await _context.Positions
+                .AsNoTracking()
+                .Where(p => p.ClosedAt == null)
+                .CountAsync();
+
+            return new GlobalRiskMetrics
+            {
+                DailyPnL = combinedPnL,
+                DailyMaxLoss = globalMaxLoss,
+                DailyMaxProfit = globalMaxProfit,
+                OpenPositionsCount = openPositionsCount
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error computing global portfolio risk metrics");
+            return new();
+        }
+    }
 }
 
 /// <summary>
@@ -263,6 +366,21 @@ public class RiskMetrics
 }
 
 /// <summary>
+/// Portfolio-wide risk metrics across all accounts (live + paper)
+/// </summary>
+public class GlobalRiskMetrics
+{
+    public decimal DailyPnL { get; set; }
+    public decimal DailyMaxLoss { get; set; }
+    public decimal DailyMaxProfit { get; set; }
+    public int OpenPositionsCount { get; set; }
+
+    public bool IsWithinLimits =>
+        (DailyMaxLoss <= 0 || DailyPnL >= -DailyMaxLoss) &&
+        (DailyMaxProfit <= 0 || DailyPnL <= DailyMaxProfit);
+}
+
+/// <summary>
 /// Paper trading engine for simulated trading
 /// </summary>
 public class PaperTradingEngine(
@@ -270,7 +388,8 @@ public class PaperTradingEngine(
     INotificationService notifications,
     ILogger<PaperTradingEngine> logger,
     IHubContext<TradingHub> hub,
-    ISettingsService settings)
+    ISettingsService settings,
+    IIndexRiskProfileService? riskProfiles = null)
 {
     private const string PaperTradingAccountName = "Paper Trading Account";
     private const string PositionChangedEvent = "PositionChanged";
@@ -281,6 +400,7 @@ public class PaperTradingEngine(
     private readonly ILogger<PaperTradingEngine> _logger = logger;
     private readonly IHubContext<TradingHub> _hub = hub;
     private readonly ISettingsService _settings = settings;
+    private readonly IIndexRiskProfileService? _riskProfiles = riskProfiles;
 
     /// <summary>
     /// Simulates order execution without broker
@@ -292,15 +412,21 @@ public class PaperTradingEngine(
             if (order.Side == OrderSide.Sell)
             {
                 var openPosition = await _context.Positions
+                    .Include(p => p.Signal)
                     .FirstOrDefaultAsync(p => p.TradingAccountId == order.TradingAccountId
                         && p.Symbol == order.Symbol
                         && p.ClosedAt == null);
 
                 if (openPosition is not null)
                 {
+                    // Direction-aware: a raw (exit - entry) formula reports a short's loss
+                    // as a profit. Every other close path routes through PnlCalculator.
+                    var isLong = openPosition.Signal is null || openPosition.Signal.Action == SignalAction.Buy;
+
                     openPosition.ClosedAt = DateTime.UtcNow;
                     openPosition.ClosingPrice = currentPrice;
-                    openPosition.RealizedPnL = (currentPrice - openPosition.EntryPrice) * openPosition.Quantity;
+                    openPosition.RealizedPnL = PnlCalculator.RealizedPnl(
+                        openPosition.EntryPrice, currentPrice, openPosition.Quantity, isShort: !isLong);
                     openPosition.CurrentPrice = currentPrice;
                     openPosition.UnrealizedPnL = 0;
                     openPosition.UnrealizedPnLPercentage = 0;
@@ -336,6 +462,24 @@ public class PaperTradingEngine(
             var signal = await _context.TradingSignals.FindAsync(order.SignalId);
             var stopLoss = signal?.StopLoss;
             var targets = signal?.Targets.ToList() ?? [];
+
+            if (_riskProfiles is not null)
+            {
+                var overridePts = await _riskProfiles.GetOverrideTargetPointsAsync(signal?.Index);
+                if (overridePts > 0 && currentPrice > 0)
+                {
+                    var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                    var tgt = isBuy ? currentPrice + overridePts : Math.Max(0.05m, currentPrice - overridePts);
+                    targets = [tgt];
+                }
+                else if (targets.Count == 0 && currentPrice > 0)
+                {
+                    var profile = await _riskProfiles.GetProfileAsync(signal?.Index);
+                    var defPts = profile is { DefaultTargetPoints: > 0 } ? profile.DefaultTargetPoints : 20m;
+                    var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                    targets = [isBuy ? currentPrice + defPts : Math.Max(0.05m, currentPrice - defPts)];
+                }
+            }
 
             // Create position
             var position = new Position
@@ -379,10 +523,19 @@ public class PaperTradingEngine(
             var exitOffsetSetting = await _settings.GetSettingAsync<decimal?>("ExitPriceOffset");
             var exitOffset = exitOffsetSetting ?? 0m;
 
-            var positions = await _context.Positions
+            // PAPER ONLY. This is the simulated exit engine: it invents SL/target fills
+            // from a price feed. Live positions must never be closed here - their exits
+            // belong to the broker and are reconciled from real fills by OrderSyncService.
+            // Without this filter a live position gets a fabricated ClosedAt/RealizedPnL
+            // from a simulated exit price, so the DB books a profit the terminal never
+            // realised while the real broker leg is still running.
+            var allOpen = await _context.Positions
                 .Include(p => p.Signal)
+                .Include(p => p.TradingAccount)
                 .Where(p => p.ClosedAt == null)
                 .ToListAsync();
+
+            var positions = allOpen.Where(BookScope.IsPaper).ToList();
 
             foreach (var position in positions)
             {
@@ -487,13 +640,18 @@ public class PaperTradingEngine(
     {
         try
         {
-            var position = await _context.Positions.FindAsync(positionId);
+            var position = await _context.Positions
+                .Include(p => p.Signal)
+                .FirstOrDefaultAsync(p => p.Id == positionId);
             if (position == null)
                 return false;
 
+            var isLong = position.Signal is null || position.Signal.Action == SignalAction.Buy;
+
             position.ClosedAt = DateTime.UtcNow;
             position.ClosingPrice = closingPrice;
-            position.RealizedPnL = PnlCalculator.RealizedPnl(position.EntryPrice, closingPrice, position.Quantity);
+            position.RealizedPnL = PnlCalculator.RealizedPnl(
+                position.EntryPrice, closingPrice, position.Quantity, isShort: !isLong);
 
             await _context.SaveChangesAsync();
             _logger.LogInformation("Paper position closed: {Symbol} @ {Price}", position.Symbol, closingPrice);

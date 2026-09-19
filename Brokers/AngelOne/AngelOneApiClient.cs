@@ -34,6 +34,7 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
     private readonly HttpClient _httpClient = httpClient;
     private readonly ILogger<AngelOneApiClient> _logger = logger;
     private readonly string _baseUrl = string.IsNullOrWhiteSpace(apiUrl) ? DefaultBaseUrl : apiUrl.TrimEnd('/');
+    private string _activeBaseUrl = string.IsNullOrWhiteSpace(apiUrl) ? DefaultBaseUrl : apiUrl.TrimEnd('/');
 
     private string? _apiKey;
     private string? _jwtToken;
@@ -52,6 +53,19 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
     // trigger a single re-auth instead of a stampede of refresh calls.
     private readonly SemaphoreSlim _reauthLock = new(1, 1);
 
+    // Proactively keeps every outbound call within Angel One's published per-endpoint
+    // throttling limits, so we never trigger the 403 "exceeding access rate" rejection.
+    private readonly AngelRateLimiter _rateLimiter = new(logger);
+
+    // Angel publishes getPosition at 1 request/second. AngelRateLimiter enforces that
+    // hard ceiling; this shared cache additionally collapses the several background
+    // services that read the book so they don't each queue behind a 1/sec gate.
+    private static readonly TimeSpan PositionBookMinInterval = TimeSpan.FromSeconds(5);
+    private readonly SemaphoreSlim _positionBookLock = new(1, 1);
+    private JsonElement? _positionBookCache;
+    private DateTime _positionBookCachedAtUtc = DateTime.MinValue;
+    private DateTime _rateLimitedUntilUtc = DateTime.MinValue;
+
     private static readonly string _localIp = GetLocalIp();
     private static readonly string _macAddr = GetMacAddress();
     private static string _publicIp = string.Empty;
@@ -65,8 +79,9 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
     {
         if (!string.IsNullOrWhiteSpace(apiKey))
             _apiKey = apiKey;
-        // Note: _baseUrl is readonly; apiUrlOverride is passed at login time via LoginAsync
+
         _pendingApiUrlOverride = string.IsNullOrWhiteSpace(apiUrlOverride) ? null : apiUrlOverride!.TrimEnd('/');
+        _activeBaseUrl = _pendingApiUrlOverride ?? _baseUrl;
     }
 
     // Pending URL override set via Configure() — consumed by LoginAsync when no explicit override passed
@@ -99,6 +114,7 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
             var baseUrl = !string.IsNullOrWhiteSpace(apiUrlOverride)
                 ? apiUrlOverride!.TrimEnd('/')
                 : (_pendingApiUrlOverride ?? _baseUrl);
+            _activeBaseUrl = baseUrl;
             _apiKey = apiKey ?? _apiKey;
 
             // Cache latest login inputs for fallback re-login if JWT refresh fails later.
@@ -167,7 +183,7 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
             }
 
             var requestBody = new { refreshToken = _refreshToken };
-            using var msg = BuildRequest(HttpMethod.Post, $"{_baseUrl}{RefreshPath}", requestBody, authorize: true);
+            using var msg = BuildRequest(HttpMethod.Post, $"{_activeBaseUrl}{RefreshPath}", requestBody, authorize: true);
             var response = await _httpClient.SendAsync(msg);
 
             if (!response.IsSuccessStatusCode)
@@ -210,7 +226,7 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
         {
             var requestBody = new { exchange, tradingsymbol, symboltoken };
             using var response = await SendWithRetryAsync(
-                () => BuildRequest(HttpMethod.Post, $"{_baseUrl}{LtpDataPath}", requestBody, authorize: true),
+                () => BuildRequest(HttpMethod.Post, $"{_activeBaseUrl}{LtpDataPath}", requestBody, authorize: true),
                 $"GetLtp({tradingsymbol})", allowAmbiguousRetry: true);
             if (!response.IsSuccessStatusCode)
                 return null;
@@ -229,7 +245,7 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
         {
             var requestBody = new { exchange, searchscrip };
             using var response = await SendWithRetryAsync(
-                () => BuildRequest(HttpMethod.Post, $"{_baseUrl}{SearchPath}", requestBody, authorize: true),
+                () => BuildRequest(HttpMethod.Post, $"{_activeBaseUrl}{SearchPath}", requestBody, authorize: true),
                 $"SearchScrip({searchscrip})", allowAmbiguousRetry: true);
             if (!response.IsSuccessStatusCode)
                 return null;
@@ -253,7 +269,7 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
             // rejections that never reached the exchange (no orderid), so the
             // single re-auth + replay inside SendWithRetryAsync cannot double-fill.
             using var response = await SendWithRetryAsync(
-                () => BuildRequest(HttpMethod.Post, $"{_baseUrl}{PlaceOrderPath}", orderRequest, authorize: true),
+                () => BuildRequest(HttpMethod.Post, $"{_activeBaseUrl}{PlaceOrderPath}", orderRequest, authorize: true),
                 "PlaceOrder", allowAmbiguousRetry: false);
             var body = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
@@ -365,13 +381,46 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
     }
 
     public async Task<JsonElement?> GetOrderBookAsync() => await GetSecureAsync(OrderBookPath);
-    public async Task<JsonElement?> GetPositionBookAsync() => await GetSecureAsync(PositionPath);
+    public async Task<JsonElement?> GetPositionBookAsync()
+    {
+        await _positionBookLock.WaitAsync();
+        try
+        {
+            var now = DateTime.UtcNow;
+            var cacheIsFresh = _positionBookCache.HasValue &&
+                               now - _positionBookCachedAtUtc < PositionBookMinInterval;
+
+            if (cacheIsFresh || (now < _rateLimitedUntilUtc && _positionBookCache.HasValue))
+                return _positionBookCache;
+
+            var result = await GetSecureAsync(PositionPath);
+            if (result is null)
+                return _positionBookCache;
+
+            if (IsRateLimitedResponse(result.Value))
+            {
+                _rateLimitedUntilUtc = DateTime.UtcNow.Add(PositionBookMinInterval);
+                _logger.LogWarning(
+                    "Angel position book is rate limited; serving cached payload for the next {Seconds}s.",
+                    PositionBookMinInterval.TotalSeconds);
+                return _positionBookCache ?? result;
+            }
+
+            _positionBookCache = result;
+            _positionBookCachedAtUtc = DateTime.UtcNow;
+            return result;
+        }
+        finally
+        {
+            _positionBookLock.Release();
+        }
+    }
     public async Task<JsonElement?> GetTradeBookAsync() => await GetSecureAsync(TradeBookPath);
 
     public async Task<bool> ModifyOrderAsync(object modifyRequest)
     {
         using var response = await SendWithRetryAsync(
-            () => BuildRequest(HttpMethod.Post, $"{_baseUrl}{ModifyOrderPath}", modifyRequest, authorize: true),
+            () => BuildRequest(HttpMethod.Post, $"{_activeBaseUrl}{ModifyOrderPath}", modifyRequest, authorize: true),
             "ModifyOrder", allowAmbiguousRetry: false);
         return response.IsSuccessStatusCode;
     }
@@ -379,7 +428,7 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
     public async Task<(bool Success, string? Message)> CancelOrderAsync(object cancelRequest)
     {
         using var response = await SendWithRetryAsync(
-            () => BuildRequest(HttpMethod.Post, $"{_baseUrl}{CancelOrderPath}", cancelRequest, authorize: true),
+            () => BuildRequest(HttpMethod.Post, $"{_activeBaseUrl}{CancelOrderPath}", cancelRequest, authorize: true),
             "CancelOrder", allowAmbiguousRetry: false);
         var body = await response.Content.ReadAsStringAsync();
 
@@ -416,6 +465,28 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
     private static string Truncate(string? s, int max)
         => string.IsNullOrEmpty(s) ? string.Empty : (s!.Length <= max ? s : s[..max] + "…");
 
+    /// <summary>
+    /// True when an Angel response indicates request-rate throttling rather than an
+    /// authentication or data failure.
+    /// </summary>
+    private static bool IsRateLimitBody(string? body)
+        => !string.IsNullOrWhiteSpace(body) &&
+           body.Contains("exceeding access rate", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsRateLimitedResponse(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (root.TryGetProperty("errorMessage", out var error) && error.ValueKind == JsonValueKind.String)
+            return IsRateLimitBody(error.GetString());
+
+        if (root.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String)
+            return IsRateLimitBody(message.GetString());
+
+        return false;
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
@@ -425,11 +496,27 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
         try
         {
             using var response = await SendWithRetryAsync(
-                () => BuildRequest(HttpMethod.Get, $"{_baseUrl}{path}", body: null, authorize: true),
+                () => BuildRequest(HttpMethod.Get, $"{_activeBaseUrl}{path}", body: null, authorize: true),
                 $"GET {path}", allowAmbiguousRetry: true);
+
+            var body = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
-                return null;
-            return JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
+            {
+                _logger.LogWarning("Secure API call {Path} failed HTTP {StatusCode}: {Body}",
+                    path, (int)response.StatusCode, Truncate(body, 500));
+
+                var errorJson = JsonSerializer.Serialize(new
+                {
+                    status = false,
+                    httpStatus = (int)response.StatusCode,
+                    errorMessage = string.IsNullOrWhiteSpace(body)
+                        ? $"HTTP {(int)response.StatusCode} {response.StatusCode}"
+                        : body
+                });
+                return JsonSerializer.Deserialize<JsonElement>(errorJson);
+            }
+
+            return JsonSerializer.Deserialize<JsonElement>(body);
         }
         catch (Exception ex)
         {
@@ -471,6 +558,11 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
 
             using var msg = requestFactory();
             var authorized = msg.Headers.Contains("Authorization");
+
+            // Wait for a slot in the endpoint's published quota before sending.
+            if (msg.RequestUri is { } requestUri)
+                await _rateLimiter.WaitAsync(requestUri.ToString());
+
             try
             {
                 response = await _httpClient.SendAsync(msg);
@@ -500,6 +592,46 @@ public class AngelOneApiClient(HttpClient httpClient, ILogger<AngelOneApiClient>
                         }
                     }
                     return response;
+                }
+
+                // Some Angel endpoints return 401/403 for an expired session instead of
+                // HTTP 200 + AG8001. Recover once via refresh/re-login and replay.
+                if (authorized &&
+                    (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden))
+                {
+                    var rejectBody = await response.Content.ReadAsStringAsync();
+
+                    if (IsRateLimitBody(rejectBody))
+                    {
+                        // Rate limiting is not an auth failure; re-login would make it worse.
+                        kind = FailureKind.Transient;
+
+                        // Angel's counter is ahead of ours (other sessions, clock skew),
+                        // so pause this endpoint before the retry burns another slot.
+                        if (msg.RequestUri is { } throttledUri)
+                            _rateLimiter.ReportThrottled(throttledUri.ToString(), TimeSpan.FromSeconds(2));
+
+                        _logger.LogWarning(
+                            "{Operation} rate limited by Angel (HTTP {StatusCode}): {Body}",
+                            operation, (int)response.StatusCode, Truncate(rejectBody, 300));
+                    }
+                    else if (!reauthAttempted)
+                    {
+                        reauthAttempted = true;
+                        _logger.LogWarning(
+                            "{Operation} returned HTTP {StatusCode}; attempting one session refresh and replay. Body={Body}",
+                            operation, (int)response.StatusCode, Truncate(rejectBody, 500));
+                        response.Dispose();
+
+                        if (await EnsureFreshTokenAsync(tokenSent))
+                        {
+                            attempt--; // replay doesn't count against transient budget
+                            continue;
+                        }
+
+                        throw new InvalidOperationException(
+                            "Angel One request rejected and session refresh failed.");
+                    }
                 }
             }
             catch (Exception ex)

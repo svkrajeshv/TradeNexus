@@ -120,13 +120,15 @@ public class TradingDbContext(DbContextOptions<TradingDbContext> options) : DbCo
         });
 
         // Seed default data
-        SeedDefaultData(modelBuilder);
+        SeedDefaultData();
     }
 
     // Seeds are performed at startup by DbSeeder in Program.cs to avoid the
     // non-deterministic values (DateTime.UtcNow, entity IDs) that EF Core
     // rejects in HasData model seeding.
-    private static void SeedDefaultData(ModelBuilder modelBuilder)
+    private static void SeedDefaultData()
     {
+        // Intentionally empty - seeds are performed at startup by DbSeeder in
+        // Program.cs (see comment above) rather than here.
     }
 }

@@ -60,7 +60,17 @@ public interface IBroker
     /// Cancels an order
     /// </summary>
     Task<bool> CancelOrderAsync(string orderId);
-    
+
+    /// <summary>
+    /// Squares off an open bracket/Robo (BO) position. The entry leg is already
+    /// complete and therefore not cancellable — brokers exit a bracket by cancelling
+    /// its still-open child leg (stop-loss / target), which closes the position at
+    /// market. Default is a no-op for brokers without bracket support.
+    /// </summary>
+    /// <param name="parentOrderId">Broker order id of the bracket's entry leg.</param>
+    /// <param name="symbol">Trading symbol, used when the child legs cannot be matched by parent id.</param>
+    Task<bool> ExitBracketOrderAsync(string parentOrderId, string symbol) => Task.FromResult(false);
+
     /// <summary>
     /// Gets order book for the account
     /// </summary>
@@ -173,7 +183,22 @@ public class BrokerPosition
     public decimal AveragePrice { get; set; }
     public decimal CurrentPrice { get; set; }
     public decimal UnrealizedPnL { get; set; }
+    /// <summary>
+    /// Booked P&amp;L for the day on this contract, as reported by the broker.
+    /// Non-zero even when <see cref="Quantity"/> is 0 (fully squared-off intraday leg).
+    /// </summary>
+    public decimal RealizedPnL { get; set; }
     public DateTime OpenedAt { get; set; }
+
+    /// <summary>
+    /// Broker instrument token, used to subscribe to live price ticks.
+    /// </summary>
+    public string? SymbolToken { get; set; }
+
+    /// <summary>
+    /// Exchange segment of the instrument (NSE, NFO, MCX, ...).
+    /// </summary>
+    public string? Exchange { get; set; }
 }
 
 /// <summary>

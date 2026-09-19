@@ -1,3 +1,4 @@
+using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Models;
 using System.Collections.Concurrent;
@@ -11,7 +12,12 @@ namespace NexusApp.Brokers.AngelOne;
 /// </summary>
 public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker> logger, AngelInstrumentMaster? instrumentMaster = null, AngelOneWebSocketClient? webSocket = null) : IBroker
 {
-    private const string orderId = "orderid";
+    private const string OrderIdKey = "orderid";
+    private const string OrderIdCamelKey = "orderId";
+    private const string TradingSymbolKey = "tradingsymbol";
+    private const string TradingSymbolCamelKey = "tradingSymbol";
+    private const string StatusKey = "status";
+    private const string MessageKey = "message";
     private readonly AngelOneApiClient _apiClient = apiClient;
     private readonly ILogger<AngelOneBroker> _logger = logger;
     private readonly AngelInstrumentMaster? _instrumentMaster = instrumentMaster;
@@ -80,15 +86,21 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
     {
         try
         {
+            // The exchange must be derived from the symbol, not hard-coded: searching an
+            // MCX commodity option on "NFO" makes Angel return an unrelated equity/NSE
+            // match, which is then booked and subscribed on the wrong segment (the CMP
+            // column shows the equity price and no option tick ever arrives).
+            var searchExchange = InferExchange(symbol);
+
             // Angel One SearchScrip: exchange + searchscrip
-            var result = await _apiClient.SearchScripAsync("NFO", symbol);
+            var result = await _apiClient.SearchScripAsync(searchExchange, symbol);
             if (result == null)
                 return null;
 
             var instrument = new BrokerInstrument
             {
                 Symbol          = symbol,
-                ExchangeSegment = "NFO"
+                ExchangeSegment = searchExchange
             };
 
             // Extract symboltoken from search response (handles array/object/nested payload variants).
@@ -98,7 +110,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                 foreach (var item in EnumerateObjects(data))
                 {
                     var candidateToken = TryGetStringAny(item, "symboltoken", "symbolToken", "token");
-                    var candidateSymbol = TryGetStringAny(item, "tradingsymbol", "tradingSymbol");
+                    var candidateSymbol = TryGetStringAny(item, TradingSymbolKey, TradingSymbolCamelKey);
                     var lotSizeRaw = TryGetStringAny(item, "lotsize", "lotSize");
                     if (string.IsNullOrWhiteSpace(candidateToken) && string.IsNullOrWhiteSpace(candidateSymbol))
                         continue;
@@ -136,7 +148,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                     var cached = new CachedInstrument(
                         instrument.Symbol,
                         instrument.SymbolToken!,
-                        string.IsNullOrWhiteSpace(instrument.ExchangeSegment) ? "NFO" : instrument.ExchangeSegment);
+                        string.IsNullOrWhiteSpace(instrument.ExchangeSegment) ? InferExchange(instrument.Symbol) : instrument.ExchangeSegment);
                     _instrumentCache[instrument.Symbol] = cached;
                     _instrumentCache[symbol] = cached;
                     _instrumentCache[NormalizeKey(instrument.Symbol)] = cached;
@@ -183,7 +195,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                     {
                         token = entry.Token;
                         tradingSymbol = entry.TradingSymbol;
-                        exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? "NFO" : entry.ExchangeSegment;
+                        exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? InferExchange(entry.TradingSymbol) : entry.ExchangeSegment;
                     }
                 }
                 catch (Exception ex)
@@ -228,7 +240,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             {
                 try
                 {
-                    _ = _webSocket.SubscribeAsync(new[] { (token!, exchange ?? "NFO") });
+                    _ = _webSocket.SubscribeAsync([(token!, exchange ?? InferExchange(tradingSymbol ?? symbol))]);
                     var wsLtp = _webSocket.GetLastLtp(token!);
                     if (wsLtp > 0)
                         return wsLtp;
@@ -241,7 +253,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
 
             // Fallback: no tick cached yet (just subscribed / illiquid) or WS unavailable —
             // fetch a one-off REST quote so the first read isn't blocked waiting for a tick.
-            var result = await _apiClient.GetLtpAsync(exchange ?? "NFO", tradingSymbol!, token!);
+            var result = await _apiClient.GetLtpAsync(exchange ?? InferExchange(tradingSymbol!), tradingSymbol!, token!);
             if (result is null)
                 return 0m;
 
@@ -273,8 +285,8 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             var entry = _instrumentMaster.FindByTradingSymbol(symbol);
             if (entry is not null && !string.IsNullOrWhiteSpace(entry.Token))
             {
-                var exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? "NFO" : entry.ExchangeSegment;
-                await _webSocket.UnsubscribeAsync(new[] { (entry.Token, exchange) });
+                var exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment) ? InferExchange(entry.TradingSymbol) : entry.ExchangeSegment;
+                await _webSocket.UnsubscribeAsync([(entry.Token, exchange)]);
             }
         }
         catch (Exception ex)
@@ -363,8 +375,11 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                     {
                         symbolToken = entry.Token;
                         tradingSymbol = entry.TradingSymbol;
-                        if (!string.IsNullOrWhiteSpace(entry.ExchangeSegment))
-                            exchange = entry.ExchangeSegment;
+                        // Re-derive from the resolved tradingsymbol: a blank exch_seg would
+                        // otherwise leave a commodity on whatever the caller defaulted to.
+                        exchange = string.IsNullOrWhiteSpace(entry.ExchangeSegment)
+                            ? InferExchange(entry.TradingSymbol)
+                            : entry.ExchangeSegment;
                         _logger.LogInformation("Resolved symbol token from instrument master: {Symbol} → token={Token}", tradingSymbol, symbolToken);
                     }
                 }
@@ -388,6 +403,32 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             }
 
             var isRobo = string.Equals(request.Variety, "ROBO", StringComparison.OrdinalIgnoreCase);
+
+            // Final segment reconciliation. The value may have come from the request, the
+            // instrument cache or the master, any of which can disagree with the contract
+            // actually being traded. A commodity may only ever be booked on MCX: booking it
+            // on NSECMD both prices it against an unrelated NSE scrip and makes the caller's
+            // MCX bracket-order downgrade ineffective, producing "BO:Set Rule Command Not
+            // Executed" from Angel's RMS.
+            var expectedExchange = InferExchange(tradingSymbol);
+            if (!string.Equals(exchange, expectedExchange, StringComparison.OrdinalIgnoreCase) &&
+                MarketSegments.ForTradingSymbol(tradingSymbol) == MarketSegment.Commodity)
+            {
+                _logger.LogWarning(
+                    "Correcting exchange segment for {Symbol}: {Wrong} → {Correct} (commodities must be booked on MCX)",
+                    tradingSymbol, exchange, expectedExchange);
+                exchange = expectedExchange;
+            }
+
+            // Bracket orders are blocked by Angel RMS on MCX; never emit a BO leg for a
+            // commodity even if an upstream caller still asked for one.
+            if (isRobo && string.Equals(exchange, "MCX", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "Bracket (ROBO) orders are not supported on MCX; placing {Symbol} as a regular order instead",
+                    tradingSymbol);
+                isRobo = false;
+            }
 
             object orderRequest;
             if (isRobo)
@@ -444,7 +485,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             _logger.LogInformation("Angel One raw placeOrder response: {Raw}", result.Value.GetRawText());
 
             bool isStatusFalse = false;
-            if (result.Value.TryGetProperty("status", out var statusEl))
+            if (result.Value.TryGetProperty(StatusKey, out var statusEl))
             {
                 if (statusEl.ValueKind == JsonValueKind.False)
                     isStatusFalse = true;
@@ -477,7 +518,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                 {
                     case JsonValueKind.Object:
                         response.OrderId =
-                            TryGetStringAny(data, orderId, "orderId", "amoOrderId", "exchangeOrderId")
+                            TryGetStringAny(data, OrderIdKey, OrderIdCamelKey, "amoOrderId", "exchangeOrderId")
                             ?? string.Empty;
                         break;
                     case JsonValueKind.String:
@@ -488,7 +529,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                         {
                             if (item.ValueKind == JsonValueKind.Object)
                             {
-                                var arrOrderId = TryGetStringAny(item, orderId, "orderId", "amoOrderId", "exchangeOrderId");
+                                var arrOrderId = TryGetStringAny(item, OrderIdKey, OrderIdCamelKey, "amoOrderId", "exchangeOrderId");
                                 if (string.IsNullOrWhiteSpace(arrOrderId))
                                     continue;
                                 response.OrderId = arrOrderId;
@@ -502,7 +543,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             if (string.IsNullOrWhiteSpace(response.OrderId))
             {
                 var reason = ExtractBrokerError(result.Value);
-                if (string.IsNullOrWhiteSpace(reason) && result.Value.TryGetProperty("message", out var msgEl))
+                if (string.IsNullOrWhiteSpace(reason) && result.Value.TryGetProperty(MessageKey, out var msgEl))
                     reason = msgEl.GetString();
 
                 var errorMsg = string.IsNullOrWhiteSpace(reason) ? "Broker response missing order ID" : reason;
@@ -578,11 +619,11 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
 
                 // Nested container (e.g. { "data": { ... } } / { "fetched": [ ... ] }):
                 // recurse only into object/array values, never scalar siblings.
-                foreach (var prop in element.EnumerateObject())
+                foreach (var nested in element.EnumerateObject()
+                             .Where(p => p.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+                             .Select(p => p.Value))
                 {
-                    if ((prop.Value.ValueKind == JsonValueKind.Object ||
-                         prop.Value.ValueKind == JsonValueKind.Array) &&
-                        TryExtractDecimal(prop.Value, out value) && value > 0m)
+                    if (TryExtractDecimal(nested, out value) && value > 0m)
                     {
                         return true;
                     }
@@ -611,14 +652,19 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         return false;
     }
 
-    private static string InferExchange(string symbol)
-    {
-        var s = (symbol ?? string.Empty).ToUpperInvariant();
-        return s.Contains("SENSEX") || s.Contains("BANKEX") ? "BFO" : "NFO";
-    }
+    private static string InferExchange(string symbol) =>
+        MarketSegments.ExchangeForTradingSymbol(symbol);
 
+    /// <summary>
+    /// Underlyings recognised when decomposing a tradingsymbol, ordered longest-first so
+    /// a mini contract ("GOLDM…", "SILVERMIC…") is never claimed by its full-size prefix
+    /// ("GOLD…", "SILVER…"). Commodities are included so MCX contracts can be resolved by
+    /// the structured instrument-master lookup rather than aborting the order.
+    /// </summary>
     private static readonly string[] KnownUnderlyings =
-        ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTY"];
+        [.. new[] { "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTY" }
+            .Concat(MarketSegments.CommodityUnderlyings)
+            .OrderByDescending(u => u.Length)];
 
     /// <summary>
     /// Decomposes an Angel option tradingsymbol into its parts. Handles both
@@ -636,7 +682,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         out string optionType)
     {
         underlying = string.Empty;
-        expiry = DateTime.Today;
+        expiry = DateTimeExtensions.IstToday();
         strike = 0m;
         optionType = string.Empty;
 
@@ -653,14 +699,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         var body = s[..^2];
 
         // 2. underlying (longest known prefix)
-        foreach (var u in KnownUnderlyings)
-        {
-            if (body.StartsWith(u, StringComparison.Ordinal))
-            {
-                underlying = u;
-                break;
-            }
-        }
+        underlying = KnownUnderlyings.FirstOrDefault(u => body.StartsWith(u, StringComparison.Ordinal)) ?? string.Empty;
         if (string.IsNullOrEmpty(underlying)) return false;
 
         var mid = body[underlying.Length..];
@@ -695,7 +734,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             if (!int.TryParse(mid[..2], NumberStyles.Integer, CultureInfo.InvariantCulture, out day))
                 return false;
             if (mid.Length < 7 ||
-                !int.TryParse(mid.Substring(5, 2), NumberStyles.Integer, CultureInfo.InvariantCulture, out year))
+                !int.TryParse(mid.AsSpan(5, 2), NumberStyles.Integer, CultureInfo.InvariantCulture, out year))
                 return false;
             strikeStart = 7;
         }
@@ -721,11 +760,11 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         var fullYear = year < 100 ? 2000 + year : year;
         try
         {
-            expiry = new DateTime(fullYear, month, Math.Clamp(day, 1, DateTime.DaysInMonth(fullYear, month)));
+            expiry = new DateTime(fullYear, month, Math.Clamp(day, 1, DateTime.DaysInMonth(fullYear, month)), 0, 0, 0, DateTimeKind.Unspecified);
         }
         catch
         {
-            expiry = DateTime.Today;
+            expiry = DateTimeExtensions.IstToday();
         }
 
         return true;
@@ -745,19 +784,26 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         if (item.ValueKind != JsonValueKind.Object)
             return null;
 
-        foreach (var prop in item.EnumerateObject())
+        for (var i = 0; i < names.Length; i++)
         {
-            for (var i = 0; i < names.Length; i++)
+            var target = names[i];
+            foreach (var prop in item.EnumerateObject())
             {
-                if (!prop.Name.Equals(names[i], StringComparison.OrdinalIgnoreCase))
+                if (!prop.Name.Equals(target, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                return prop.Value.ValueKind switch
+                var str = prop.Value.ValueKind switch
                 {
                     JsonValueKind.String => prop.Value.GetString(),
-                    JsonValueKind.Number when prop.Value.TryGetInt64(out var n) => n.ToString(CultureInfo.InvariantCulture),
+                    // GetRawText covers both integral and fractional numbers; TryGetInt64
+                    // silently fails on values like 123.35, which would zero every price
+                    // and quantity Angel returns as a JSON number.
+                    JsonValueKind.Number => prop.Value.GetRawText(),
                     _ => null
                 };
+
+                if (!string.IsNullOrWhiteSpace(str))
+                    return str;
             }
         }
 
@@ -798,11 +844,11 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         {
             if (error.ValueKind == JsonValueKind.String)
                 return error.GetString() ?? string.Empty;
-            if (error.ValueKind == JsonValueKind.Object && error.TryGetProperty("message", out var emsg))
+            if (error.ValueKind == JsonValueKind.Object && error.TryGetProperty(MessageKey, out var emsg))
                 return emsg.GetString() ?? string.Empty;
         }
 
-        if (root.TryGetProperty("message", out var msg) && msg.ValueKind == JsonValueKind.String)
+        if (root.TryGetProperty(MessageKey, out var msg) && msg.ValueKind == JsonValueKind.String)
             return msg.GetString() ?? string.Empty;
 
         if (root.TryGetProperty("data", out var data))
@@ -811,7 +857,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                 return data.GetString() ?? string.Empty;
             if (data.ValueKind == JsonValueKind.Object)
             {
-                if (data.TryGetProperty("message", out var dmsg) && dmsg.ValueKind == JsonValueKind.String)
+                if (data.TryGetProperty(MessageKey, out var dmsg) && dmsg.ValueKind == JsonValueKind.String)
                     return dmsg.GetString() ?? string.Empty;
                 if (data.TryGetProperty("error", out var derr) && derr.ValueKind == JsonValueKind.String)
                     return derr.GetString() ?? string.Empty;
@@ -843,14 +889,14 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                 {
                     foreach (var row in data.EnumerateArray())
                     {
-                        var rowId = TryGetStringAny(row, AngelOneBroker.orderId, "orderId");
+                        var rowId = TryGetStringAny(row, OrderIdKey, OrderIdCamelKey);
                         if (!string.Equals(rowId, orderId, StringComparison.OrdinalIgnoreCase))
                             continue;
 
                         var v = TryGetStringAny(row, "variety");
                         if (!string.IsNullOrWhiteSpace(v)) variety = v!.ToUpperInvariant();
 
-                        var status = (TryGetStringAny(row, "status", "orderstatus") ?? string.Empty).ToLowerInvariant();
+                        var status = (TryGetStringAny(row, StatusKey, "orderstatus") ?? string.Empty).ToLowerInvariant();
                         // Angel statuses that cannot be cancelled
                         if (status.Contains("complete") || status.Contains("filled") ||
                             status.Contains("rejected") || status.Contains("cancel"))
@@ -903,6 +949,111 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         };
     }
 
+    /// <summary>
+    /// Exits an open ROBO/bracket position. The entry leg is already COMPLETE and
+    /// cannot be cancelled; Angel squares the bracket off when its still-open child
+    /// leg (the stop-loss / target order carrying <c>parentorderid</c>) is cancelled
+    /// with variety ROBO.
+    /// </summary>
+    public async Task<bool> ExitBracketOrderAsync(string parentOrderId, string symbol)
+    {
+        try
+        {
+            var book = await _apiClient.GetOrderBookAsync();
+            if (book is null || !book.Value.TryGetProperty("data", out var data) ||
+                data.ValueKind != JsonValueKind.Array)
+            {
+                _logger.LogWarning("Cannot exit bracket for {Symbol}: order book unavailable", symbol);
+                return false;
+            }
+
+            // Every still-open leg of the bracket for this symbol is a candidate. The
+            // entry leg is COMPLETE (and therefore skipped by the status filter), so what
+            // remains are the SL/target children. Children are cancelled first because
+            // cancelling one of them is what makes Angel square the bracket off.
+            var childLegs = new List<string>();
+            var otherLegs = new List<string>();
+
+            foreach (var row in data.EnumerateArray())
+            {
+                var rowId = TryGetStringAny(row, OrderIdKey, OrderIdCamelKey);
+                if (string.IsNullOrWhiteSpace(rowId))
+                    continue;
+
+                var rowSymbol = TryGetStringAny(row, TradingSymbolKey, TradingSymbolCamelKey);
+                if (!string.IsNullOrWhiteSpace(symbol) && !string.IsNullOrWhiteSpace(rowSymbol) &&
+                    !string.Equals(rowSymbol, symbol, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var parentId = TryGetStringAny(row, "parentorderid", "parentOrderId");
+                var variety = (TryGetStringAny(row, "variety") ?? string.Empty).ToUpperInvariant();
+                var product = (TryGetStringAny(row, "producttype", "productType") ?? string.Empty).ToUpperInvariant();
+
+                // Angel labels bracket legs inconsistently: the variety can come back as
+                // ROBO or STOPLOSS, so the BO product type and the presence of a parent
+                // order id are treated as equally valid markers.
+                var isBracketLeg = variety == "ROBO" || product == "BO" ||
+                                   !string.IsNullOrWhiteSpace(parentId);
+                if (!isBracketLeg)
+                    continue;
+
+                var status = (TryGetStringAny(row, StatusKey, "orderstatus") ?? string.Empty).ToLowerInvariant();
+                if (status.Contains("complete") || status.Contains("rejected") || status.Contains("cancel"))
+                    continue;
+
+                _logger.LogInformation(
+                    "Bracket exit candidate for {Symbol}: order {OrderId} variety={Variety} product={Product} parent={Parent} status={Status}",
+                    symbol, rowId, variety, product, parentId ?? "none", status);
+
+                var isChildOfThisBracket = !string.IsNullOrWhiteSpace(parentId) &&
+                    (string.IsNullOrWhiteSpace(parentOrderId) ||
+                     string.Equals(parentId, parentOrderId, StringComparison.OrdinalIgnoreCase));
+
+                if (isChildOfThisBracket)
+                    childLegs.Add(rowId!);
+                else
+                    otherLegs.Add(rowId!);
+            }
+
+            var childOrderIds = childLegs.Concat(otherLegs).ToList();
+
+            if (childOrderIds.Count == 0)
+            {
+                _logger.LogWarning(
+                    "No open bracket leg found for {Symbol} (parent {ParentOrderId}); cannot square off. Raw order book: {Raw}",
+                    symbol, parentOrderId, data.GetRawText());
+                return false;
+            }
+
+            var exited = false;
+            foreach (var childId in childOrderIds)
+            {
+                var (ok, message) = await _apiClient.CancelOrderAsync(
+                    new { variety = "ROBO", orderid = childId });
+
+                if (ok)
+                {
+                    exited = true;
+                    _logger.LogInformation(
+                        "Bracket exit: cancelled ROBO child leg {OrderId} for {Symbol}", childId, symbol);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Bracket exit: broker refused to cancel ROBO child leg {OrderId} for {Symbol}: {Message}",
+                        childId, symbol, message);
+                }
+            }
+
+            return exited;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error exiting bracket order for {Symbol}", symbol);
+            return false;
+        }
+    }
+
     public async Task<List<BrokerOrder>> GetOrderBookAsync()
     {
         try
@@ -914,8 +1065,8 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             {
                 foreach (var item in EnumerateObjects(data))
                 {
-                    var orderId = TryGetStringAny(item, "orderId", AngelOneBroker.orderId, "amoOrderId", "exchangeOrderId");
-                    var symbol = TryGetStringAny(item, "tradingSymbol", "tradingsymbol");
+                    var orderId = TryGetStringAny(item, OrderIdCamelKey, OrderIdKey, "amoOrderId", "exchangeOrderId");
+                    var symbol = TryGetStringAny(item, TradingSymbolCamelKey, TradingSymbolKey);
                     if (string.IsNullOrWhiteSpace(orderId) || string.IsNullOrWhiteSpace(symbol))
                         continue;
 
@@ -927,7 +1078,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                         Price = ParseDecimal(TryGetStringAny(item, "price")),
                         Side = ParseOrderSide(TryGetStringAny(item, "transactionType", "transactiontype")),
                         Status = ParseOrderStatus(
-                            TryGetStringAny(item, "orderStatus", "orderstatus", "status"),
+                            TryGetStringAny(item, "orderStatus", "orderstatus", StatusKey),
                             TryGetStringAny(item, "rejectionReason", "text", "statusCode")),
                         FilledQuantity = ParseNullableDecimal(TryGetStringAny(item, "filledShares", "filledshares")),
                         AveragePrice = ParseNullableDecimal(TryGetStringAny(item, "averagePrice", "averageprice")),
@@ -957,20 +1108,141 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         try
         {
             var result = await _apiClient.GetPositionBookAsync();
+
+            // An unreadable book must never be reported as an empty book. Returning an
+            // empty list here makes the caller sum zero and present it as terminal truth,
+            // which is how the dashboard came to display a confident 0.00 while the
+            // terminal showed real P&L. Throw so the caller marks the read unavailable.
+            if (result is null)
+                throw new InvalidOperationException("AngelOne position book request returned no response.");
+
+            var root = result.Value;
+            var status = TryGetStringAny(root, StatusKey);
+            if (!string.IsNullOrWhiteSpace(status) &&
+                !status.Equals("true", StringComparison.OrdinalIgnoreCase) &&
+                !status.Equals("success", StringComparison.OrdinalIgnoreCase))
+            {
+                var brokerError = ExtractBrokerError(root);
+                throw new InvalidOperationException(
+                    $"AngelOne position book request failed (status '{status}'): {brokerError}");
+            }
+
+            // AngelOne legitimately returns status "SUCCESS" with a null/absent 'data'
+            // payload when the account simply has no open positions (not a broker
+            // failure). Only treat a missing payload as an unreadable book when the
+            // status itself was not a success — a genuine failure is already caught
+            // above, so reaching here with a success status and no data just means
+            // an empty position book.
+            if (!root.TryGetProperty("data", out var data) || data.ValueKind == JsonValueKind.Null)
+                return [];
+
             var positions = new List<BrokerPosition>();
 
-            if (result != null && result.Value.TryGetProperty("data", out var data))
             {
-                // Parse positions from Angel One response
-                _logger.LogInformation("Retrieved {Count} positions from position book", positions.Count);
+                foreach (var item in EnumerateObjects(data))
+                {
+                    var symbol = TryGetStringAny(item, TradingSymbolCamelKey, TradingSymbolKey, "symbolName", "symbolname");
+                    if (string.IsNullOrWhiteSpace(symbol))
+                        continue;
+
+                    var netQty = ParseDecimal(TryGetStringAny(item, "netQty", "netqty", "netQuantity", "netquantity"));
+                    var avgPrice = ParseDecimal(TryGetStringAny(item, "avgNetPrice", "avgnetprice", "netPrice", "netprice", "buyAvgPrice", "buyavgprice"));
+                    var ltp = ParseDecimal(TryGetStringAny(item, "ltp", "lastTradedPrice", "lasttradedprice", "close"));
+
+                    // Prefer explicit terminal fields when available. For partially
+                    // reduced open rows, realised and unrealised can both be non-zero
+                    // simultaneously, so derive neither from net quantity in that case.
+                    var explicitRealised = ParseNullableDecimal(TryGetStringAny(
+                        item, "realised", "realized", "realisedpnl", "realizedpnl", "bookedpnl", "bookedPnL"));
+                    var explicitUnrealised = ParseNullableDecimal(TryGetStringAny(
+                        item, "unrealised", "unrealized", "unrealisedpnl", "unrealizedpnl", "m2m", "mtm"));
+                    var explicitGross = ParseNullableDecimal(TryGetStringAny(
+                        item, "pnl", "pnlvalue", "profitandloss", "profitLoss", "gainloss", "gainLoss"));
+
+                    decimal realised;
+                    decimal unrealised;
+
+                    if (explicitRealised.HasValue || explicitUnrealised.HasValue)
+                    {
+                        realised = explicitRealised ?? 0m;
+                        unrealised = explicitUnrealised ?? 0m;
+
+                        if (!explicitUnrealised.HasValue && explicitGross.HasValue)
+                            unrealised = explicitGross.Value - realised;
+
+                        if (!explicitRealised.HasValue && explicitGross.HasValue)
+                            realised = explicitGross.Value - unrealised;
+                    }
+                    else
+                    {
+                        // Fallback path for payload variants that only expose row-total P&L.
+                        var terminalPnl = explicitGross;
+
+                        if (!terminalPnl.HasValue)
+                        {
+                            var buyAmount = ParseNullableDecimal(TryGetStringAny(
+                                item, "totalbuyvalue", "totalBuyValue", "buyamount", "buyAmount"));
+                            var sellAmount = ParseNullableDecimal(TryGetStringAny(
+                                item, "totalsellvalue", "totalSellValue", "sellamount", "sellAmount"));
+                            if (buyAmount.HasValue && sellAmount.HasValue)
+                                terminalPnl = sellAmount.Value - buyAmount.Value;
+                        }
+
+                        if (!terminalPnl.HasValue && netQty == 0m)
+                        {
+                            var buyQty = ParseDecimal(TryGetStringAny(item, "buyqty", "buyQty")) +
+                                         ParseDecimal(TryGetStringAny(item, "cfbuyqty", "cfBuyQty"));
+                            var sellQty = ParseDecimal(TryGetStringAny(item, "sellqty", "sellQty")) +
+                                          ParseDecimal(TryGetStringAny(item, "cfsellqty", "cfSellQty"));
+                            var buyAvg = ParseDecimal(TryGetStringAny(item, "totalbuyavgprice", "totalBuyAvgPrice", "buyavgprice", "buyAvgPrice"));
+                            var sellAvg = ParseDecimal(TryGetStringAny(item, "totalsellavgprice", "totalSellAvgPrice", "sellavgprice", "sellAvgPrice"));
+                            var closedQty = Math.Min(buyQty, sellQty);
+                            if (closedQty > 0m && buyAvg > 0m && sellAvg > 0m)
+                                terminalPnl = (sellAvg - buyAvg) * closedQty;
+                        }
+
+                        if (!terminalPnl.HasValue && netQty != 0m && ltp > 0m && avgPrice > 0m)
+                            terminalPnl = (ltp - avgPrice) * netQty;
+
+                        var rowPnl = terminalPnl ?? 0m;
+                        realised = netQty == 0m ? rowPnl : 0m;
+                        unrealised = netQty != 0m ? rowPnl : 0m;
+                    }
+
+                    positions.Add(new BrokerPosition
+                    {
+                        Symbol = symbol,
+                        Quantity = netQty,
+                        AveragePrice = avgPrice,
+                        CurrentPrice = ltp,
+                        UnrealizedPnL = unrealised,
+                        RealizedPnL = realised,
+                        OpenedAt = DateTime.UtcNow,
+                        SymbolToken = TryGetStringAny(item, "symboltoken", "symbolToken", "token"),
+                        Exchange = TryGetStringAny(item, "exchange", "exch_seg", "exchSeg")
+                    });
+                }
             }
+
+            var closedPositions = positions.Where(p => p.Quantity == 0m).ToList();
+            var openPositions = positions.Where(p => p.Quantity != 0m).ToList();
+            var realisedPnl = closedPositions.Sum(p => p.RealizedPnL);
+            var unrealisedPnl = openPositions.Sum(p => p.UnrealizedPnL);
+
+            _logger.LogInformation(
+                "Retrieved {Count} terminal position rows: closed={ClosedCount} realised {Realised:N2} | open={OpenCount} unrealised {Unrealised:N2} | net {Net:N2}",
+                positions.Count, closedPositions.Count, realisedPnl,
+                openPositions.Count, unrealisedPnl, realisedPnl + unrealisedPnl);
 
             return positions;
         }
         catch (Exception ex)
         {
+            // Deliberately rethrow rather than returning []. A caller cannot distinguish
+            // "no positions" from "read failed" when both are an empty list, and treating
+            // a failure as a flat book silently reports 0.00 P&L as terminal truth.
             _logger.LogError(ex, "Error getting position book");
-            return [];
+            throw;
         }
     }
 
@@ -981,7 +1253,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             var result = await _apiClient.GetTradeBookAsync();
             var trades = new List<BrokerTrade>();
 
-            if (result != null && result.Value.TryGetProperty("data", out var data))
+            if (result != null && result.Value.TryGetProperty("data", out _))
             {
                 // Parse trades from Angel One response
                 _logger.LogInformation("Retrieved {Count} trades from trade book", trades.Count);

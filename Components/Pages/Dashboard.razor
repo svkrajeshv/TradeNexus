@@ -8,19 +8,38 @@
 @using NexusApp.Helpers
 @using NexusApp.Interfaces
 @using NexusApp.Models
+@using NexusApp.Components.Shared
 @using NexusApp.Services
 @inject TradingSignalService SignalService
+@inject IServiceProvider ServiceProvider
+@inject IBroker Broker
 @inject IDbContextFactory<TradingDbContext> DbFactory
 @inject NavigationManager Nav
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
 @inject ITradingEngine TradingEngine
 @inject ISettingsService SettingsService
+@inject NexusApp.Services.HealthSnapshotCache HealthSnapshots
+@inject NexusApp.Services.HubConnectionFactory HubFactory
+@inject ILogger<Dashboard> Logger
 @implements IAsyncDisposable
 
 <PageTitle>Trading Dashboard</PageTitle>
 
 <MudText Typo="Typo.h4" Class="mb-4">Trading Dashboard</MudText>
+@if (_refreshError is not null)
+{
+    <MudAlert Severity="Severity.Error" Class="mb-3">
+        Dashboard data could not be loaded, so the figures below are not live: @_refreshError
+    </MudAlert>
+}
+@if (_hubError is not null)
+{
+    <MudAlert Severity="Severity.Warning" Class="mb-3">
+        Live feed is not connected, so Unrealised / Realised / MTM are unavailable from the
+        broker terminal: @_hubError
+    </MudAlert>
+}
 <style>
     .cmp-blink-up {
         animation: cmp-up 0.7s ease-in-out 1;
@@ -39,6 +58,126 @@
     .live-signals-table .mud-chip {
         font-size: 0.68rem;
         height: 22px;
+    }
+    /* Wide tables scroll horizontally instead of squeezing columns on desktop/tablet. */
+    .table-scroll {
+        width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    /* Vertical scroll and sticky headers for active/live signal grids */
+    .live-signals-table .mud-table-container,
+    .watchlist-table .mud-table-container {
+        max-height: 400px;
+        overflow-y: auto !important;
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch;
+    }
+    .live-signals-table .mud-table-head th,
+    .watchlist-table .mud-table-head th {
+        background-color: var(--mud-palette-surface) !important;
+        position: sticky;
+        top: 0;
+        z-index: 2;
+    }
+    .live-signals-table .mud-table-container::-webkit-scrollbar,
+    .watchlist-table .mud-table-container::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+    }
+    .live-signals-table .mud-table-container::-webkit-scrollbar-track,
+    .watchlist-table .mud-table-container::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    .live-signals-table .mud-table-container::-webkit-scrollbar-thumb,
+    .watchlist-table .mud-table-container::-webkit-scrollbar-thumb {
+        background-color: var(--mud-palette-lines-default);
+        border-radius: 4px;
+    }
+    .live-signals-table .mud-table-container::-webkit-scrollbar-thumb:hover,
+    .watchlist-table .mud-table-container::-webkit-scrollbar-thumb:hover {
+        background-color: var(--mud-palette-text-secondary);
+    }
+    /* Mobile card grid used by the Open Positions list. */
+    .position-card {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 12px;
+        width: 100%;
+        padding: 12px;
+        margin-bottom: 10px;
+        border: 1px solid var(--mud-palette-lines-default);
+        border-left-width: 4px;
+        border-radius: 8px;
+        background-color: var(--mud-palette-surface);
+    }
+    /* Book differentiation: a colored left border + faint row/card tint make the
+       Live (real money) vs Paper (simulated) book obvious at a glance, without
+       relying on reading the channel text - important on the small mobile cards
+       where that text is easy to miss. */
+    .position-card--live {
+        border-left-color: var(--mud-palette-success);
+        background-color: rgba(76, 175, 80, 0.06);
+    }
+    .position-card--paper {
+        border-left-color: var(--mud-palette-tertiary, #9c27b0);
+        background-color: rgba(156, 39, 176, 0.05);
+    }
+    .book-badge {
+        font-size: 0.62rem !important;
+        height: 20px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.3px;
+    }
+    .position-row--live {
+        border-left: 4px solid var(--mud-palette-success);
+        background-color: rgba(76, 175, 80, 0.05);
+    }
+    .position-row--paper {
+        border-left: 4px solid var(--mud-palette-tertiary, #9c27b0);
+        background-color: rgba(156, 39, 176, 0.04);
+    }
+    .watchlist-card-full {
+        grid-column: 1 / -1;
+    }
+    .watchlist-card-label {
+        font-size: 0.68rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--mud-palette-text-secondary);
+    }
+    .watchlist-card-value {
+        font-size: 0.9rem;
+        word-break: break-word;
+    }
+    @@media (max-width: 599.98px) {
+        /* MudTable switches to stacked rows below its breakpoint; DataLabel drives
+           the "Label   Value" pairs so the rows stay readable on phones. */
+        .live-signals-table,
+        .watchlist-table {
+            font-size: 0.8rem;
+        }
+        .live-signals-table td,
+        .watchlist-table td {
+            white-space: normal !important;
+            padding: 4px 8px !important;
+        }
+        .live-signals-table .mud-table-cell-align-right,
+        .watchlist-table .mud-table-cell-align-right {
+            text-align: right;
+        }
+        .live-signals-table .mud-table-row,
+        .watchlist-table .mud-table-row {
+            border-bottom: 1px solid var(--mud-palette-lines-default);
+        }
+        .live-signals-table .mud-table-cell-mobile:before,
+        .watchlist-table .mud-table-cell-mobile:before {
+            font-weight: 600;
+            font-size: 0.68rem;
+            text-transform: uppercase;
+            color: var(--mud-palette-text-secondary);
+        }
     }
     /* Stat cards always share a single row - 5 normally, 6 when the MTM card is live.
        Applies at every breakpoint so mobile shows one compact row instead of a
@@ -91,6 +230,13 @@
     }
 </style>
 
+<MudToggleGroup T="PnlMode" Value="_pnlMode" ValueChanged="OnPnlModeChanged" Color="Color.Primary"
+                Size="Size.Small" CheckMark="false" SelectionMode="SelectionMode.SingleSelection" Class="mb-3">
+    <MudToggleItem Value="PnlMode.All" Text="All" />
+    <MudToggleItem Value="PnlMode.Live" Text="Live" />
+    <MudToggleItem Value="PnlMode.Paper" Text="Paper" />
+</MudToggleGroup>
+
 <MudGrid Class="@($"dashboard-grid{(_isMtmLive ? " has-mtm" : string.Empty)}")" Spacing="3">
     <MudItem xs="12" sm="6" md="3" Class="stat-card">
         <MudPaper Class="pa-4" Elevation="2">
@@ -125,9 +271,16 @@
                 <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Unrealised P&amp;L</MudText>
                 <MudIcon Icon="@Icons.Material.Filled.AccountBalanceWallet" Color="Color.Error" />
             </MudStack>
-            <MudText Typo="Typo.h4" Color="@(_totalPnL >= 0 ? Color.Success : Color.Error)">
-                ₹@_totalPnL.ToString("N2")
-            </MudText>
+            @if (FiguresKnown)
+            {
+                <MudText Typo="Typo.h4" Color="@(_totalPnL >= 0 ? Color.Success : Color.Error)">
+                    ₹@_totalPnL.ToString("N2")
+                </MudText>
+            }
+            else
+            {
+                <MudText Typo="Typo.h4" Color="Color.Secondary">₹0.00</MudText>
+            }
         </MudPaper>
     </MudItem>
     <MudItem xs="12" sm="6" md="3" Class="stat-card">
@@ -136,12 +289,19 @@
                 <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Realised P&amp;L</MudText>
                 <MudIcon Icon="@Icons.Material.Filled.Payments" Color="Color.Success" />
             </MudStack>
-            <MudText Typo="Typo.h4" Color="@(_realizedPnL >= 0 ? Color.Success : Color.Error)">
-                ₹@_realizedPnL.ToString("N2")
-            </MudText>
+            @if (FiguresKnown)
+            {
+                <MudText Typo="Typo.h4" Color="@(_realizedPnL >= 0 ? Color.Success : Color.Error)">
+                    ₹@_realizedPnL.ToString("N2")
+                </MudText>
+            }
+            else
+            {
+                <MudText Typo="Typo.h4" Color="Color.Secondary">₹0.00</MudText>
+            }
         </MudPaper>
     </MudItem>
-    @if (_isMtmLive)
+    @if (_isMtmLive && FiguresKnown)
     {
         <MudItem xs="12" sm="6" md="3" Class="stat-card">
             <MudPaper Class="pa-4" Elevation="2">
@@ -173,7 +333,8 @@
             }
             else
             {
-                <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" RowStyleFunc="GetSignalRowStyle">
+                <div class="table-scroll">
+                <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" Breakpoint="Breakpoint.Sm" RowStyleFunc="GetSignalRowStyle" FixedHeader="true">
                     <HeaderContent>
                         <MudTh>Time</MudTh>
                         <MudTh>Channel</MudTh>
@@ -185,50 +346,22 @@
                         <MudTh>Actions</MudTh>
                     </HeaderContent>
                     <RowTemplate>
-                        <MudTd>@context.ReceivedTimestamp.ToLocalTime().ToString("HH:mm:ss")</MudTd>
-                        <MudTd>
-                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
-                                @(string.IsNullOrWhiteSpace(context.ChannelName) ? "-" : context.ChannelName)
-                            </MudChip>
-                        </MudTd>
-                        <MudTd>
-                            @context.Action @context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()
-                        </MudTd>
-                        <MudTd>
-                            <MudStack Row="true" Spacing="1">
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">Entry: @context.EntryPrice.ToString("0.##")</MudChip>
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">SL: @context.StopLoss.ToString("0.##")</MudChip>
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">T: @string.Join(" / ", context.Targets.Select(t => t.ToString("0.##")))</MudChip>
-                            </MudStack>
-                        </MudTd>
-                        <MudTd>
-                            <MudChip T="string"
-                                     Color="@(HasCmpCrossedEntry(context) ? Color.Success : Color.Info)"
-                                     Variant="Variant.Filled"
-                                     Size="Size.Small"
-                                     Class="@GetCmpBlinkClass(context)">
-                                CMP: @GetCmpDisplay(context)
-                            </MudChip>
-                        </MudTd>
-                        <MudTd>@FormatDelay(context.SignalDelayMs)</MudTd>
-                        <MudTd>
-                            <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
-                        </MudTd>
-                        <MudTd>
-                            @if (IsEditable(context))
-                            {
-                                <MudStack Row="true" Spacing="1">
-                                    <MudButton Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined"
-                                               Style="min-width:56px" OnClick="@(() => SaveAsync(context))">Save</MudButton>
-                                    <MudButton Size="Size.Small" Color="Color.Success" Variant="Variant.Filled"
-                                               Style="min-width:52px" OnClick="@(() => BuyAsync(context))">BUY</MudButton>
-                                    <MudButton Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined"
-                                               Style="min-width:64px" OnClick="@(() => IgnoreAsync(context))">Ignore</MudButton>
-                                </MudStack>
-                            }
-                        </MudTd>
+                        <LiveSignalRow Signal="context"
+                                       CmpDisplay="@GetCmpDisplay(context)"
+                                       HasCrossed="@HasCmpCrossedEntry(context)"
+                                       BlinkClass="@GetCmpBlinkClass(context)"
+                                       DelayText="@FormatDelay(context.SignalDelayMs)"
+                                       Staleness="@ToTuple(GetSignalStaleness(context))"
+                                       StatusColor="@StatusColor(context.Status)"
+                                       StatusReason="@GetStatusReason(context)"                                       IsEditable="@IsEditable(context)"
+                                       IsPendingAutoExecution="@IsPendingAutoExecution(context)"
+                                       OnSave="@(s => SaveAsync(s))"
+                                       OnBuy="@(s => BuyAsync(s))"
+                                       OnIgnore="@(s => IgnoreAsync(s))"
+                                       OnCancelPendingAuto="@(s => CancelPendingAutoAsync(s))" />
                     </RowTemplate>
                 </MudTable>
+                </div>
             }
         </MudPaper>
     </MudItem>
@@ -249,7 +382,8 @@
             }
             else
             {
-                <MudTable Items="_watchlist" Dense="true" Hover="true" Bordered="false">
+                <div class="table-scroll">
+                <MudTable Class="watchlist-table" Items="_watchlist" Dense="true" Hover="true" Bordered="false" Breakpoint="Breakpoint.Sm" FixedHeader="true">
                     <HeaderContent>
                         <MudTh>Time</MudTh>
                         <MudTh>Channel</MudTh>
@@ -263,15 +397,15 @@
                         <MudTh>Actions</MudTh>
                     </HeaderContent>
                     <RowTemplate>
-                        <MudTd>@context.ReceivedTimestamp.ToLocalTime().ToString("HH:mm:ss")</MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="Time">@context.ReceivedTimestamp.ToIstString("hh:mm:ss tt")</MudTd>
+                        <MudTd DataLabel="Channel">
                             <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
                                 @(string.IsNullOrWhiteSpace(context.ChannelName) ? "-" : context.ChannelName)
                             </MudChip>
                         </MudTd>
-                        <MudTd>@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
-                        <MudTd>@GetEdit(context).EntryPrice.ToString("0.##")</MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="Signal">@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
+                        <MudTd DataLabel="Entry">@GetEdit(context).EntryPrice.ToString("0.##")</MudTd>
+                        <MudTd DataLabel="CMP">
                             <MudChip T="string"
                                      Color="@(HasCmpCrossedEntry(context) ? Color.Success : Color.Info)"
                                      Variant="Variant.Filled"
@@ -280,11 +414,15 @@
                                 @GetCmpDisplay(context)
                             </MudChip>
                         </MudTd>
-                        <MudTd>@GetTickValueDisplay(_lowBySignal, context.Id)</MudTd>
-                        <MudTd>@GetTickValueDisplay(_highBySignal, context.Id)</MudTd>
-                        <MudTd>@GetExitDisplay(context.Id)</MudTd>
-                        <MudTd><MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip></MudTd>
-                        <MudTd>
+                        <MudTd DataLabel="Low">@GetTickValueDisplay(_lowBySignal, context.Id)</MudTd>
+                        <MudTd DataLabel="High">@GetTickValueDisplay(_highBySignal, context.Id)</MudTd>
+                        <MudTd DataLabel="Exit">@GetExitDisplay(context.Id)</MudTd>
+                        <MudTd DataLabel="Status">
+                            <MudTooltip Text="@GetStatusReason(context)" Placement="Placement.Top" Arrow="true" Disabled="@(string.IsNullOrWhiteSpace(GetStatusReason(context)))">
+                                <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
+                            </MudTooltip>
+                        </MudTd>
+                        <MudTd DataLabel="Actions">
                             <MudButton Size="Size.Small"
                                        Color="Color.Default"
                                        Variant="Variant.Outlined"
@@ -294,6 +432,7 @@
                         </MudTd>
                     </RowTemplate>
                 </MudTable>
+                </div>
             }
         </MudPaper>
     </MudItem>
@@ -301,7 +440,7 @@
     <MudItem xs="12">
         <MudPaper Class="pa-4" Elevation="2">
             <MudText Typo="Typo.h6" Class="mb-2">Open Positions</MudText>
-            @if (_positions.Count == 0)
+            @if (_openPositions == 0)
             {
                 <MudText Typo="Typo.body2" Color="Color.Secondary">No open positions.</MudText>
             }
@@ -309,10 +448,11 @@
             {
                 <!-- Desktop Table View (hidden on mobile) -->
                 <div class="d-none d-sm-flex flex-column">
-                    <div class="grid-height-box">
-                    <MudTable Items="_positions" Dense="true" Hover="true">
+                    <div class="grid-height-box table-scroll">
+                    <MudTable Items="CombinedPositions" Dense="true" Hover="true" RowClassFunc="@GetPositionRowClass" T="object">
                         <HeaderContent>
                             <MudTh>Symbol</MudTh>
+                            <MudTh>Book</MudTh>
                             <MudTh>Channel</MudTh>
                             <MudTh>Qty</MudTh>
                             <MudTh>Entry</MudTh>
@@ -323,43 +463,96 @@
                             <MudTh>Action</MudTh>
                         </HeaderContent>
                         <RowTemplate>
-                            <MudTd>@context.Symbol</MudTd>
-                            <MudTd>
-                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
-                                    @(string.IsNullOrWhiteSpace(context.Signal?.ChannelName) ? "-" : context.Signal.ChannelName)
-                                </MudChip>
-                            </MudTd>
-                            <MudTd>@context.Quantity</MudTd>
-                            <MudTd>@context.EntryPrice</MudTd>
-                            <MudTd>@context.CurrentPrice</MudTd>
-                            <MudTd>@(context.StopLoss?.ToString("0.##") ?? "-")</MudTd>
-                            <MudTd>@(context.Targets.Count > 0 ? context.Targets[0].ToString("0.##") : "-")</MudTd>
-                            <MudTd>
-                                <MudText Color="@(context.UnrealizedPnL >= 0 ? Color.Success : Color.Error)">
-                                    @context.UnrealizedPnL.ToString("N2")
-                                </MudText>
-                            </MudTd>
-                            <MudTd>
-                                <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
-                                           StartIcon="@Icons.Material.Filled.Close"
-                                           OnClick="@(() => SquareOffPositionAsync(context))">
-                                    Square Off
-                                </MudButton>
-                            </MudTd>
+                            @if (context is NexusApp.Models.Position localPos)
+                            {
+                                <MudTd>@localPos.Symbol</MudTd>
+                                <MudTd>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
+                                             Color="@(BookScope.IsPaper(localPos) ? Color.Tertiary : Color.Success)">
+                                        @(BookScope.IsPaper(localPos) ? "PAPER" : "LIVE")
+                                    </MudChip>
+                                </MudTd>
+                                <MudTd>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                        @(string.IsNullOrWhiteSpace(localPos.Signal?.ChannelName) ? "-" : localPos.Signal.ChannelName)
+                                    </MudChip>
+                                </MudTd>
+                                <MudTd>@localPos.Quantity</MudTd>
+                                <MudTd>@localPos.EntryPrice</MudTd>
+                                <MudTd>@localPos.CurrentPrice</MudTd>
+                                <MudTd>@(localPos.StopLoss?.ToString("0.##") ?? "-")</MudTd>
+                                <MudTd>@(localPos.Targets.Count > 0 ? localPos.Targets[0].ToString("0.##") : "-")</MudTd>
+                                <MudTd>
+                                    <MudText Color="@(localPos.UnrealizedPnL >= 0 ? Color.Success : Color.Error)">
+                                        @localPos.UnrealizedPnL.ToString("N2")
+                                    </MudText>
+                                </MudTd>
+                                <MudTd>
+                                    <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
+                                               StartIcon="@Icons.Material.Filled.Close"
+                                               OnClick="@(() => SquareOffPositionAsync(localPos))">
+                                        Square Off
+                                    </MudButton>
+                                </MudTd>
+                            }
+                            else if (context is BrokerPositionVm brokerPos)
+                            {
+                                var matchedSignal = FindMatchingSignal(brokerPos.Symbol);
+                                <MudTd>@brokerPos.Symbol</MudTd>
+                                <MudTd>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
+                                             Color="Color.Info">
+                                        BROKER
+                                    </MudChip>
+                                </MudTd>
+                                <MudTd>
+                                    @if (!string.IsNullOrWhiteSpace(matchedSignal?.ChannelName))
+                                    {
+                                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                            @matchedSignal.ChannelName
+                                        </MudChip>
+                                    }
+                                    else
+                                    {
+                                        <span>-</span>
+                                    }
+                                </MudTd>
+                                <MudTd>@brokerPos.Quantity</MudTd>
+                                <MudTd>@brokerPos.AvgPrice.ToString("0.##")</MudTd>
+                                <MudTd>@brokerPos.LTP.ToString("0.##")</MudTd>
+                                <MudTd>@(matchedSignal?.StopLoss > 0 ? matchedSignal.StopLoss.ToString("0.##") : "-")</MudTd>
+                                <MudTd>@(matchedSignal?.Targets.Count > 0 ? matchedSignal.Targets[0].ToString("0.##") : "-")</MudTd>
+                                <MudTd>
+                                    <MudText Color="@(brokerPos.PnL >= 0 ? Color.Success : Color.Error)">
+                                        @brokerPos.PnL.ToString("N2")
+                                    </MudText>
+                                </MudTd>
+                                <MudTd>
+                                    <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
+                                               StartIcon="@Icons.Material.Filled.Close"
+                                               OnClick="@(() => SquareOffBrokerPositionAsync(brokerPos))">
+                                        Square Off
+                                    </MudButton>
+                                </MudTd>
+                            }
                         </RowTemplate>
                     </MudTable>
+
                     </div>
                 </div>
 
                 <!-- Mobile Card View (shown on mobile only) -->
                 <div class="d-flex d-sm-none">
                     <MudStack Class="w-100">
-                        @foreach (var position in _positions)
+                        @foreach (var position in DisplayPositions)
                         {
-                            <div class="position-card">
-                                <div class="watchlist-card-full">
-                                    <div class="watchlist-card-label">Symbol</div>
-                                    <div class="watchlist-card-value">@position.Symbol</div>
+                            <div class="position-card @(BookScope.IsPaper(position) ? "position-card--paper" : "position-card--live")">
+                                <div class="watchlist-card-full d-flex justify-space-between align-center">
+                                    <div class="watchlist-card-value" style="font-weight:600;">@position.Symbol</div>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
+                                             Color="@(BookScope.IsPaper(position) ? Color.Tertiary : Color.Success)">
+                                        @(BookScope.IsPaper(position) ? "PAPER" : "LIVE")
+                                    </MudChip>
                                 </div>
 
                                 <div>
@@ -410,6 +603,77 @@
                                 </div>
                             </div>
                         }
+                        @foreach (var bp in BrokerOnlyPositions)
+                        {
+                            var matchedSignal = FindMatchingSignal(bp.Symbol);
+                            <div class="position-card position-card--live" style="border-left-color: var(--mud-palette-info);">
+                                <div class="watchlist-card-full d-flex justify-space-between align-center">
+                                    <div class="watchlist-card-value" style="font-weight:600;">@bp.Symbol</div>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
+                                             Color="Color.Info">
+                                        BROKER
+                                    </MudChip>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Channel</div>
+                                    <div class="watchlist-card-value">
+                                        @if (!string.IsNullOrWhiteSpace(matchedSignal?.ChannelName))
+                                        {
+                                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                                @matchedSignal.ChannelName
+                                            </MudChip>
+                                        }
+                                        else
+                                        {
+                                            <span>-</span>
+                                        }
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Qty</div>
+                                    <div class="watchlist-card-value">@bp.Quantity</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Avg Price</div>
+                                    <div class="watchlist-card-value">@bp.AvgPrice.ToString("0.##")</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">LTP</div>
+                                    <div class="watchlist-card-value">@bp.LTP.ToString("0.##")</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">SL</div>
+                                    <div class="watchlist-card-value">@(matchedSignal?.StopLoss > 0 ? matchedSignal.StopLoss.ToString("0.##") : "-")</div>
+                                </div>
+
+                                <div>
+                                    <div class="watchlist-card-label">Target 1</div>
+                                    <div class="watchlist-card-value">@(matchedSignal?.Targets.Count > 0 ? matchedSignal.Targets[0].ToString("0.##") : "-")</div>
+                                </div>
+
+                                <div class="watchlist-card-full">
+                                    <div class="watchlist-card-label">P&amp;L</div>
+                                    <div class="watchlist-card-value">
+                                        <MudText Color="@(bp.PnL >= 0 ? Color.Success : Color.Error)" style="font-weight: 600; font-size: 0.95rem;">
+                                            ₹@bp.PnL.ToString("N2")
+                                        </MudText>
+                                    </div>
+                                </div>
+
+                                <div class="watchlist-card-full">
+                                    <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
+                                               StartIcon="@Icons.Material.Filled.Close"
+                                               OnClick="@(() => SquareOffBrokerPositionAsync(bp))">
+                                        Square Off
+                                    </MudButton>
+                                </div>
+                            </div>
+                        }
                     </MudStack>
                 </div>
             }
@@ -419,6 +683,7 @@
 
 @code {
     private HubConnection? _hub;
+    private bool _disposed;
     private List<TradingSignal> _signals = new();
     private List<TradingSignal> _watchlist = new();
     private List<NexusApp.Models.Position> _positions = new();
@@ -427,72 +692,287 @@
     private readonly Dictionary<int, decimal> _lowBySignal = new();
     private readonly Dictionary<int, decimal> _highBySignal = new();
     private readonly Dictionary<int, decimal> _exitBySignal = new();
+    /// <summary>Broker/engine failure text per signal id, shown as a tooltip on the status chip.</summary>
+    private readonly Dictionary<int, string> _failureReasonBySignal = new();
     private readonly Dictionary<int, int> _cmpTickDirBySignal = new();
     private readonly Dictionary<int, DateTime> _cmpTickAtBySignal = new();
     private readonly HashSet<int> _hiddenWatchlistSignalIds = new();
     private int _todaySignals;
-    private int _openPositions;
-    private int _executedToday;
-    private decimal _totalPnL;
-    private decimal _realizedPnL;
+    private string? _refreshError;
+    private string? _hubError;
+
+    /// <summary>Rows rendered in the Open Positions table; the stat cards always
+    /// count the full <see cref="_positions"/> list so the two can never disagree.</summary>
+    private const int DisplayPositionLimit = 20;
+
+    /// <summary>Which book the stat cards report on.</summary>
+    public enum PnlMode { All, Live, Paper }
+    private PnlMode _pnlMode = PnlMode.All;
+
+    // Realised P&L is booked history, so it is queried per book in RefreshAsync
+    // rather than derived from the in-memory open-position list.
+    private decimal _realizedLive;
+    private decimal _realizedPaper;
+
+    // "Executed today" is per book, so it is counted from the Orders table (the only
+    // entity that carries a TradingAccount link). TradingSignal has no account, which
+    // is why the old signal-based count could never respond to the Live/Paper toggle.
+    private int _executedLive;
+    private int _executedPaper;
+    private int _executedAll;
 
     // Live MTM card state, fed by the HealthMonitorService "HealthTick" broadcast.
     private bool _brokerConnected;
-    private decimal _mtmNet;
-    private int _mtmOpenCount;
     private DateTime? _mtmAtIst;
 
+    // Broker-truth live figures from the same HealthTick. The broker position book
+    // reports realised P&L for legs that are fully squared off (netqty 0) and have no
+    // matching local Position row, so it is a better absolute level than our DB
+    // aggregate for the live book.
+    private bool _hasBrokerTick;
+    private decimal _liveUnrealizedTick;
+    private decimal _liveRealizedTick;
+
     /// <summary>
-    /// The MTM figure is only meaningful once the broker feed is up AND at least
-    /// one order has actually filled into a position; the card is hidden otherwise.
+    /// Lightweight view-model for broker-terminal positions that have no local
+    /// Position row (manual trades, carry-forward legs, non-NexusApp orders).
     /// </summary>
-    private bool _isMtmLive => _brokerConnected && _mtmAtIst.HasValue && _mtmOpenCount > 0;
+    private sealed record BrokerPositionVm(
+        string Symbol, decimal Quantity, decimal AvgPrice, decimal LTP, decimal PnL);
+
+    /// <summary>
+    /// Open positions from the broker position book, refreshed every 1s from the
+    /// BrokerPnlTick hub event. Only positions whose symbol does not match any
+    /// local DB position are shown (de-duplicated).
+    /// </summary>
+    private List<BrokerPositionVm> _brokerPositions = new();
+
+    private TradingSignal? FindMatchingSignal(string symbol)
+    {
+        if (string.IsNullOrWhiteSpace(symbol)) return null;
+        return _signals.FirstOrDefault(s => string.Equals(s.Symbol, symbol, StringComparison.OrdinalIgnoreCase))
+            ?? _watchlist.FirstOrDefault(s => string.Equals(s.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsPaperPosition(NexusApp.Models.Position p) => BookScope.IsPaper(p);
+
+    private IEnumerable<NexusApp.Models.Position> ScopedPositions => _pnlMode switch
+    {
+        PnlMode.Live => _positions.Where(BookScope.IsLive),
+        PnlMode.Paper => _positions.Where(IsPaperPosition),
+        _ => _positions
+    };
+
+    /// <summary>
+    /// Broker-only positions that have no matching local DB row. Paper mode
+    /// never shows broker positions; Live and All modes do.
+    /// </summary>
+    private IEnumerable<BrokerPositionVm> BrokerOnlyPositions => _pnlMode switch
+    {
+        PnlMode.Paper => Enumerable.Empty<BrokerPositionVm>(),
+        _ => _brokerPositions.Where(bp =>
+            !_positions.Any(p => p.ClosedAt == null &&
+                string.Equals(p.Symbol, bp.Symbol, StringComparison.OrdinalIgnoreCase)))
+    };
+
+    private IEnumerable<NexusApp.Models.Position> DisplayPositions =>
+        ScopedPositions.Take(DisplayPositionLimit);
+
+    private IEnumerable<object> CombinedPositions =>
+        DisplayPositions.Cast<object>().Concat(BrokerOnlyPositions.Cast<object>());
+
+    private int _openPositions => ScopedPositions.Count() + BrokerOnlyPositions.Count();
+
+    private int _executedToday => _pnlMode switch
+    {
+        PnlMode.Live => _executedLive,
+        PnlMode.Paper => _executedPaper,
+        _ => _executedAll
+    };
+
+    private decimal PaperUnrealized => _positions.Where(IsPaperPosition).Sum(p => p.UnrealizedPnL);
+
+    private decimal LocalLiveUnrealized => _positions.Where(BookScope.IsLive).Sum(p => p.UnrealizedPnL);
+
+    /// <summary>
+    /// Broker figures are only trusted while the broker is actually connected. The
+    /// health tick always carries a LiveUnrealized value (it falls back to a local or
+    /// zero figure when offline), so latching on its mere presence would pin the live
+    /// book to a stale - often zero - number for the rest of the session.
+    /// </summary>
+    private bool UseBrokerTruth => _brokerConnected && _hasBrokerTick;
+
+    // Do not adjust a terminal P&L total with locally marked CMP movement, and never
+    // substitute a locally derived figure for it. The local rows need not contain every
+    // terminal leg (carry-forward, manual and non-app orders are invisible to us), so a
+    // DB-derived number silently contradicts the AngelOne "Total G/L" the user reads as
+    // truth. When the terminal is unreadable the cards render "--" instead.
+    private decimal LiveUnrealized => UseBrokerTruth ? _liveUnrealizedTick : 0m;
+
+    private decimal LiveRealized => UseBrokerTruth ? _liveRealizedTick : 0m;
+
+    /// <summary>
+    /// Paper figures are computed entirely in-process and are always known. Live (and
+    /// therefore "All") figures are only known while the AngelOne position book is
+    /// readable, because that is the only source that sees every terminal leg.
+    /// </summary>
+    private bool FiguresKnown => _pnlMode == PnlMode.Paper || UseBrokerTruth;
+
+    private decimal _totalPnL => _pnlMode switch
+    {
+        PnlMode.Live => LiveUnrealized,
+        PnlMode.Paper => PaperUnrealized,
+        _ => LiveUnrealized + PaperUnrealized
+    };
+
+    private decimal _realizedPnL => _pnlMode switch
+    {
+        PnlMode.Live => LiveRealized,
+        PnlMode.Paper => _realizedPaper,
+        _ => LiveRealized + _realizedPaper
+    };
+
+    /// <summary>
+    /// Net MTM for the selected book. Derived from the very same unrealised and
+    /// realised properties the other two cards render, so the cards can never
+    /// contradict each other and "All" is exactly Live + Paper with no double count.
+    /// </summary>
+    private decimal _mtmNet => _totalPnL + _realizedPnL;
+
+    /// <summary>
+    /// The selected book did something today: it either still holds an open position
+    /// or it booked realised P&L. A fully squared-off day has no open positions but
+    /// still has a meaningful MTM, so open count alone must not gate the card.
+    /// </summary>
+    private bool HasBookActivity => _openPositions > 0 || _realizedPnL != 0m;
+
+    /// <summary>
+    /// The MTM figure is only meaningful once a tick has arrived and the book has
+    /// actually traded; the card is hidden otherwise. Broker connectivity is only
+    /// required for the live book - paper MTM is simulated locally.
+    /// </summary>
+    private bool _isMtmLive =>
+        _mtmAtIst.HasValue && HasBookActivity &&
+        _pnlMode switch
+        {
+            PnlMode.Live => _brokerConnected,
+            PnlMode.Paper => true,
+            _ => _brokerConnected || _positions.Any(IsPaperPosition) || _realizedPaper != 0m
+        };
+
+    private void OnPnlModeChanged(PnlMode mode)
+    {
+        _pnlMode = mode;
+        StateHasChanged();
+    }
     // Default lots loaded from global settings (Settings page → "Default Lots per Order")
     private decimal _defaultLots = 1;
+    // Pending order auto-cancel timeout (Settings page), used to project a
+    // remaining-window staleness hint on still-actionable Live Signal rows.
+    private int _pendingOrderTimeoutMinutes = 5;
 
     protected override async Task OnInitializedAsync()
     {
+        // Only run for the interactive pass. With prerender enabled this component is
+        // built twice; doing the work in both doubles every query and, worse, makes a
+        // failure in the interactive instance look like a screen that "went to zero"
+        // after briefly showing the prerendered figures.
+        if (!RendererInfo.IsInteractive)
+            return;
+
         var saved = await SettingsService.GetSettingAsync<int?>("DefaultQuantity");
         if (saved.HasValue && saved.Value > 0)
             _defaultLots = saved.Value;
+        _pendingOrderTimeoutMinutes = await SettingsService.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
         await LoadHiddenWatchlistIdsAsync();
+
+        // Seed the live cards from the last broadcast health figures so the book
+        // toggle renders real numbers straight away instead of zeros until the
+        // next 30s HealthTick arrives.
+        ApplyHealthSnapshot(HealthSnapshots.Latest);
 
         await RefreshAsync();
         await ConnectHubAsync();
+    }
+
+    private void ApplyHealthSnapshot(NexusApp.Services.HealthSnapshot? snapshot)
+    {
+        if (snapshot is null)
+            return;
+
+        _brokerConnected = snapshot.BrokerConnected;
+
+        if (snapshot.BrokerConnected && snapshot.BrokerPnlAvailable)
+        {
+            _liveUnrealizedTick = snapshot.LiveUnrealized;
+            _liveRealizedTick = snapshot.LiveRealized;
+            _hasBrokerTick = true;
+        }
+        else
+        {
+            _liveUnrealizedTick = 0m;
+            _liveRealizedTick = 0m;
+            _hasBrokerTick = false;
+        }
+
+        // Seed broker positions from the cached snapshot so the grid renders
+        // on first load without waiting for the next BrokerPnlTick.
+        if (snapshot.BrokerPositions is { Count: > 0 })
+        {
+            _brokerPositions = snapshot.BrokerPositions
+                .Select(bp => new BrokerPositionVm(bp.Symbol, bp.Quantity, bp.AveragePrice, bp.CurrentPrice, bp.UnrealizedPnL))
+                .ToList();
+        }
+
+        _mtmAtIst = snapshot.TimestampUtc.ToIst();
     }
 
     private async Task ConnectHubAsync()
     {
         try
         {
-            _hub = new HubConnectionBuilder()
-                .WithUrl(Nav.ToAbsoluteUri("/tradingHub"))
-                .WithAutomaticReconnect()
-                .Build();
+            _hub = HubFactory.Create(Nav);
 
-            _hub.On<JsonElement>("SignalReceived", async _ =>
+            _hub.On<JsonElement>("SignalReceived", async payload =>
             {
+                if (_disposed)
+                    return;
+
                 await InvokeAsync(async () =>
                 {
                     await RefreshAsync();
-                    Snackbar.Add("New signal received", Severity.Info);
+
+                    var requiresManual = payload.ValueKind == JsonValueKind.Object &&
+                        TryGetProp(payload, out var requiresManualProp, "RequiresManualAction", "requiresManualAction") &&
+                        requiresManualProp.ValueKind == JsonValueKind.True;
+
+                    Snackbar.Add(requiresManual ? "New signal received — action required" : "New signal received (auto)", Severity.Info);
                     await JS.InvokeVoidAsync("NexusApp.notify", "Trading Signal", "A new signal was parsed");
-                    await JS.InvokeVoidAsync("NexusApp.beep");
+                    await JS.InvokeVoidAsync("NexusApp.playSound", requiresManual ? "signal-manual" : "signal-auto");
                 });
             });
 
             _hub.On<JsonElement>("SignalStatusChanged", async _ =>
             {
+                if (_disposed)
+                    return;
+
                 await InvokeAsync(RefreshAsync);
             });
 
             _hub.On<JsonElement>("PositionChanged", async _ =>
             {
+                if (_disposed)
+                    return;
+
                 await InvokeAsync(RefreshAsync);
             });
 
             _hub.On<JsonElement>("HealthTick", payload =>
             {
+                if (_disposed)
+                    return;
+
                 _ = InvokeAsync(() =>
                 {
                     if (payload.ValueKind != JsonValueKind.Object)
@@ -501,16 +981,79 @@
                     if (TryGetProp(payload, out var connectedProp, "BrokerConnected", "brokerConnected"))
                         _brokerConnected = connectedProp.ValueKind == JsonValueKind.True;
 
-                    if (TryGetProp(payload, out var netProp, "NetPnL", "netPnL") &&
-                        TryGetDecimal(netProp, out var net))
-                        _mtmNet = net;
+                    var brokerPnlAvailable = true;
+                    if (TryGetProp(payload, out var brokerPnlProp, "BrokerPnlAvailable", "brokerPnlAvailable"))
+                        brokerPnlAvailable = brokerPnlProp.ValueKind == JsonValueKind.True;
 
-                    if (TryGetProp(payload, out var openProp, "OpenPositions", "openPositions") &&
-                        openProp.TryGetInt32(out var openCount))
-                        _mtmOpenCount = openCount;
+                    if (_brokerConnected && brokerPnlAvailable)
+                    {
+                        var applied = false;
+
+                        if (TryGetProp(payload, out var liveUnrealProp, "LiveUnrealized", "liveUnrealized") &&
+                            TryGetDecimal(liveUnrealProp, out var liveUnreal))
+                        {
+                            _liveUnrealizedTick = liveUnreal;
+                            applied = true;
+                        }
+
+                        if (TryGetProp(payload, out var liveRealProp, "LiveRealized", "liveRealized") &&
+                            TryGetDecimal(liveRealProp, out var liveReal))
+                        {
+                            _liveRealizedTick = liveReal;
+                            applied = true;
+                        }
+
+                        _hasBrokerTick = applied;
+
+                        // Parse broker positions for the Open Positions grid.
+                        ParseBrokerPositions(payload);
+                    }
+                    else
+                    {
+                        // Broker offline or live broker-book unreadable: do not render
+                        // local substitutes as terminal-truth live P&L.
+                        _hasBrokerTick = false;
+                        _liveUnrealizedTick = 0m;
+                        _liveRealizedTick = 0m;
+                        _brokerPositions = new();
+                    }
 
                     // Read as DateTimeOffset: System.Text.Json returns Kind=Local for a
                     // "Z" instant, which would be double-shifted by ToIst().
+                    if (TryGetProp(payload, out var tsProp, "Timestamp", "timestamp") &&
+                        tsProp.TryGetDateTimeOffset(out var tsOffset))
+                        _mtmAtIst = tsOffset.UtcDateTime.ToIst();
+
+                    StateHasChanged();
+                });
+            });
+
+            // BrokerPnlTick fires every 1s (from CmpStreamingService), carrying live
+            // P&L aggregates and broker open positions. This eliminates the 10s
+            // HealthTick cadence as the bottleneck for MTM and grid updates.
+            _hub.On<JsonElement>("BrokerPnlTick", payload =>
+            {
+                if (_disposed)
+                    return;
+
+                _ = InvokeAsync(() =>
+                {
+                    if (payload.ValueKind != JsonValueKind.Object)
+                        return;
+
+                    if (TryGetProp(payload, out var liveUnrealProp, "LiveUnrealized", "liveUnrealized") &&
+                        TryGetDecimal(liveUnrealProp, out var liveUnreal))
+                        _liveUnrealizedTick = liveUnreal;
+
+                    if (TryGetProp(payload, out var liveRealProp, "LiveRealized", "liveRealized") &&
+                        TryGetDecimal(liveRealProp, out var liveReal))
+                        _liveRealizedTick = liveReal;
+
+                    _hasBrokerTick = true;
+
+                    // Parse broker open positions for the grid.
+                    ParseBrokerPositions(payload);
+
                     if (TryGetProp(payload, out var tsProp, "Timestamp", "timestamp") &&
                         tsProp.TryGetDateTimeOffset(out var tsOffset))
                         _mtmAtIst = tsOffset.UtcDateTime.ToIst();
@@ -576,22 +1119,122 @@
 
                     if (changed)
                     {
-                        _totalPnL = _positions.Sum(p => p.UnrealizedPnL);
+                        // The stat cards read straight off _positions, so marking the rows
+                        // above is enough to move Unrealised P&L and MTM with the 1s CMP
+                        // stream. Visibility still comes from HealthTick, so only refresh
+                        // the stamp once it is live.
+                        if (_mtmAtIst.HasValue)
+                            _mtmAtIst = DateTime.UtcNow.ToIst();
+
                         StateHasChanged();
                     }
                 });
             });
 
-            await _hub.StartAsync();
+            _hub.Reconnecting += reconnectingError =>
+            {
+                if (_disposed)
+                    return Task.CompletedTask;
+
+                // While the hub is down no HealthTick arrives, so the live cards silently
+                // fall back to DB figures. Say so rather than showing stale numbers.
+                _ = InvokeAsync(() =>
+                {
+                    _hubError = "Reconnecting to the live feed...";
+                    StateHasChanged();
+                });
+                return Task.CompletedTask;
+            };
+
+            _hub.Reconnected += connectionId =>
+            {
+                if (_disposed)
+                    return Task.CompletedTask;
+
+                _ = InvokeAsync(async () =>
+                {
+                    _hubError = null;
+                    await RefreshAsync();
+                });
+                return Task.CompletedTask;
+            };
+
+            _hub.Closed += ex =>
+            {
+                if (_disposed)
+                    return Task.CompletedTask;
+
+                _ = InvokeAsync(() =>
+                {
+                    _hubError = ex is null
+                        ? "Live feed disconnected."
+                        : $"Live feed disconnected: {ex.Message}";
+                    _brokerConnected = false;
+                    _hasBrokerTick = false;
+                    StateHasChanged();
+                });
+                return Task.CompletedTask;
+            };
+
+            await StartHubWithRetryAsync();
+            _hubError = null;
         }
-        catch
+        catch (ObjectDisposedException)
         {
-            // Hub connection is best-effort; UI still works without it.
+            // The component was disposed (navigation away) while connecting; nothing to report.
+        }
+        catch (Exception ex)
+        {
+            // Without the hub there are no HealthTick or CmpTick updates, so every live
+            // figure is frozen on whatever the last DB read produced. That must not look
+            // like real broker data.
+            _hubError = ex.Message;
+            Logger.LogError(ex, "Dashboard could not connect to the trading hub");
+            Snackbar.Add($"Live feed unavailable: {ex.Message}", Severity.Error);
+            StateHasChanged();
+        }
+    }
+
+    // The first negotiate can lose the race with a still-warming host (or a briefly
+    // saturated thread pool). Retry with backoff so a transient startup hiccup does not
+    // leave the page permanently without a feed. Bails out the moment the component is
+    // disposed - otherwise the loop keeps calling StartAsync on a torn-down connection
+    // and reports "Cannot access a disposed object" instead of the real failure.
+    private async Task StartHubWithRetryAsync()
+    {
+        const int maxAttempts = 4;
+        for (var attempt = 1; ; attempt++)
+        {
+            if (_disposed || _hub is null)
+                return;
+
+            try
+            {
+                await _hub.StartAsync();
+                return;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+            catch (Exception ex) when (attempt < maxAttempts)
+            {
+                Logger.LogWarning(ex,
+                    "Trading hub connect attempt {Attempt}/{MaxAttempts} failed; retrying", attempt, maxAttempts);
+                await Task.Delay(TimeSpan.FromSeconds(attempt * 2));
+            }
         }
     }
 
     private async Task RefreshAsync()
     {
+        // A hub callback can be dispatched after the user has navigated away: the
+        // circuit disposes this component and its scoped IServiceProvider, but an
+        // in-flight SignalR handler still runs and would resolve DbFactory /
+        // SignalService from that disposed scope (ObjectDisposedException).
+        if (_disposed)
+            return;
+
         try
         {
             var allRecent = await SignalService.GetRecentSignalsAsync(50);
@@ -602,16 +1245,17 @@
                 .Take(30)
                 .ToList();
 
-            _todaySignals = allRecent.Count(s => s.ReceivedTimestamp.Date == DateTime.UtcNow.Date);
-            _executedToday = allRecent.Count(s => s.Status == SignalStatus.Executed &&
-                s.ReceivedTimestamp.Date == DateTime.UtcNow.Date);
+            _todaySignals = allRecent.Count(s => s.ReceivedTimestamp.ToIst().Date == todayIst);
 
             using var db = await DbFactory.CreateDbContextAsync();
+            // Load every open position, not a page of them: these rows are the single
+            // source of truth for the Open Positions and Unrealised P&L cards, and a
+            // capped list silently under-reported both. Only the table is paged.
             _positions = await db.Positions.AsNoTracking()
                 .Include(p => p.Signal)
+                .Include(p => p.TradingAccount)
                 .Where(p => p.ClosedAt == null)
                 .OrderByDescending(p => p.OpenedAt)
-                .Take(20)
                 .ToListAsync();
             var watch = await db.TradingSignals.AsNoTracking()
                 .Where(s => s.Status == SignalStatus.Pending || s.Status == SignalStatus.Executed)
@@ -635,18 +1279,75 @@
                     _exitBySignal.TryAdd(position.SignalId, position.ClosingPrice!.Value);
             }
 
-            _openPositions = _positions.Count;
-            _totalPnL = _positions.Sum(p => p.UnrealizedPnL);
-            var todayStart = DateTime.UtcNow.Date;
-            _realizedPnL = await db.Positions
-                .Where(p => p.ClosedAt >= todayStart && p.ClosedAt < todayStart.AddDays(1))
-                .SumAsync(p => p.RealizedPnL ?? 0m);
+            // A signal only records that it failed, never why: the broker/engine message
+            // lives on the order it produced. Pull the newest error text per signal so the
+            // status chip can explain the failure in a tooltip.
+            var statusSignalIds = _signals.Select(s => s.Id).Concat(watchSignalIds).Distinct().ToList();
+            _failureReasonBySignal.Clear();
+            if (statusSignalIds.Count > 0)
+            {
+                var failedOrders = await db.Orders.AsNoTracking()
+                    .Where(o => statusSignalIds.Contains(o.SignalId) &&
+                                (o.Status == OrderStatus.Failed || o.Status == OrderStatus.Rejected) &&
+                                o.ErrorMessage != null && o.ErrorMessage != "")
+                    .OrderByDescending(o => o.CreatedAt)
+                    .Select(o => new { o.SignalId, o.ErrorMessage })
+                    .ToListAsync();
+
+                foreach (var order in failedOrders)
+                    _failureReasonBySignal.TryAdd(order.SignalId, order.ErrorMessage!);
+            }
+
+            // Realised P&L is reported for the IST trading day, so the window is the
+            // IST midnight boundary expressed in UTC (the storage timezone).
+            var todayStart = todayIst.IstToUtc();
+            var tomorrowStart = todayIst.AddDays(1).IstToUtc();
+            var realizedByBook = await db.Positions
+                .Where(p => p.ClosedAt >= todayStart && p.ClosedAt < tomorrowStart)
+                .GroupBy(p => EF.Functions.Like(p.TradingAccount.ClientId, BookScope.PaperClientId))
+                .Select(g => new { IsPaper = g.Key, Total = g.Sum(p => p.RealizedPnL ?? 0m) })
+                .ToListAsync();
+            _realizedPaper = realizedByBook.Where(r => r.IsPaper).Sum(r => r.Total);
+            _realizedLive = realizedByBook.Where(r => !r.IsPaper).Sum(r => r.Total);
+
+            // "Executed today" counts distinct signals that actually traded, not order
+            // fills: one signal produces an entry order and an exit order, which would
+            // otherwise double the figure. Order is also the only entity that identifies
+            // which book it traded on.
+            var executedSignals = await db.Orders
+                .Where(o => o.Status == OrderStatus.Executed &&
+                            o.ExecutedAt >= todayStart && o.ExecutedAt < tomorrowStart)
+                .Select(o => new
+                {
+                    IsPaper = EF.Functions.Like(o.TradingAccount.ClientId, BookScope.PaperClientId),
+                    o.SignalId
+                })
+                .Distinct()
+                .ToListAsync();
+
+            _executedPaper = executedSignals.Count(x => x.IsPaper);
+            _executedLive = executedSignals.Count(x => !x.IsPaper);
+            // A signal traded on both books yields one row per book above, so the combined
+            // figure must be a distinct count rather than live + paper.
+            _executedAll = executedSignals.Select(x => x.SignalId).Distinct().Count();
+
             SyncEdits();
+            _refreshError = null;
             StateHasChanged();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The circuit was torn down mid-refresh. Nothing is left to render, and
+            // surfacing this as a refresh failure would be misleading.
         }
         catch (Exception ex)
         {
+            // A swallowed failure here leaves every card at its default 0, which reads
+            // as "flat day" rather than "broken". Log it and say so on screen.
+            _refreshError = ex.Message;
+            Logger.LogError(ex, "Dashboard refresh failed");
             Snackbar.Add($"Refresh failed: {ex.Message}", Severity.Error);
+            StateHasChanged();
         }
     }
 
@@ -658,6 +1359,21 @@
         SignalStatus.Pending => Color.Warning,
         _ => Color.Info
     };
+
+    /// <summary>
+    /// Tooltip text for a signal's status chip. Only failed signals carry an
+    /// explanation; when no order-level message was recorded a generic hint is shown
+    /// so the chip is never silently unexplained.
+    /// </summary>
+    private string? GetStatusReason(TradingSignal signal)
+    {
+        if (signal.Status != SignalStatus.Failed)
+            return null;
+
+        return _failureReasonBySignal.TryGetValue(signal.Id, out var reason)
+            ? reason
+            : "Execution failed - no broker error message was recorded for this signal.";
+    }
 
     private async Task BuyAsync(TradingSignal signal)
     {
@@ -751,6 +1467,36 @@
         }
     }
 
+    private async Task SquareOffBrokerPositionAsync(BrokerPositionVm pos)
+    {
+        try
+        {
+            var request = new BrokerOrderRequest
+            {
+                Symbol = pos.Symbol,
+                Quantity = Math.Abs(pos.Quantity),
+                Side = pos.Quantity > 0 ? OrderSide.Sell : OrderSide.Buy,
+                OrderType = OrderType.Market,
+                ProductType = ProductType.Mis,
+                Exchange = NexusApp.Helpers.MarketSegments.ExchangeForTradingSymbol(pos.Symbol)
+            };
+
+            var response = await Broker.PlaceOrderAsync(request);
+            if (response.Success)
+            {
+                Snackbar.Add($"Square-off submitted for {pos.Symbol}.", Severity.Success);
+            }
+            else
+            {
+                Snackbar.Add($"Square-off failed for {pos.Symbol}: {response.ErrorMessage}", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Square-off failed: {ex.Message}", Severity.Error);
+        }
+    }
+
     private async Task SaveAsync(TradingSignal signal)
     {
         await PersistEditedValuesAsync(signal, showSuccess: true);
@@ -763,6 +1509,24 @@
         await RefreshAsync();
     }
 
+    /// <summary>
+    /// In Auto trading mode, signals that are waiting on a background trigger
+    /// (entry price crossing, or an activation phrase from the channel) are not
+    /// yet executed and have no Save/BUY/Ignore actions since the user is not
+    /// meant to edit them. This still leaves the user with no way to stop the
+    /// engine from executing them once the trigger condition is met, so a
+    /// standalone Cancel action is offered for these two statuses only.
+    /// </summary>
+    private bool IsPendingAutoExecution(TradingSignal signal) =>
+        signal.Status == SignalStatus.AwaitingEntry || signal.Status == SignalStatus.AwaitingActivation;
+
+    private async Task CancelPendingAutoAsync(TradingSignal signal)
+    {
+        await SignalService.UpdateSignalStatusAsync(signal.Id, SignalStatus.Ignored);
+        Snackbar.Add("Signal cancelled before execution", Severity.Normal);
+        await RefreshAsync();
+    }
+
     private async Task RemoveFromWatchlistAsync(TradingSignal signal)
     {
         _hiddenWatchlistSignalIds.Add(signal.Id);
@@ -772,8 +1536,58 @@
         StateHasChanged();
     }
 
+    /// <summary>
+    /// Extracts the <c>BrokerPositions</c> / <c>Positions</c> array from a hub
+    /// payload and updates <see cref="_brokerPositions"/>.  Called from both
+    /// <c>HealthTick</c> (10s cadence) and <c>BrokerPnlTick</c> (1s cadence).
+    /// </summary>
+    private void ParseBrokerPositions(JsonElement payload)
+    {
+        JsonElement arr;
+        // BrokerPnlTick uses "Positions"/"positions"; HealthTick uses "BrokerPositions"/"brokerPositions".
+        if (!TryGetProp(payload, out arr, "Positions", "positions", "BrokerPositions", "brokerPositions") ||
+            arr.ValueKind != JsonValueKind.Array)
+            return;
+
+        var list = new List<BrokerPositionVm>();
+        foreach (var item in arr.EnumerateArray())
+        {
+            if (!TryGetProp(item, out var symProp, "Symbol", "symbol") ||
+                symProp.ValueKind != JsonValueKind.String)
+                continue;
+
+            var symbol = symProp.GetString();
+            if (string.IsNullOrWhiteSpace(symbol))
+                continue;
+
+            TryGetDecimal(TryGetPropValue(item, "Quantity", "quantity"), out var qty);
+            TryGetDecimal(TryGetPropValue(item, "AvgPrice", "avgPrice"), out var avgPrice);
+            TryGetDecimal(TryGetPropValue(item, "LTP", "ltp"), out var ltp);
+            TryGetDecimal(TryGetPropValue(item, "PnL", "pnL", "pnl"), out var pnl);
+
+            list.Add(new BrokerPositionVm(symbol, qty, avgPrice, ltp, pnl));
+        }
+
+        _brokerPositions = list;
+    }
+
+    /// <summary>
+    /// Helper to extract a property value from a JsonElement, returning <c>default</c>
+    /// when none of the candidate names are found.
+    /// </summary>
+    private static JsonElement TryGetPropValue(JsonElement obj, params string[] names)
+    {
+        for (var i = 0; i < names.Length; i++)
+        {
+            if (obj.TryGetProperty(names[i], out var val))
+                return val;
+        }
+        return default;
+    }
+
     public async ValueTask DisposeAsync()
     {
+        _disposed = true;
         if (_hub is not null)
         {
             await _hub.DisposeAsync();
@@ -949,6 +1763,47 @@
                     : $"{seconds / 3600:0.0} h";
     }
 
+    private readonly record struct SignalStalenessInfo(string Text, Color Color);
+
+    /// <summary>
+    /// Projects the remaining window before an unfilled limit order (placed right
+    /// now off this signal) would be auto-cancelled, based on the "Pending Order
+    /// Auto-Cancel" setting and how long the signal has already been sitting
+    /// unactioned since it was received.
+    /// </summary>
+    private SignalStalenessInfo? GetSignalStaleness(TradingSignal signal)
+    {
+        if (_pendingOrderTimeoutMinutes <= 0 || !(IsEditable(signal) || IsPendingAutoExecution(signal)))
+            return null;
+
+        var elapsed = DateTime.UtcNow - signal.ReceivedTimestamp.EnsureUtc();
+        var remaining = TimeSpan.FromMinutes(_pendingOrderTimeoutMinutes) - elapsed;
+
+        if (remaining <= TimeSpan.Zero)
+            return new SignalStalenessInfo("Cancelling...", Color.Error);
+
+        var totalWindow = TimeSpan.FromMinutes(_pendingOrderTimeoutMinutes);
+        var fractionRemaining = remaining.TotalSeconds / totalWindow.TotalSeconds;
+        var color = fractionRemaining switch
+        {
+            < 0.2 => Color.Error,
+            < 0.5 => Color.Warning,
+            _ => Color.Default
+        };
+
+        return new SignalStalenessInfo($"{FormatCountdown(remaining)} left", color);
+    }
+
+    private static string FormatCountdown(TimeSpan remaining)
+    {
+        if (remaining.TotalMinutes >= 1)
+            return $"{(int)remaining.TotalMinutes}m {remaining.Seconds}s";
+        return $"{Math.Max(0, remaining.Seconds)}s";
+    }
+
+    private static (string Text, Color Color)? ToTuple(SignalStalenessInfo? info) =>
+        info is { } i ? (i.Text, i.Color) : null;
+
     private static string BuildDefaultTargetText(TradingSignal signal)
     {
         var firstTarget = signal.Targets.Count > 0 ? signal.Targets[0] : signal.EntryPrice;
@@ -989,6 +1844,19 @@
     }
 
     private int GetCrossedCount() => _signals.Count(HasCmpCrossedEntry);
+
+    /// <summary>
+    /// Colors the whole Open Positions row by book (live vs paper) so the two are
+    /// distinguishable at a glance on desktop without reading the Book chip text.
+    /// </summary>
+    private static string GetPositionRowClass(object positionObj, int rowNumber)
+    {
+        if (positionObj is NexusApp.Models.Position position)
+            return BookScope.IsPaper(position) ? "position-row--paper" : "position-row--live";
+        
+        // Broker position Vm
+        return "position-row--live";
+    }
 
     private string GetCmpBlinkClass(TradingSignal signal)
     {

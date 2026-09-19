@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using NexusApp.Helpers;
 
 namespace NexusApp.Brokers.AngelOne;
 
@@ -79,9 +80,9 @@ public sealed class AngelInstrumentMaster
 
     /// <summary>
     /// True when the master is loaded in-memory <b>and</b> that load happened on
-    /// today's (local) date. Used to decide whether a login-time refresh is needed.
+    /// today's (IST) date. Used to decide whether a login-time refresh is needed.
     /// </summary>
-    public bool IsLoadedToday => IsLoaded && _loadedAtUtc != default && _loadedAtUtc.ToLocalTime().Date == DateTime.Today;
+    public bool IsLoadedToday => IsLoaded && _loadedAtUtc != default && _loadedAtUtc.ToIst().Date == DateTimeExtensions.IstToday();
 
     /// <summary>
     /// Clears the in-memory index and forces the next <see cref="EnsureLoadedAsync"/>
@@ -149,18 +150,18 @@ public sealed class AngelInstrumentMaster
     {
         // Load at most once per calendar day (IST). If already loaded and the
         // last load happened on today's date, nothing to do.
-        if (IsLoaded && _loadedAtUtc.ToLocalTime().Date == DateTime.Today)
+        if (IsLoadedToday)
             return;
 
         await _refreshLock.WaitAsync(ct);
         try
         {
-            if (IsLoaded && _loadedAtUtc.ToLocalTime().Date == DateTime.Today)
+            if (IsLoadedToday)
                 return;
 
-            // Cache is considered fresh if it was written on today's local date.
+            // Cache is considered fresh if it was written on today's IST date.
             var cacheFresh = File.Exists(_cachePath)
-                && File.GetLastWriteTime(_cachePath).Date == DateTime.Today;
+                && File.GetLastWriteTimeUtc(_cachePath).ToIst().Date == DateTimeExtensions.IstToday();
 
             string? json = null;
             if (cacheFresh)
@@ -298,12 +299,47 @@ public sealed class AngelInstrumentMaster
     }
 
     /// <summary>
+    /// True when a master row may be indexed for the given underlying.
+    /// <para>
+    /// Angel's master lists the <b>same</b> commodity names on more than one segment:
+    /// MCX carries the real commodity contracts, while <c>NCO</c> (NSE Commodity, shown
+    /// as NSECMD in the order book) and <c>NCDEX</c> carry look-alike rows with identical
+    /// <c>name</c> values but different tokens, expiries and lot sizes. For example
+    /// CRUDEOIL 8700 PE exists as both:
+    /// </para>
+    /// <code>
+    /// CRUDEOIL17SEP268700PE  token=576535  MCX  expiry=17SEP2026  lotsize=100
+    /// CRUDEOIL26SEP8700PE    token=135733  NCO  expiry=10SEP2026  lotsize=1
+    /// </code>
+    /// <para>
+    /// Every lookup here matches on <c>name</c> alone, so without this guard the NCO row
+    /// wins whenever its expiry is nearer — which is what booked commodity orders on the
+    /// NSECMD segment with a lot size of 1. Commodities are therefore accepted only from
+    /// MCX; equity underlyings are unaffected.
+    /// </para>
+    /// </summary>
+    private static bool IsAllowedSegment(string name, string exchangeSegment) =>
+        !MarketSegments.IsCommodity(name) ||
+        exchangeSegment.Equals("MCX", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Underlyings we actually trade. Non-listed index/stock options are dropped
     /// from the in-memory index to save memory (~90% reduction).
+    /// <para>
+    /// The MCX commodities are loaded unconditionally rather than being gated on the
+    /// <c>Mcx.Enabled</c> setting: loading them is harmless, and gating would mean
+    /// flipping that toggle required a full master re-download before commodity
+    /// symbols could resolve. Keeping the load unconditional makes the toggle take
+    /// effect immediately, at the cost of a modestly larger index while MCX is off.
+    /// </para>
     /// </summary>
     private static readonly HashSet<string> SupportedUnderlyings = new(StringComparer.OrdinalIgnoreCase)
     {
-        "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"
+        // NSE / BSE index options
+        "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX",
+        // MCX commodity options (mini/micro contracts are separate instruments)
+        "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER",
+        "CRUDEOILM", "NATGASMINI", "GOLDM", "SILVERM", "SILVERMIC"
     };
 
     /// <summary>
@@ -357,6 +393,15 @@ public sealed class AngelInstrumentMaster
                     if (string.IsNullOrWhiteSpace(name) || !SupportedUnderlyings.Contains(name))
                         continue;
 
+                    // Commodity names are duplicated on NCO/NCDEX with different tokens and
+                    // lot sizes; keep only the MCX rows so those look-alikes can never be
+                    // resolved by a name-based lookup.
+                    var seg = el.TryGetProperty("exch_seg", out var s) && s.ValueKind == JsonValueKind.String
+                        ? s.GetString() ?? string.Empty
+                        : string.Empty;
+                    if (!IsAllowedSegment(name!, seg))
+                        continue;
+
                     el.WriteTo(writer);
                     kept++;
                 }
@@ -384,7 +429,7 @@ public sealed class AngelInstrumentMaster
         //   * optionsSupported: OPTIDX for our supported underlyings within MaxExpiryDays — kept & pruned by strike window.
         //   * nonOptions:       everything else (FUT, EQ, etc.) — kept as-is for tradingsymbol lookups but not indexed.
         var optionsSupported = new List<MasterEntry>(capacity: 20_000);
-        var today = DateTime.Today;
+        var today = DateTimeExtensions.IstToday();
         var maxExpiryDate = today.AddDays(MaxExpiryDays);
 
         using var doc = JsonDocument.Parse(json);
@@ -407,6 +452,11 @@ public sealed class AngelInstrumentMaster
                 // Drop unsupported underlyings and far-dated expiries entirely.
                 if (!SupportedUnderlyings.Contains(entry.Name))
                     continue;
+                // A commodity must come from MCX: the NCO/NCDEX look-alikes carry the same
+                // name but a different token, expiry and lot size. This also protects a
+                // cache written before the download filter above existed.
+                if (!IsAllowedSegment(entry.Name, entry.ExchangeSegment))
+                    continue;
                 if (entry.ExpiryDate == default ||
                     entry.ExpiryDate < today ||
                     entry.ExpiryDate > maxExpiryDate)
@@ -425,6 +475,8 @@ public sealed class AngelInstrumentMaster
                 // dropped to save memory and speed up load/indexing.
                 if (!SupportedUnderlyings.Contains(entry.Name))
                     continue;
+                if (!IsAllowedSegment(entry.Name, entry.ExchangeSegment))
+                    continue;
 
                 byTs[entry.TradingSymbol] = entry;
             }
@@ -442,7 +494,7 @@ public sealed class AngelInstrumentMaster
         _optionIndex = pruned;
 
         _logger.LogInformation(
-            "Instrument master loaded: parsed={Parsed} kept={Kept} (options={Options}, non-options={NonOpt}). Dropped {Dropped} contracts to save memory.",
+            "Instrument master loaded: parsed={Parsed} kept={Kept} (options={Options}, mcx={NonOpt}). Dropped {Dropped} contracts to save memory.",
             totalParsed, byTs.Count, pruned.Count, byTs.Count - pruned.Count, totalParsed - byTs.Count);
     }
 
@@ -462,6 +514,17 @@ public sealed class AngelInstrumentMaster
         {
             var sorted = g.OrderBy(x => x.StrikeScaled).ToList();
             if (sorted.Count <= StrikesPerSide)
+            {
+                retained.AddRange(sorted);
+                continue;
+            }
+
+            // MCX commodity chains are small (a few hundred contracts in total) and the
+            // signals routinely quote deep-OTM strikes. Pruning to a median-centred ATM
+            // window drops those strikes from the NEAREST expiry while leaving them listed
+            // on a farther one, which makes FindOption's cross-expiry fallback silently
+            // roll the order onto the wrong series. Retain commodities in full.
+            if (MarketSegments.IsCommodity(g.Key.Name))
             {
                 retained.AddRange(sorted);
                 continue;
@@ -516,7 +579,7 @@ public sealed class AngelInstrumentMaster
         if (name.Length == 0)
             return null;
 
-        var floor = (from ?? DateTime.Today).Date;
+        var floor = (from ?? DateTimeExtensions.IstToday()).Date;
 
         DateTime? nearest = null;
         for (var i = 0; i < _optionIndex.Count; i++)
@@ -531,6 +594,36 @@ public sealed class AngelInstrumentMaster
         }
 
         return nearest;
+    }
+
+    /// <summary>
+    /// Returns the listed expiry for the given underlying that falls in the requested
+    /// month, or <c>null</c> when that month has no listed contract. Used for monthly
+    /// contracts (MCX commodities) where the signal names only the month ("EXPIRY - SEP")
+    /// and the exact expiry day varies per commodity.
+    /// </summary>
+    public DateTime? ExpiryInMonth(string underlying, int year, int month)
+    {
+        if (_optionIndex.Count == 0)
+            return null;
+
+        var name = (underlying ?? string.Empty).Trim().ToUpperInvariant();
+        if (name.Length == 0 || month is < 1 or > 12)
+            return null;
+
+        DateTime? earliest = null;
+        for (var i = 0; i < _optionIndex.Count; i++)
+        {
+            var e = _optionIndex[i];
+            if (!e.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (e.ExpiryDate == default || e.ExpiryDate.Year != year || e.ExpiryDate.Month != month)
+                continue;
+            if (earliest is null || e.ExpiryDate.Date < earliest.Value)
+                earliest = e.ExpiryDate.Date;
+        }
+
+        return earliest;
     }
 
     /// <summary>
@@ -554,6 +647,7 @@ public sealed class AngelInstrumentMaster
         // Angel stores strike as (strike * 100) rounded — e.g. 57000 → 5700000.
         var strikeScaled = (long)Math.Round(strike * 100m, MidpointRounding.AwayFromZero);
         var expiryUpper = FormatExpiry(expiry);
+        var istToday = DateTimeExtensions.IstToday();
 
         MasterEntry? exactMatch = null;
         MasterEntry? nameOnlyFallback = null;
@@ -575,10 +669,10 @@ public sealed class AngelInstrumentMaster
             }
 
             // Fallback: same underlying+strike+type, closest future expiry
-            if (nameOnlyFallback is null && e.ExpiryDate >= DateTime.Today)
+            if (nameOnlyFallback is null && e.ExpiryDate >= istToday)
                 nameOnlyFallback = e;
             else if (nameOnlyFallback is not null
-                     && e.ExpiryDate >= DateTime.Today
+                     && e.ExpiryDate >= istToday
                      && e.ExpiryDate < nameOnlyFallback.ExpiryDate)
                 nameOnlyFallback = e;
         }
@@ -612,6 +706,7 @@ public sealed class AngelInstrumentMaster
         var toleranceScaled = (long)Math.Round(tolerance * 100m);
         var wantScaled = (long)Math.Round(strike * 100m);
         var expiryUpper = FormatExpiry(expiry);
+        var istToday = DateTimeExtensions.IstToday();
 
         MasterEntry? bestSameExpiry = null;
         long bestSameExpiryDelta = long.MaxValue;
@@ -625,7 +720,7 @@ public sealed class AngelInstrumentMaster
                 continue;
             if (!e.TradingSymbol.EndsWith(opt, StringComparison.OrdinalIgnoreCase))
                 continue;
-            if (e.ExpiryDate < DateTime.Today)
+            if (e.ExpiryDate < istToday)
                 continue;
 
             var delta = Math.Abs(e.StrikeScaled - wantScaled);
@@ -643,7 +738,7 @@ public sealed class AngelInstrumentMaster
             else
             {
                 // Prefer closer strike, break ties by nearer expiry.
-                var daysAhead = (e.ExpiryDate - DateTime.Today).Days;
+                var daysAhead = (e.ExpiryDate - istToday).Days;
                 var score = delta * 1000 + Math.Max(0, daysAhead);
                 if (score < bestOtherExpiryScore)
                 {

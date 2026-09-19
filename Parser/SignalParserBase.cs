@@ -1,3 +1,4 @@
+using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Models;
 using System.Text.RegularExpressions;
@@ -10,28 +11,67 @@ namespace NexusApp.Parser;
 /// override only the hooks (<see cref="CanHandle"/>, <see cref="Priority"/>,
 /// <see cref="ShouldSkip"/>, <see cref="RequiresActivation"/>) they need to change.
 /// </summary>
-public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? scopeFactory = null) : IChannelSignalParser
+public abstract partial class SignalParserBase(ILogger logger, IServiceScopeFactory? scopeFactory = null) : IChannelSignalParser
 {
     private readonly ILogger _logger = logger;
 
-    // Regex patterns for parsing signals
-    protected const string ActionPattern = @"(BUY|SELL|BUYSELECT|BUY SELECT)";
-    protected const string IndexPattern = @"(NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX)";
-    protected const string StrikePattern = @"(\d{4,5})";
-    protected const string OptionTypePattern = @"(CE|PE|CALL|PUT)";
+    // Regex patterns for parsing signals. They are source-generated so the matching
+    // code is emitted at compile time instead of being interpreted at runtime.
+    [GeneratedRegex(@"(BUY|SELL|BUYSELECT|BUY SELECT)")]
+    protected static partial Regex ActionRegex();
+
+    [GeneratedRegex(@"(NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX)")]
+    protected static partial Regex IndexRegex();
+
+    [GeneratedRegex(@"(\d{4,5})")]
+    protected static partial Regex StrikeRegex();
+
+    [GeneratedRegex(@"(CE|PE|CALL|PUT)")]
+    protected static partial Regex OptionTypeRegex();
+
     // Matches: ABOVE 👉 100 = 95, ABOVE: 115, ABOVE 115
     // [^\d]*? lazily skips any non-digit chars (emoji / arrows / punctuation) up to the first number.
-    protected const string PricePattern = @"ABOVE[^\d]*?(\d+(?:\.\d+)?)";
-    // Fallback: BUY NNN or BUY NNN/MMM++ — used when no ABOVE keyword is present.
-    protected const string BuyPricePattern = @"(?:^|\s)BUY\s+(\d+(?:\.\d+)?)";
+    [GeneratedRegex(@"ABOVE[^\d]*?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase)]
+    protected static partial Regex PriceRegex();
+
+    [GeneratedRegex(@"(?:^|\s)BUY\s+(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase)]
+    protected static partial Regex BuyPriceRegex();
+
     // Matches: TARGET 👉 150/180/200✅  |  Target 180 220 300+  |  TARGETS: 200/210  |  TGT 150
     // [^\dA-Z]* skips separators/emoji but NOT letters, so an empty target
     // ("TARGET :-  / SL :- 165") cannot run past the "SL" label and capture the
     // stop-loss number as a target. Non-numeric targets fall back to DefaultTargetPoints.
-    protected const string TargetPattern = @"(?:TARGETS?|TGT)[^\dA-Z]*(\d[\d\s/+.]*)";
+    [GeneratedRegex(@"(?:TARGETS?|TGT)[^\dA-Z]*(\d[\d\s/+.]*)", RegexOptions.IgnoreCase)]
+    protected static partial Regex TargetRegex();
+
     // Matches: SL: 180  |  STOPLOSS 👉 #paid group  |  SL :- PAID
     // [^\dA-Z]*? skips separators/emoji up to the first number or the PAID keyword.
-    protected const string StopLossPattern = @"(?:SL|STOPLOSS)[^\dA-Z]*?(\d+|PAID)";
+    [GeneratedRegex(@"(?:SL|STOPLOSS)[^\dA-Z]*?(\d+|PAID)", RegexOptions.IgnoreCase)]
+    protected static partial Regex StopLossRegex();
+
+    [GeneratedRegex(@"(\d{1,2})\s*(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)")]
+    protected static partial Regex ExpiryRegex();
+
+    /// <summary>Collapses runs of whitespace (including newlines) to a single space.</summary>
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex WhitespaceRegex();
+
+    /// <summary>
+    /// The keyword-less entry wordings used across channels ("NEAR LEVEL 370",
+    /// "NEAR :- 155-60", "BUY AROUND 83", "@ 83"). Used only to infer a Buy action
+    /// when the message quotes no BUY/SELL keyword; the price itself is captured by
+    /// the channel-specific entry parsers.
+    /// </summary>
+    [GeneratedRegex(@"(?:NEAR(?:\s*LEVEL)?|AROUND|@)[^\dA-Z]*\d", RegexOptions.IgnoreCase)]
+    protected static partial Regex NearEntryRegex();
+
+    /// <summary>Splits a target list on "/" or whitespace.</summary>
+    [GeneratedRegex(@"[/\s]+")]
+    private static partial Regex TargetSeparatorRegex();
+
+    /// <summary>Leading number of a token, dropping trailing '+', emoji, etc.</summary>
+    [GeneratedRegex(@"^\d+(?:\.\d+)?")]
+    protected static partial Regex LeadingNumberRegex();
 
     /// <summary>
     /// Default SL buffer (in points) applied when the signal doesn't quote a
@@ -39,7 +79,6 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
     /// which would trigger an immediate stop-out at execution.
     /// </summary>
     protected const decimal DefaultSlBufferPoints = 50m;
-    protected const string ExpiryPattern = @"(\d{1,2})\s*(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)";
 
     /// <summary>
     /// Effective default SL buffer (points) used when a signal has no numeric SL.
@@ -56,6 +95,40 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
     protected decimal DefaultTargetPoints { get; set; } = 20m;
 
     private readonly IServiceScopeFactory? _scopeFactory = scopeFactory;
+
+    /// <summary>
+    /// Commodity underlyings, built from the single source of truth so this can never
+    /// drift from the instrument-master filter or the segment resolver.
+    /// <para>
+    /// Ordered longest-first and anchored with <c>\b</c> so a mini contract wins over
+    /// its full-size prefix: without this "GOLDM 158000PE" matches "GOLD" and the
+    /// order is booked on the wrong series. The trailing boundary also stops "GOLD"
+    /// from matching inside "GOLDM".
+    /// </para>
+    /// </summary>
+    private static readonly string CommodityIndexPattern =
+        $@"\b({string.Join("|", MarketSegments.CommodityUnderlyingTokens.OrderByDescending(c => c.Length))})\b";
+
+    /// <summary>
+    /// Commodity strikes span a far wider range than index strikes (NATURALGAS trades
+    /// near 200, GOLD above 100000), so <see cref="StrikePattern"/>'s <c>(\d{4,5})</c>
+    /// cannot cover them. Requires a trailing CE/PE so it cannot capture an entry price
+    /// or an expiry day by mistake.
+    /// </summary>
+    private const string CommodityStrikePattern = @"(\d{2,7})\s*(?:CE|PE|CALL|PUT)";
+
+    /// <summary>
+    /// Set during <see cref="ParseAsync"/> from the <c>Mcx.Enabled</c> master toggle.
+    /// Fails closed: stays false when the setting cannot be read.
+    /// </summary>
+    private bool _mcxEnabled;
+
+    /// <summary>
+    /// True when the parsed underlying belongs to the commodity segment. Channels are
+    /// resolved by name, but a single channel may post both equity and commodity calls,
+    /// so the segment can only be known per-message.
+    /// </summary>
+    protected static bool IsCommoditySignal(ParsedSignal signal) => MarketSegments.IsCommodity(signal.Index);
 
     // ---- Channel strategy hooks (overridable) --------------------------------
 
@@ -101,10 +174,12 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
 
             var sl = await settings.GetSettingAsync<decimal?>("DefaultStopLossPoints");
             if (sl is > 0) DefaultSlPoints = sl.Value;
+
+            _mcxEnabled = await settings.GetSettingAsync<bool?>("Mcx.Enabled") ?? false;
         }
         catch
         {
-            // Keep built-in defaults on any failure.
+            // Keep built-in defaults on any failure. _mcxEnabled stays false (fails closed).
         }
     }
 
@@ -140,11 +215,22 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
                 return signal;
             }
 
-            // Parse index (NIFTY, BANKNIFTY, etc.)
+            // Parse index (NIFTY, BANKNIFTY, CRUDEOIL, etc.)
             if (!ParseIndex(normalized, signal))
             {
                 signal.ValidationErrors = "Could not parse index name";
                 return signal;
+            }
+
+            // Commodity master toggle. Applied here rather than per-channel because a
+            // channel may post both equity and commodity calls, so the segment is only
+            // known once the underlying has been parsed.
+            if (IsCommoditySignal(signal) && !_mcxEnabled)
+            {
+                _logger.LogInformation(
+                    "Commodity trading is disabled; ignoring {Index} signal message {MessageId}.",
+                    signal.Index, telegramMessageId);
+                return null;
             }
 
             // Parse strike price
@@ -204,36 +290,72 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
     protected static string NormalizeMessage(string message)
     {
         // Normalize whitespace and case
-        var normalized = Regex.Replace(message, @"\s+", " ");
-        normalized = Regex.Replace(normalized, @"\n\s*", " ");
+        var normalized = WhitespaceRegex().Replace(message, " ");
         return normalized.ToUpperInvariant();
     }
 
-    protected static bool ParseAction(string message, ParsedSignal signal)
+    protected virtual bool ParseAction(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, ActionPattern);
+        var match = ActionRegex().Match(message);
         if (match.Success)
         {
             signal.Action = match.Groups[1].Value.StartsWith("BUY") ? SignalAction.Buy : SignalAction.Sell;
             return true;
         }
+
+        // Many channels never write a BUY/SELL keyword - the direction is implied by the
+        // entry wording ("ABOVE :- 291", "NEAR LEVEL 370"): these are option-buying calls,
+        // so the premium is bought once it trades at that level. Rejecting them for a
+        // missing keyword would drop the whole signal, so infer Buy whenever the message
+        // carries a recognisable entry level. A SELL keyword, when present, still wins
+        // because it is matched above.
+        if (PriceRegex().IsMatch(message) || NearEntryRegex().IsMatch(message))
+        {
+            signal.Action = SignalAction.Buy;
+            return true;
+        }
+
         return false;
     }
 
-    protected static bool ParseIndex(string message, ParsedSignal signal)
+    protected virtual bool ParseIndex(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, IndexPattern);
+        var match = IndexRegex().Match(message);
         if (match.Success)
         {
             signal.Index = match.Groups[1].Value;
             return true;
         }
+
+        // Fallback: the message may be a commodity call on an otherwise equity channel.
+        match = Regex.Match(message, CommodityIndexPattern, RegexOptions.IgnoreCase);
+        if (match.Success)
+        {
+            // Channel shorthand ("NATGAS") is mapped to the exchange's underlying name
+            // so the segment, lot size and instrument-master lookups all agree.
+            signal.Index = MarketSegments.NormalizeUnderlying(match.Groups[1].Value);
+            return true;
+        }
+
         return false;
     }
 
-    protected static bool ParseStrike(string message, ParsedSignal signal)
+    protected virtual bool ParseStrike(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, StrikePattern);
+        // Commodity strikes fall outside the 4-5 digit index range, so match on the
+        // strike that is explicitly followed by CE/PE instead.
+        if (IsCommoditySignal(signal))
+        {
+            var commodity = Regex.Match(message, CommodityStrikePattern, RegexOptions.IgnoreCase);
+            if (commodity.Success && decimal.TryParse(commodity.Groups[1].Value, out var commodityStrike) && commodityStrike > 0)
+            {
+                signal.Strike = commodityStrike;
+                return true;
+            }
+            return false;
+        }
+
+        var match = StrikeRegex().Match(message);
         if (match.Success && decimal.TryParse(match.Groups[1].Value, out var strike))
         {
             signal.Strike = strike;
@@ -244,11 +366,11 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
 
     protected static bool ParseOptionType(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, OptionTypePattern);
+        var match = OptionTypeRegex().Match(message);
         if (match.Success)
         {
             var type = match.Groups[1].Value;
-            signal.OptionType = type.StartsWith("C") ? OptionType.Ce : OptionType.Pe;
+            signal.OptionType = type.StartsWith("C", StringComparison.OrdinalIgnoreCase) ? OptionType.Ce : OptionType.Pe;
             return true;
         }
         return false;
@@ -257,15 +379,14 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
     protected virtual bool ParseEntryPrice(string message, ParsedSignal signal)
     {
         // Primary: ABOVE keyword (handles emoji arrows between keyword and number)
-        var match = Regex.Match(message, PricePattern, RegexOptions.IgnoreCase);
+        var match = PriceRegex().Match(message);
         if (match.Success && decimal.TryParse(match.Groups[1].Value, out var price) && price > 0)
         {
             signal.EntryPrice = price;
             return true;
         }
 
-        // Fallback: "Buy 110/120++" style — take the first number after BUY
-        match = Regex.Match(message, BuyPricePattern, RegexOptions.IgnoreCase);
+        match = BuyPriceRegex().Match(message);
         if (match.Success && decimal.TryParse(match.Groups[1].Value, out price) && price > 0)
         {
             signal.EntryPrice = price;
@@ -277,16 +398,16 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
 
     protected virtual bool ParseTargets(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, TargetPattern, RegexOptions.IgnoreCase);
+        var match = TargetRegex().Match(message);
         if (match.Success)
         {
             var raw = match.Groups[1].Value;
             // Split on slash or whitespace, strip non-numeric trailing chars (+ ✅ etc.)
-            var parts = Regex.Split(raw, @"[/\s]+");
+            var parts = TargetSeparatorRegex().Split(raw);
             foreach (var part in parts)
             {
                 // Strip trailing non-digit characters (e.g. '+', '✅')
-                var cleaned = Regex.Match(part.Trim(), @"^\d+(?:\.\d+)?");
+                var cleaned = LeadingNumberRegex().Match(part.Trim());
                 if (cleaned.Success && decimal.TryParse(cleaned.Value, out var targetPrice))
                     signal.Targets.Add(targetPrice);
             }
@@ -310,7 +431,7 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
 
     protected virtual bool ParseStopLoss(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, StopLossPattern, RegexOptions.IgnoreCase);
+        var match = StopLossRegex().Match(message);
         if (match.Success)
         {
             var slValue = match.Groups[1].Value.Trim();
@@ -350,9 +471,9 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
         return sl > 0 ? sl : Math.Max(0.05m, entry * 0.5m);
     }
 
-    protected static bool ParseExpiryDate(string message, ParsedSignal signal)
+    protected virtual bool ParseExpiryDate(string message, ParsedSignal signal)
     {
-        var match = Regex.Match(message, ExpiryPattern);
+        var match = ExpiryRegex().Match(message);
         if (match.Success)
         {
             var day = int.Parse(match.Groups[1].Value);
@@ -360,15 +481,16 @@ public abstract class SignalParserBase(ILogger logger, IServiceScopeFactory? sco
 
             if (month > 0)
             {
-                var year = DateTime.Now.Year;
+                var istToday = DateTimeExtensions.IstToday();
+                var year = istToday.Year;
 
                 // If month is in past, use next year
-                if (month < DateTime.Now.Month)
+                if (month < istToday.Month)
                     year++;
 
                 try
                 {
-                    signal.ExpiryDate = new DateTime(year, month, day);
+                    signal.ExpiryDate = new DateTime(year, month, day, 0, 0, 0, DateTimeKind.Unspecified);
                     return true;
                 }
                 catch

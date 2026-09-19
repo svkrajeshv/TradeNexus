@@ -1,15 +1,22 @@
 @page "/settings"
 @using MudBlazor
+@using NexusApp.Components.Settings
+@using NexusApp.Helpers
 @using NexusApp.Interfaces
+@using NexusApp.Models
 @using NexusApp.Services
 @inject ISettingsService SettingsService
 @inject AuthService Auth
 @inject ISnackbar Snackbar
+@inject McxToggle McxToggle
 
 <PageTitle>NexusApp - Settings</PageTitle>
 
 <MudText Typo="Typo.h4" Class="mb-4 font-weight-bold">Settings</MudText>
 
+<MudTabs Elevation="0" Rounded="true" ApplyEffectsToContainer="true" TabPanelsClass="pt-4" Class="mb-2">
+
+<MudTabPanel Text="General" Icon="@Icons.Material.Filled.Tune">
 <MudGrid Spacing="3">
     <!-- Left Column -->
     <MudItem xs="12" md="6">
@@ -42,29 +49,6 @@
                                   Variant="Variant.Outlined"
                                   Min="1"
                                   Class="mb-3" />
-
-                <MudDivider Class="my-3" />
-                <MudText Typo="Typo.subtitle2" Class="mb-2">Per-Index Lot Overrides <MudText Typo="Typo.caption" Color="Color.Secondary">(0 = use default above)</MudText></MudText>
-                <MudGrid Spacing="2">
-                    <MudItem xs="6">
-                        <MudNumericField T="int" @bind-Value="_lotsNifty"      Label="NIFTY"      Variant="Variant.Outlined" Min="0" />
-                    </MudItem>
-                    <MudItem xs="6">
-                        <MudNumericField T="int" @bind-Value="_lotsBankNifty"  Label="BANKNIFTY"  Variant="Variant.Outlined" Min="0" />
-                    </MudItem>
-                    <MudItem xs="6">
-                        <MudNumericField T="int" @bind-Value="_lotsFinNifty"   Label="FINNIFTY"   Variant="Variant.Outlined" Min="0" />
-                    </MudItem>
-                    <MudItem xs="6">
-                        <MudNumericField T="int" @bind-Value="_lotsMidcpNifty" Label="MIDCPNIFTY" Variant="Variant.Outlined" Min="0" />
-                    </MudItem>
-                    <MudItem xs="6">
-                        <MudNumericField T="int" @bind-Value="_lotsSensex"     Label="SENSEX"     Variant="Variant.Outlined" Min="0" />
-                    </MudItem>
-                    <MudItem xs="6">
-                        <MudNumericField T="int" @bind-Value="_lotsBankex"     Label="BANKEX"     Variant="Variant.Outlined" Min="0" />
-                    </MudItem>
-                </MudGrid>
             </MudPaper>
 
             <!-- Notifications -->
@@ -76,7 +60,12 @@
                 <MudSwitch T="bool" @bind-Value="_browserNotifications" Color="Color.Primary" Label="Browser notifications" Class="mb-1" />
                 <MudSwitch T="bool" @bind-Value="_soundAlerts" Color="Color.Primary" Label="Sound alerts" />
             </MudPaper>
+        </MudStack>
+    </MudItem>
 
+    <!-- Right Column -->
+    <MudItem xs="12" md="6">
+        <MudStack Spacing="3">
             <!-- Admin Account Security -->
             <MudPaper Class="pa-4 settings-card-amber" Elevation="2">
                 <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
@@ -86,8 +75,25 @@
                 <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
                     Update your application login credentials.
                 </MudText>
-                <MudTextField T="string" @bind-Value="_adminUsername" Label="Admin Username" Variant="Variant.Outlined" Class="mb-3" />
-                <MudTextField T="string" @bind-Value="_adminPassword" Label="New Admin Password" Variant="Variant.Outlined" InputType="InputType.Password" HelperText="Leave blank to keep current password" />
+                <MudTextField T="string" @bind-Value="_adminUsername" Label="Admin Username" Variant="Variant.Outlined" Class="mb-3" Immediate="true" />
+                <MudTextField T="string"
+                              @bind-Value="_adminPassword"
+                              Label="New Admin Password"
+                              Variant="Variant.Outlined"
+                              InputType="@(_showAdminPassword ? InputType.Text : InputType.Password)"
+                              Adornment="Adornment.End"
+                              AdornmentIcon="@(_showAdminPassword ? Icons.Material.Filled.Visibility : Icons.Material.Filled.VisibilityOff)"
+                              OnAdornmentClick="@(() => _showAdminPassword = !_showAdminPassword)"
+                              HelperText="Leave blank to keep current password"
+                              Class="mb-3"
+                              Immediate="true" />
+                <MudTextField T="string"
+                              @bind-Value="_confirmAdminPassword"
+                              Label="Confirm New Password"
+                              Variant="Variant.Outlined"
+                              InputType="@(_showAdminPassword ? InputType.Text : InputType.Password)"
+                              HelperText="Re-enter new password to confirm"
+                              Immediate="true" />
             </MudPaper>
 
             <!-- Data Retention -->
@@ -106,15 +112,47 @@
                                   Variant="Variant.Outlined"
                                   Min="0" />
             </MudPaper>
+        </MudStack>
+    </MudItem>
+</MudGrid>
+</MudTabPanel>
 
-            <!-- Risk Management -->
+<MudTabPanel Text="Equity" Icon="@Icons.Material.Filled.ShowChart">
+    <MudPaper Class="pa-4 mb-3 settings-card-cyan" Elevation="2">
+        <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block">
+            NSE/BSE index options (NFO &amp; BFO). Market hours 09:15-15:30 IST.
+        </MudText>
+    </MudPaper>
+    <SegmentSettingsPanel Segment="MarketSegment.Equity" Lots="_lotConfigs" Profiles="_indexProfiles" />
+</MudTabPanel>
+
+<MudTabPanel Text="MCX" Icon="@Icons.Material.Filled.LocalGasStation">
+    <MudPaper Class="pa-4 mb-3 settings-card-amber" Elevation="2">
+        <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
+            <MudIcon Icon="@Icons.Material.Filled.PowerSettingsNew" Color="Color.Warning" />
+            <MudText Typo="Typo.h6">Commodity (MCX) Trading</MudText>
+        </MudStack>
+        <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
+            Master switch. When off, MCX signals are neither parsed nor executed and commodity market hours are ignored by the pollers.
+        </MudText>
+        <MudSwitch T="bool" @bind-Value="_mcxEnabled" Color="Color.Warning" Label="Enable commodity (MCX) trading" />
+    </MudPaper>
+    <SegmentSettingsPanel Segment="MarketSegment.Commodity" Lots="_lotConfigs" Profiles="_indexProfiles" Enabled="_mcxEnabled" />
+</MudTabPanel>
+
+<MudTabPanel Text="Risk &amp; Execution" Icon="@Icons.Material.Filled.Shield">
+<MudGrid Spacing="3">
+    <!-- Left Column -->
+    <MudItem xs="12" md="6">
+        <MudStack Spacing="3">
             <MudPaper Class="pa-4 settings-card-red" Elevation="2">
                 <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3">
                     <MudIcon Icon="@Icons.Material.Filled.Shield" Color="Color.Error" />
-                    <MudText Typo="Typo.h6">Risk Management</MudText>
+                    <MudText Typo="Typo.h6">Portfolio Risk Management (All Accounts)</MudText>
                 </MudStack>
-                <MudNumericField T="decimal" @bind-Value="_dailyMaxLoss" Label="Daily Max Loss (₹)" Variant="Variant.Outlined" Class="mb-3" />
-                <MudNumericField T="decimal" @bind-Value="_dailyMaxProfit" Label="Daily Max Profit (₹)" Variant="Variant.Outlined" Class="mb-3" />
+                <MudNumericField T="decimal" @bind-Value="_dailyMaxLoss" Label="Portfolio Daily Max Loss (₹) — All Accounts" HelperText="Combined daily loss threshold across all accounts (Live + Paper). 0 = disabled" Variant="Variant.Outlined" Class="mb-3" />
+                <MudNumericField T="decimal" @bind-Value="_dailyMaxProfit" Label="Portfolio Daily Max Profit (₹) — All Accounts" HelperText="Combined daily profit target across all accounts (Live + Paper). 0 = disabled" Variant="Variant.Outlined" Class="mb-3" />
+                <MudSwitch T="bool" @bind-Value="_riskAutoSquareOffEnabled" Color="Color.Error" Label="Auto square-off positions when Risk Limits (Portfolio or Account) are hit" Class="mb-2" />
                 <MudNumericField T="int" @bind-Value="_maxOpenPositions" Label="Max Open Positions" Variant="Variant.Outlined" Class="mb-3" />
                 <MudNumericField T="int" @bind-Value="_maxTradesPerDay" Label="Max Trades / Day" Variant="Variant.Outlined" Class="mb-3" />
                 <MudNumericField T="int"
@@ -131,12 +169,7 @@
                                  Variant="Variant.Outlined"
                                  Min="0m" />
             </MudPaper>
-        </MudStack>
-    </MudItem>
 
-    <!-- Right Column -->
-    <MudItem xs="12" md="6">
-        <MudStack Spacing="3">
             <!-- Trading Hours & Auto Square-Off -->
             <MudPaper Class="pa-4 settings-card-blue" Elevation="2">
                 <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3">
@@ -164,7 +197,12 @@
                                   Variant="Variant.Outlined"
                                   Min="0m" />
             </MudPaper>
+        </MudStack>
+    </MudItem>
 
+    <!-- Right Column -->
+    <MudItem xs="12" md="6">
+        <MudStack Spacing="3">
             <!-- Entry Trigger & Price Offsets -->
             <MudPaper Class="pa-4 settings-card-purple" Elevation="2">
                 <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
@@ -180,6 +218,7 @@
                     <MudSelectItem Value="@("Market")">Market Order (immediate execution at live CMP)</MudSelectItem>
                 </MudSelect>
                 <MudSwitch T="bool" @bind-Value="_enableEntryCrossingTrigger" Color="Color.Primary" Label="Enable Entry Price Crossing Trigger" Class="mb-3" />
+                <MudSwitch T="bool" @bind-Value="_requireEntryCrossFromBelow" Color="Color.Primary" Label="Require Cross From Below" Class="mb-3" />
                 <MudNumericField T="decimal"
                                   @bind-Value="_entryPriceOffset"
                                   Label="Entry Price Offset (pts)"
@@ -193,7 +232,7 @@
                                   Variant="Variant.Outlined"
                                   Class="mb-3" />
                 <MudDivider Class="my-3" />
-                <MudText Typo="Typo.subtitle2" Class="mb-1">Signal Defaults</MudText>
+                <MudText Typo="Typo.subtitle2" Class="mb-1">Signal Defaults (Global Fallback)</MudText>
                 <MudNumericField T="decimal"
                                   @bind-Value="_defaultTargetPoints"
                                    Label="Default Target (pts)"
@@ -233,9 +272,27 @@
                                   Variant="Variant.Outlined"
                                   Min="0" />
             </MudPaper>
+
+            <!-- Segment-Based Risk & Target Defaults -->
+            <MudPaper Class="pa-4 settings-card-blue" Elevation="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-1">
+                    <MudIcon Icon="@Icons.Material.Filled.Speed" Color="Color.Primary" />
+                    <MudText Typo="Typo.h6">Target &amp; Stop-Loss Mode</MudText>
+                </MudStack>
+                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
+                    Chooses how the per-contract levels on the Equity and MCX tabs are applied.
+                </MudText>
+                <MudSelect T="string" @bind-Value="_riskSlMode" Label="Calculation Mode" Variant="Variant.Outlined">
+                    <MudSelectItem Value="@("Points")">Absolute Points (Fixed pts from entry)</MudSelectItem>
+                    <MudSelectItem Value="@("Percent")">Percentage of Premium (% from entry)</MudSelectItem>
+                </MudSelect>
+            </MudPaper>
         </MudStack>
     </MudItem>
 </MudGrid>
+</MudTabPanel>
+
+</MudTabs>
 
 <MudStack Row="true" Class="mt-4" Spacing="2">
     <MudButton Color="Color.Primary" Variant="Variant.Filled" StartIcon="@Icons.Material.Filled.Save" OnClick="SaveAsync">Save Settings</MudButton>
@@ -247,15 +304,23 @@
     private int _defaultQuantity = 1;
 
     // Per-index lot overrides
-    private int _lotsNifty      = 0;
-    private int _lotsBankNifty  = 0;
-    private int _lotsFinNifty   = 0;
-    private int _lotsMidcpNifty = 0;
-    private int _lotsSensex     = 0;
-    private int _lotsBankex     = 0;
+    private List<LotConfigVm> _lotConfigs =
+    [
+        new() { Underlying = "NIFTY",      Segment = MarketSegment.Equity },
+        new() { Underlying = "BANKNIFTY",  Segment = MarketSegment.Equity },
+        new() { Underlying = "FINNIFTY",   Segment = MarketSegment.Equity },
+        new() { Underlying = "MIDCPNIFTY", Segment = MarketSegment.Equity },
+        new() { Underlying = "SENSEX",     Segment = MarketSegment.Equity },
+        new() { Underlying = "BANKEX",     Segment = MarketSegment.Equity },
+        new() { Underlying = "CRUDEOIL",   Segment = MarketSegment.Commodity },
+        new() { Underlying = "NATURALGAS", Segment = MarketSegment.Commodity },
+        new() { Underlying = "GOLD",       Segment = MarketSegment.Commodity },
+        new() { Underlying = "SILVER",     Segment = MarketSegment.Commodity },
+    ];
 
     private decimal _dailyMaxLoss = 1000;
     private decimal _dailyMaxProfit = 5000;
+    private bool _riskAutoSquareOffEnabled = false;
     private int _maxOpenPositions = 5;
     private int _maxTradesPerDay = 10;
     private decimal _stopLossBuffer = 0;
@@ -271,6 +336,7 @@
     private bool _slippageGuardEnabled = false;
     private decimal _maxSlippagePercent = 1.0m;
     private bool _enableEntryCrossingTrigger = true;
+    private bool _requireEntryCrossFromBelow = true;
     private decimal _entryPriceOffset = 10.0m;
     private decimal _targetPriceOffset = 10.0m;
     private decimal _defaultTargetPoints = 20.0m;
@@ -281,8 +347,27 @@
     private int _pnlHistoryRetentionDays = 90;
     private string _orderVariety = "Robo";
     private decimal _trailingStopLossPoints = 0m;
+    private string _riskSlMode = "Points";
+    private bool _mcxEnabled = false;
+
+    private List<IndexRiskProfileVm> _indexProfiles =
+    [
+        new() { Index = "NIFTY",      DefaultSlPoints = 20, DefaultTargetPoints = 35,  OverrideTargetPoints = 15, SlPercent = 18, TargetPercent = 35 },
+        new() { Index = "BANKNIFTY",  DefaultSlPoints = 40, DefaultTargetPoints = 70,  OverrideTargetPoints = 15, SlPercent = 20, TargetPercent = 40 },
+        new() { Index = "FINNIFTY",   DefaultSlPoints = 20, DefaultTargetPoints = 35,  OverrideTargetPoints = 15, SlPercent = 18, TargetPercent = 35 },
+        new() { Index = "MIDCPNIFTY", DefaultSlPoints = 15, DefaultTargetPoints = 25,  OverrideTargetPoints = 15, SlPercent = 15, TargetPercent = 30 },
+        new() { Index = "SENSEX",     DefaultSlPoints = 80, DefaultTargetPoints = 140, OverrideTargetPoints = 15, SlPercent = 25, TargetPercent = 50 },
+        new() { Index = "BANKEX",     DefaultSlPoints = 90, DefaultTargetPoints = 150, OverrideTargetPoints = 15, SlPercent = 25, TargetPercent = 50 },
+        new() { Index = "CRUDEOIL",   Segment = MarketSegment.Commodity, DefaultSlPoints = 15, DefaultTargetPoints = 30,  OverrideTargetPoints = 15, SlPercent = 22, TargetPercent = 45 },
+        new() { Index = "NATURALGAS", Segment = MarketSegment.Commodity, DefaultSlPoints = 5,  DefaultTargetPoints = 10,  OverrideTargetPoints = 15, SlPercent = 25, TargetPercent = 50 },
+        new() { Index = "GOLD",       Segment = MarketSegment.Commodity, DefaultSlPoints = 60, DefaultTargetPoints = 120, OverrideTargetPoints = 15, SlPercent = 20, TargetPercent = 40 },
+        new() { Index = "SILVER",     Segment = MarketSegment.Commodity, DefaultSlPoints = 50, DefaultTargetPoints = 100, OverrideTargetPoints = 15, SlPercent = 22, TargetPercent = 45 },
+    ];
+
     private string _adminUsername = "admin";
     private string _adminPassword = "";
+    private string _confirmAdminPassword = "";
+    private bool _showAdminPassword = false;
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
 
@@ -293,15 +378,19 @@
             _tradingMode = await SettingsService.GetSettingAsync<string>("TradingMode") ?? _tradingMode;
             var qty = await SettingsService.GetSettingAsync<int?>("DefaultQuantity"); if (qty.HasValue) _defaultQuantity = qty.Value;
  
-            var ln  = await SettingsService.GetSettingAsync<int?>("Lots.NIFTY");       if (ln.HasValue)  _lotsNifty      = ln.Value;
-            var lbn = await SettingsService.GetSettingAsync<int?>("Lots.BANKNIFTY");   if (lbn.HasValue) _lotsBankNifty  = lbn.Value;
-            var lfn = await SettingsService.GetSettingAsync<int?>("Lots.FINNIFTY");    if (lfn.HasValue) _lotsFinNifty   = lfn.Value;
-            var lmn = await SettingsService.GetSettingAsync<int?>("Lots.MIDCPNIFTY");  if (lmn.HasValue) _lotsMidcpNifty = lmn.Value;
-            var ls  = await SettingsService.GetSettingAsync<int?>("Lots.SENSEX");      if (ls.HasValue)  _lotsSensex     = ls.Value;
-            var lbx = await SettingsService.GetSettingAsync<int?>("Lots.BANKEX");      if (lbx.HasValue) _lotsBankex     = lbx.Value;
+            var mcx = await SettingsService.GetSettingAsync<bool?>("Mcx.Enabled");
+            if (mcx.HasValue) _mcxEnabled = mcx.Value;
+
+            foreach (var lot in _lotConfigs)
+            {
+                var lots = await SettingsService.GetSettingAsync<int?>($"Lots.{lot.Underlying}");
+                if (lots.HasValue) lot.Lots = lots.Value;
+            }
  
             var dml  = await SettingsService.GetSettingAsync<decimal?>("DailyMaxLoss");       if (dml.HasValue)  _dailyMaxLoss     = dml.Value;
             var dmp  = await SettingsService.GetSettingAsync<decimal?>("DailyMaxProfit");     if (dmp.HasValue)  _dailyMaxProfit   = dmp.Value;
+            var rase = await SettingsService.GetSettingAsync<bool?>("RiskAutoSquareOffEnabled");
+            if (rase.HasValue) _riskAutoSquareOffEnabled = rase.Value;
             var mop  = await SettingsService.GetSettingAsync<int?>("MaxOpenPositions");       if (mop.HasValue)  _maxOpenPositions  = mop.Value;
             var mtpd = await SettingsService.GetSettingAsync<int?>("MaxTradesPerDay");        if (mtpd.HasValue) _maxTradesPerDay   = mtpd.Value;
             var slb  = await SettingsService.GetSettingAsync<decimal?>("StopLossBuffer");     if (slb.HasValue)  _stopLossBuffer    = slb.Value;
@@ -324,6 +413,8 @@
 
             var eect = await SettingsService.GetSettingAsync<bool?>("EnableEntryPriceCrossingTrigger");
             if (eect.HasValue) _enableEntryCrossingTrigger = eect.Value;
+            var recfb = await SettingsService.GetSettingAsync<bool?>("RequireEntryCrossFromBelow");
+            if (recfb.HasValue) _requireEntryCrossFromBelow = recfb.Value;
             var epo = await SettingsService.GetSettingAsync<decimal?>("EntryPriceOffset");
             if (epo.HasValue) _entryPriceOffset = epo.Value;
             var tpo = await SettingsService.GetSettingAsync<decimal?>("TargetPriceOffset");
@@ -344,8 +435,28 @@
             var tslp = await SettingsService.GetSettingAsync<decimal?>("TrailingStopLossPoints");
             if (tslp.HasValue) _trailingStopLossPoints = tslp.Value;
 
+            _riskSlMode = await SettingsService.GetSettingAsync<string>("Risk.SlMode") ?? "Points";
+            foreach (var profile in _indexProfiles)
+            {
+                var slPts = await SettingsService.GetSettingAsync<decimal?>($"SL.Points.{profile.Index}");
+                if (slPts.HasValue) profile.DefaultSlPoints = slPts.Value;
+
+                var tgtPts = await SettingsService.GetSettingAsync<decimal?>($"Target.Points.{profile.Index}");
+                if (tgtPts.HasValue) profile.DefaultTargetPoints = tgtPts.Value;
+
+                var overrideTgt = await SettingsService.GetSettingAsync<decimal?>($"Target.Override.{profile.Index}");
+                if (overrideTgt.HasValue) profile.OverrideTargetPoints = overrideTgt.Value;
+
+                var slPct = await SettingsService.GetSettingAsync<decimal?>($"SL.Percent.{profile.Index}");
+                if (slPct.HasValue) profile.SlPercent = slPct.Value;
+
+                var tgtPct = await SettingsService.GetSettingAsync<decimal?>($"Target.Percent.{profile.Index}");
+                if (tgtPct.HasValue) profile.TargetPercent = tgtPct.Value;
+            }
+
             _adminUsername = await Auth.GetAdminUsernameAsync();
             _adminPassword = "";
+            _confirmAdminPassword = "";
         }
         catch (Exception ex)
         {
@@ -360,15 +471,15 @@
             await SettingsService.SetSettingAsync("TradingMode",    _tradingMode);
             await SettingsService.SetSettingAsync("DefaultQuantity", _defaultQuantity);
 
-            await SettingsService.SetSettingAsync("Lots.NIFTY",      _lotsNifty);
-            await SettingsService.SetSettingAsync("Lots.BANKNIFTY",  _lotsBankNifty);
-            await SettingsService.SetSettingAsync("Lots.FINNIFTY",   _lotsFinNifty);
-            await SettingsService.SetSettingAsync("Lots.MIDCPNIFTY", _lotsMidcpNifty);
-            await SettingsService.SetSettingAsync("Lots.SENSEX",     _lotsSensex);
-            await SettingsService.SetSettingAsync("Lots.BANKEX",     _lotsBankex);
+            await SettingsService.SetSettingAsync("Mcx.Enabled", _mcxEnabled);
+            McxToggle.Invalidate();
+
+            foreach (var lot in _lotConfigs)
+                await SettingsService.SetSettingAsync($"Lots.{lot.Underlying}", lot.Lots);
 
             await SettingsService.SetSettingAsync("DailyMaxLoss",       _dailyMaxLoss);
             await SettingsService.SetSettingAsync("DailyMaxProfit",     _dailyMaxProfit);
+            await SettingsService.SetSettingAsync("RiskAutoSquareOffEnabled", _riskAutoSquareOffEnabled);
             await SettingsService.SetSettingAsync("MaxOpenPositions",   _maxOpenPositions);
             await SettingsService.SetSettingAsync("MaxTradesPerDay",    _maxTradesPerDay);
             await SettingsService.SetSettingAsync("StopLossBuffer",     _stopLossBuffer);
@@ -386,6 +497,7 @@
             await SettingsService.SetSettingAsync("MaxSlippagePercent", _maxSlippagePercent);
 
             await SettingsService.SetSettingAsync("EnableEntryPriceCrossingTrigger", _enableEntryCrossingTrigger);
+            await SettingsService.SetSettingAsync("RequireEntryCrossFromBelow", _requireEntryCrossFromBelow);
             await SettingsService.SetSettingAsync("EntryPriceOffset", _entryPriceOffset);
             await SettingsService.SetSettingAsync("TargetPriceOffset", _targetPriceOffset);
             await SettingsService.SetSettingAsync("DefaultTargetPoints", _defaultTargetPoints);
@@ -397,12 +509,38 @@
             await SettingsService.SetSettingAsync("OrderVariety", _orderVariety);
             await SettingsService.SetSettingAsync("TrailingStopLossPoints", _trailingStopLossPoints);
 
+            await SettingsService.SetSettingAsync("Risk.SlMode", _riskSlMode);
+            foreach (var profile in _indexProfiles)
+            {
+                await SettingsService.SetSettingAsync($"SL.Points.{profile.Index}", profile.DefaultSlPoints);
+                await SettingsService.SetSettingAsync($"Target.Points.{profile.Index}", profile.DefaultTargetPoints);
+                await SettingsService.SetSettingAsync($"Target.Override.{profile.Index}", profile.OverrideTargetPoints);
+                await SettingsService.SetSettingAsync($"SL.Percent.{profile.Index}", profile.SlPercent);
+                await SettingsService.SetSettingAsync($"Target.Percent.{profile.Index}", profile.TargetPercent);
+            }
+
             if (!string.IsNullOrWhiteSpace(_adminUsername))
             {
-                var currentPwd = await SettingsService.GetSettingAsync<string>("Admin.Password") ?? "admin123";
-                var pwdToSave = string.IsNullOrWhiteSpace(_adminPassword) ? currentPwd : _adminPassword;
-                await Auth.UpdateCredentialsAsync(_adminUsername, pwdToSave);
-                _adminPassword = "";
+                var currentUsername = await Auth.GetAdminUsernameAsync();
+                if (!string.Equals(_adminUsername.Trim(), currentUsername, StringComparison.OrdinalIgnoreCase))
+                {
+                    await Auth.UpdateUsernameAsync(_adminUsername.Trim());
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(_adminPassword))
+            {
+                if (!string.IsNullOrWhiteSpace(_confirmAdminPassword) && !string.Equals(_adminPassword, _confirmAdminPassword))
+                {
+                    Snackbar.Add("Warning: New password and confirm password did not match, password was not updated.", Severity.Warning);
+                }
+                else
+                {
+                    await Auth.UpdatePasswordAsync(_adminPassword);
+                    _adminPassword = "";
+                    _confirmAdminPassword = "";
+                    Snackbar.Add("Admin password updated successfully!", Severity.Success);
+                }
             }
 
             Snackbar.Add("Settings saved", Severity.Success);

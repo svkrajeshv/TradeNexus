@@ -152,7 +152,8 @@
                     <MudText Typo="Typo.subtitle2" Class="mb-2">Or pick from channels you've joined:</MudText>
                     <MudStack Row="true" Spacing="2" Class="mb-2">
                         <MudButton Variant="Variant.Outlined" Size="Size.Small" StartIcon="@Icons.Material.Filled.Refresh"
-                                   OnClick="RefreshAvailable">Refresh list</MudButton>
+                                   Disabled="@_refreshing"
+                                   OnClick="RefreshAvailable">@(_refreshing ? "Refreshing..." : "Refresh list")</MudButton>
                     </MudStack>
                     @if (!AvailableToAdd.Any())
                     {
@@ -191,6 +192,7 @@
     private string _password = string.Empty;
     private string _newChannel = string.Empty;
     private IReadOnlyList<AvailableChannel> _available = Array.Empty<AvailableChannel>();
+    private bool _refreshing;
 
     // Only show joined channels that are NOT already in the "Channels to Monitor" list.
     // A monitored entry (stored as a title or @username) matches an available channel by
@@ -369,8 +371,18 @@
         }
     }
 
-    private void RefreshAvailable()
+    private async Task RefreshAvailable()
     {
-        _available = Manager.ListAvailableChannels();
+        _refreshing = true;
+        try
+        {
+            _available = await Manager.RefreshAvailableChannelsAsync();
+            if (_available.Count == 0)
+                Snackbar.Add("Telegram returned no channels. Try again in a moment.", Severity.Warning);
+        }
+        finally
+        {
+            _refreshing = false;
+        }
     }
 }

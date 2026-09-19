@@ -13,9 +13,30 @@
 
 @using Microsoft.AspNetCore.SignalR.Client
 @inject NavigationManager Nav
+@inject NexusApp.Services.HealthSnapshotCache HealthSnapshots
+@inject NexusApp.Services.HubConnectionFactory HubFactory
 @implements IAsyncDisposable
 
 <PageTitle>NexusApp - Positions</PageTitle>
+
+<style>
+    /* Book differentiation, matching the Dashboard's Open Positions accent so Live
+       (real money) vs Paper (simulated) is instantly recognizable across screens. */
+    .book-badge {
+        font-size: 0.62rem !important;
+        height: 20px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.3px;
+    }
+    .position-row--live {
+        border-left: 4px solid var(--mud-palette-success);
+        background-color: rgba(76, 175, 80, 0.05);
+    }
+    .position-row--paper {
+        border-left: 4px solid var(--mud-palette-tertiary, #9c27b0);
+        background-color: rgba(156, 39, 176, 0.04);
+    }
+</style>
 
 <MudText Typo="Typo.h4" Class="mb-4">Positions</MudText>
 
@@ -47,11 +68,18 @@
         </MudItem>
     </MudGrid>
     <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-3" Wrap="Wrap.Wrap">
-        <MudToggleGroup T="StatusFilter" @bind-Value="_filter" Color="Color.Primary" Size="Size.Small" CheckMark="true" Outlined="true">
-            <MudToggleItem Value="StatusFilter.All">All (@_all.Count)</MudToggleItem>
-            <MudToggleItem Value="StatusFilter.Open">Open (@_all.Count(p => p.ClosedAt == null))</MudToggleItem>
-            <MudToggleItem Value="StatusFilter.Closed">Closed (@_all.Count(p => p.ClosedAt != null))</MudToggleItem>
-        </MudToggleGroup>
+        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Wrap="Wrap.Wrap">
+            <MudToggleGroup T="StatusFilter" @bind-Value="_filter" Color="Color.Primary" Size="Size.Small" CheckMark="true" Outlined="true">
+                <MudToggleItem Value="StatusFilter.All">All (@_all.Count)</MudToggleItem>
+                <MudToggleItem Value="StatusFilter.Open">Open (@_all.Count(p => p.ClosedAt == null))</MudToggleItem>
+                <MudToggleItem Value="StatusFilter.Closed">Closed (@_all.Count(p => p.ClosedAt != null))</MudToggleItem>
+            </MudToggleGroup>
+            <MudToggleGroup T="BookFilter" @bind-Value="_bookFilter" Color="Color.Primary" Size="Size.Small" CheckMark="true" Outlined="true">
+                <MudToggleItem Value="BookFilter.All">All Books</MudToggleItem>
+                <MudToggleItem Value="BookFilter.Live">Live (@_all.Count(BookScope.IsLive))</MudToggleItem>
+                <MudToggleItem Value="BookFilter.Paper">Paper (@_all.Count(BookScope.IsPaper))</MudToggleItem>
+            </MudToggleGroup>
+        </MudStack>
         @if (_selectedPositions.Count > 0)
         {
             <MudButton Variant="Variant.Filled" Color="Color.Error" StartIcon="@Icons.Material.Filled.Close" OnClick="SquareOffSelectedAsync" Size="Size.Small">
@@ -62,26 +90,28 @@
 
     <MudTable Items="FilteredPositions" MultiSelection="true" @bind-SelectedItems="_selectedPositions"
               HorizontalScrollbar="true" Dense="true" Hover="true" Striped="true"
-              GroupBy="_groupDefinition" GroupHeaderStyle="background-color:var(--mud-palette-background-grey)">
+              GroupBy="_groupDefinition" GroupHeaderStyle="background-color:var(--mud-palette-background-grey)"
+              RowClassFunc="@GetPositionRowClass">
         <ColGroup>
             <col style="width:40px;" />
         </ColGroup>
         <HeaderContent>
-            <MudTh>Status</MudTh>
-            <MudTh>Entry Time</MudTh>
-            <MudTh>Exit Time</MudTh>
-            <MudTh>Channel</MudTh>
-            <MudTh>Symbol</MudTh>
-            <MudTh>Qty</MudTh>
-            <MudTh>Entry</MudTh>
-            <MudTh>LTP / Exit</MudTh>
-            <MudTh>SL</MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null)">Status</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => BookScope.IsPaper(p))">Book</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel InitialDirection="SortDirection.Descending" SortBy="new Func<NexusApp.Models.Position, object>(p => p.OpenedAt)">Entry Time</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt ?? DateTime.MinValue)">Exit Time</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Signal?.ChannelName ?? string.Empty)">Channel</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Symbol)">Symbol</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Quantity)">Qty</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.EntryPrice)">Entry</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.CurrentPrice : (p.ClosingPrice ?? 0m))">LTP/Exit</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.StopLoss ?? 0m)">SL</MudTableSortLabel></MudTh>
             <MudTh>Targets</MudTh>
-            <MudTh>P&amp;L</MudTh>
-            <MudTh>P&amp;L %</MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.UnrealizedPnL : (p.RealizedPnL ?? 0m))">P&amp;L</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.UnrealizedPnLPercentage : 0m)">P&amp;L %</MudTableSortLabel></MudTh>
         </HeaderContent>
         <GroupHeaderTemplate>
-            <MudTh Class="mud-table-cell-custom-group" colspan="12">
+            <MudTh Class="mud-table-cell-custom-group" colspan="13">
                 <MudText Typo="Typo.subtitle2"><b>@context.Key</b> (@context.Items.Count())</MudText>
             </MudTh>
         </GroupHeaderTemplate>
@@ -95,6 +125,12 @@
                 {
                     <MudChip T="string" Size="Size.Small" Color="Color.Default" Variant="Variant.Outlined">Closed</MudChip>
                 }
+            </MudTd>
+            <MudTd DataLabel="Book">
+                <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
+                         Color="@(BookScope.IsPaper(context) ? Color.Tertiary : Color.Success)">
+                    @(BookScope.IsPaper(context) ? "PAPER" : "LIVE")
+                </MudChip>
             </MudTd>
             <MudTd DataLabel="Entry Time">
                 @context.OpenedAt.ToIstString("hh:mm:ss tt")
@@ -119,11 +155,11 @@
             <MudTd DataLabel="Symbol">@context.Symbol</MudTd>
             <MudTd DataLabel="Qty">@context.Quantity</MudTd>
             <MudTd DataLabel="Entry">@context.EntryPrice</MudTd>
-            <MudTd DataLabel="LTP / Exit">
+            <MudTd DataLabel="LTP/Exit">
                 @(context.ClosedAt == null ? context.CurrentPrice.ToString("N2") : (context.ClosingPrice?.ToString("N2") ?? "-"))
             </MudTd>
             <MudTd DataLabel="SL">@(context.StopLoss?.ToString() ?? "-")</MudTd>
-            <MudTd DataLabel="Targets">@(context.Targets.Count > 0 ? string.Join(" / ", context.Targets) : "-")</MudTd>
+            <MudTd DataLabel="Targets">@(context.Targets.Count > 0 ? context.Targets[0].ToString() : "-")</MudTd>
             <MudTd DataLabel="P&L">
                 @{
                     var pnl = context.ClosedAt == null ? context.UnrealizedPnL : (context.RealizedPnL ?? 0);
@@ -144,25 +180,77 @@
     private StatusFilter _filter = StatusFilter.All;
 
     private enum StatusFilter { All, Open, Closed }
+    private enum BookFilter { All, Live, Paper }
+    private BookFilter _bookFilter = BookFilter.All;
 
-    private IEnumerable<NexusApp.Models.Position> FilteredPositions => _filter switch
+    private IEnumerable<NexusApp.Models.Position> FilteredPositions
     {
-        StatusFilter.Open => _all.Where(p => p.ClosedAt == null),
-        StatusFilter.Closed => _all.Where(p => p.ClosedAt != null),
-        _ => _all
+        get
+        {
+            IEnumerable<NexusApp.Models.Position> result = _filter switch
+            {
+                StatusFilter.Open => _all.Where(p => p.ClosedAt == null),
+                StatusFilter.Closed => _all.Where(p => p.ClosedAt != null),
+                _ => _all
+            };
+
+            return _bookFilter switch
+            {
+                BookFilter.Live => result.Where(BookScope.IsLive),
+                BookFilter.Paper => result.Where(BookScope.IsPaper),
+                _ => result
+            };
+        }
+    }
+
+    private decimal OpenUnrealizedPnl => _bookFilter switch
+    {
+        BookFilter.Live => LiveOpenUnrealized,
+        BookFilter.Paper => PaperOpenUnrealized,
+        _ => LiveOpenUnrealized + PaperOpenUnrealized
     };
 
-    private decimal OpenUnrealizedPnl => _all
-        .Where(p => p.ClosedAt == null)
-        .Sum(p => p.UnrealizedPnL);
-
-    private decimal ClosedRealizedPnl => _all
-        .Where(p => p.ClosedAt != null)
-        .Sum(p => p.RealizedPnL ?? 0m);
+    private decimal ClosedRealizedPnl => _bookFilter switch
+    {
+        BookFilter.Live => LiveClosedRealized,
+        BookFilter.Paper => PaperClosedRealized,
+        _ => LiveClosedRealized + PaperClosedRealized
+    };
 
     private decimal OverallPnl => OpenUnrealizedPnl + ClosedRealizedPnl;
 
+    private decimal PaperOpenUnrealized => _all
+        .Where(p => p.ClosedAt == null && BookScope.IsPaper(p))
+        .Sum(p => p.UnrealizedPnL);
+
+    private decimal PaperClosedRealized => _all
+        .Where(p => p.ClosedAt != null && BookScope.IsPaper(p))
+        .Sum(p => p.RealizedPnL ?? 0m);
+
+    // Live figures are sourced from the same broker-truth HealthTick broadcast the
+    // Dashboard uses (see HealthMonitorService), not summed from the local DB rows.
+    // The broker position book is the only source that sees every terminal leg
+    // (carry-forward, manual and non-app orders), so a DB-derived number here would
+    // silently contradict the Dashboard's "real" live figures.
+    private bool _brokerConnected;
+    private bool _hasBrokerTick;
+    private decimal _liveUnrealizedTick;
+    private decimal _liveRealizedTick;
+
+    private bool UseBrokerTruth => _brokerConnected && _hasBrokerTick;
+
+    private decimal LiveOpenUnrealized => UseBrokerTruth ? _liveUnrealizedTick : 0m;
+
+    private decimal LiveClosedRealized => UseBrokerTruth ? _liveRealizedTick : 0m;
+
     private static Color PnlColor(decimal pnl) => pnl >= 0 ? Color.Success : Color.Error;
+
+    /// <summary>
+    /// Colors each row by book (live vs paper), matching the same accent used on
+    /// the Dashboard's Open Positions grid so the two screens are consistent.
+    /// </summary>
+    private static string GetPositionRowClass(NexusApp.Models.Position position, int rowNumber) =>
+        BookScope.IsPaper(position) ? "position-row--paper" : "position-row--live";
 
     // Groups the consolidated grid into "Open" / "Closed" sections.
     private readonly TableGroupDefinition<NexusApp.Models.Position> _groupDefinition = new()
@@ -174,13 +262,24 @@
 
     protected override async Task OnInitializedAsync()
     {
+        // Seed the live cards from the last broadcast health figures so the Live
+        // toggle renders real numbers immediately instead of zeros until the next
+        // 30s HealthTick arrives - same pattern as the Dashboard.
+        ApplyHealthSnapshot(HealthSnapshots.Latest);
+
         await LoadAsync();
         try
         {
-            _hub = new HubConnectionBuilder()
-                .WithUrl(Nav.ToAbsoluteUri("/tradingHub"))
-                .WithAutomaticReconnect()
-                .Build();
+            _hub = HubFactory.Create(Nav);
+
+            _hub.On<JsonElement>("HealthTick", payload =>
+            {
+                _ = InvokeAsync(() =>
+                {
+                    ApplyHealthTick(payload);
+                    StateHasChanged();
+                });
+            });
 
             _hub.On("PositionChanged", async () =>
             {
@@ -255,6 +354,69 @@
         }
     }
 
+    private void ApplyHealthSnapshot(NexusApp.Services.HealthSnapshot? snapshot)
+    {
+        if (snapshot is null)
+            return;
+
+        _brokerConnected = snapshot.BrokerConnected;
+
+        if (snapshot.BrokerConnected && snapshot.BrokerPnlAvailable)
+        {
+            _liveUnrealizedTick = snapshot.LiveUnrealized;
+            _liveRealizedTick = snapshot.LiveRealized;
+            _hasBrokerTick = true;
+        }
+        else
+        {
+            _liveUnrealizedTick = 0m;
+            _liveRealizedTick = 0m;
+            _hasBrokerTick = false;
+        }
+    }
+
+    private void ApplyHealthTick(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object)
+            return;
+
+        if (TryGetProp(payload, out var connectedProp, "BrokerConnected", "brokerConnected"))
+            _brokerConnected = connectedProp.ValueKind == JsonValueKind.True;
+
+        var brokerPnlAvailable = true;
+        if (TryGetProp(payload, out var brokerPnlProp, "BrokerPnlAvailable", "brokerPnlAvailable"))
+            brokerPnlAvailable = brokerPnlProp.ValueKind == JsonValueKind.True;
+
+        if (_brokerConnected && brokerPnlAvailable)
+        {
+            var applied = false;
+
+            if (TryGetProp(payload, out var liveUnrealProp, "LiveUnrealized", "liveUnrealized") &&
+                TryGetDecimal(liveUnrealProp, out var liveUnreal))
+            {
+                _liveUnrealizedTick = liveUnreal;
+                applied = true;
+            }
+
+            if (TryGetProp(payload, out var liveRealProp, "LiveRealized", "liveRealized") &&
+                TryGetDecimal(liveRealProp, out var liveReal))
+            {
+                _liveRealizedTick = liveReal;
+                applied = true;
+            }
+
+            _hasBrokerTick = applied;
+        }
+        else
+        {
+            // Broker offline or live broker-book unreadable: do not render local
+            // substitutes as terminal-truth live P&L.
+            _hasBrokerTick = false;
+            _liveUnrealizedTick = 0m;
+            _liveRealizedTick = 0m;
+        }
+    }
+
     private static bool TryGetProp(JsonElement element, out JsonElement value, params string[] names)
     {
         foreach (var name in names)
@@ -287,9 +449,9 @@
             using var db = await DbFactory.CreateDbContextAsync();
             var selectedIds = _selectedPositions.Select(p => p.Id).ToHashSet();
 
-            var open = await db.Positions.AsNoTracking().Include(p => p.Signal).Where(p => p.ClosedAt == null)
+            var open = await db.Positions.AsNoTracking().Include(p => p.Signal).Include(p => p.TradingAccount).Where(p => p.ClosedAt == null)
                 .OrderByDescending(p => p.OpenedAt).ToListAsync();
-            var closed = await db.Positions.AsNoTracking().Include(p => p.Signal).Where(p => p.ClosedAt != null)
+            var closed = await db.Positions.AsNoTracking().Include(p => p.Signal).Include(p => p.TradingAccount).Where(p => p.ClosedAt != null)
                 .OrderByDescending(p => p.ClosedAt).Take(100).ToListAsync();
 
             // Consolidated list: open positions first, then most-recent closed.

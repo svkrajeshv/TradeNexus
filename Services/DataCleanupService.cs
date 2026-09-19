@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NexusApp.Data;
+using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Brokers.AngelOne;
 
@@ -51,8 +52,11 @@ public sealed class DataCleanupService
     /// </summary>
     public async Task<CleanupResult> CleanupAsync(bool allData = false, CancellationToken ct = default)
     {
-        var todayLocalStart = DateTime.Today;                        // local midnight
-        var cutoffUtc = todayLocalStart.ToUniversalTime();           // rows with CreatedAt/timestamps < this are "yesterday or older"
+        // DB rows are cut at IST midnight (the trading-day boundary) expressed in UTC.
+        // Log files are compared against local midnight because File.GetLastWriteTime
+        // and Serilog's daily rolling both use the host's local clock.
+        var cutoffUtc = DateTimeExtensions.IstToday().IstToUtc();
+        var todayLocalStart = DateTime.Today;
 
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 

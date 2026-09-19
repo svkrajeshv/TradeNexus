@@ -12,18 +12,23 @@ internal static class WebApplicationExtensions
 {
     public static void ConfigureSerilog(this ConfigureHostBuilder host)
     {
-        // Serilog: console + daily rolling files
+        // Serilog: console + daily rolling files. Timestamps are emitted in IST via
+        // the enricher so console, file and UI all agree with the exchange clock.
+        const string outputTemplate =
+            "[{IstTimestamp:l} IST] [{Level:u3}] {Message:lj}{NewLine}{Exception}";
+
         host.UseSerilog((context, configuration) =>
             configuration
                 .MinimumLevel.Information()
                 .MinimumLevel.Override("Microsoft.AspNetCore", Serilog.Events.LogEventLevel.Warning)
                 .MinimumLevel.Override("Microsoft.EntityFrameworkCore", Serilog.Events.LogEventLevel.Warning)
                 .Enrich.FromLogContext()
-                .WriteTo.Console()
+                .Enrich.With<IstTimestampEnricher>()
+                .WriteTo.Console(outputTemplate: outputTemplate)
                 .WriteTo.File(
                     path: "Logs/trading-app-.txt",
                     rollingInterval: RollingInterval.Day,
-                    outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz}] [{Level:u3}] {Message:lj}{NewLine}{Exception}",
+                    outputTemplate: outputTemplate,
                     retainedFileCountLimit: 5));
     }
 

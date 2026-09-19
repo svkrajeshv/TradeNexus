@@ -1,3 +1,4 @@
+using NexusApp.Helpers;
 using NexusApp.Interfaces;
 using NexusApp.Models;
 using System.Globalization;
@@ -139,7 +140,7 @@ public sealed class AliceBlueBroker(
 
         try
         {
-            var (token, exchange) = await ResolveTokenAsync(symbol, null, "NFO");
+            var (token, exchange) = await ResolveTokenAsync(symbol, null, MarketSegments.ExchangeForTradingSymbol(symbol));
             var result = await _apiClient.GetScripQuoteAsync(exchange, token ?? symbol);
             if (result is null)
                 return 0m;
@@ -166,7 +167,12 @@ public sealed class AliceBlueBroker(
                 ? "0"
                 : request.Price.ToString("0.##", CultureInfo.InvariantCulture);
             var quantity = Math.Max(1, (int)Math.Round(request.Quantity, MidpointRounding.AwayFromZero));
-            var exchange = string.IsNullOrWhiteSpace(request.Exchange) ? "NFO" : request.Exchange!;
+            // The segment must be derived from the symbol, never defaulted to NFO: a
+            // commodity sent on NFO is matched against an unrelated NSE scrip, which the
+            // exchange then reports as segment NSECMD.
+            var exchange = string.IsNullOrWhiteSpace(request.Exchange)
+                ? MarketSegments.ExchangeForTradingSymbol(request.Symbol)
+                : request.Exchange!;
 
             // Resolve the numeric instrument token (symbol_id) required by ANT placeOrder.
             var (resolvedToken, resolvedExchange) = await ResolveTokenAsync(request.Symbol, request.SymbolToken, exchange);
@@ -263,7 +269,9 @@ public sealed class AliceBlueBroker(
         var modifyRequest = new
         {
             nestOrderNumber = orderId,
-            exch = string.IsNullOrWhiteSpace(request.Exchange) ? "NFO" : request.Exchange!,
+            exch = string.IsNullOrWhiteSpace(request.Exchange)
+                ? MarketSegments.ExchangeForTradingSymbol(request.Symbol)
+                : request.Exchange!,
             trading_symbol = request.Symbol,
             transtype = isBuy ? "BUY" : "SELL",
             prctyp = priceType,
@@ -278,7 +286,23 @@ public sealed class AliceBlueBroker(
 
     public async Task<bool> CancelOrderAsync(string orderId)
     {
-        var (ok, _) = await _apiClient.CancelOrderAsync(orderId, "NFO");
+        // The cancel API needs the segment the order was placed on, but only the order id
+        // is supplied here. Recover the tradingsymbol from the order book so an MCX order
+        // is not cancelled against NFO; fall back to NFO when it cannot be found.
+        var exchange = "NFO";
+        try
+        {
+            var book = await GetOrderBookAsync();
+            var match = book.FirstOrDefault(o => string.Equals(o.OrderId, orderId, StringComparison.OrdinalIgnoreCase));
+            if (match is not null)
+                exchange = MarketSegments.ExchangeForTradingSymbol(match.Symbol);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not resolve exchange for AliceBlue cancel of {OrderId}; defaulting to NFO", orderId);
+        }
+
+        var (ok, _) = await _apiClient.CancelOrderAsync(orderId, exchange);
         return ok;
     }
 

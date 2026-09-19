@@ -4,13 +4,29 @@
 @using NexusApp.Data
 @using NexusApp.Models
 @using NexusApp.Helpers
+@using System.Globalization
+@using System.Text
 @inject IDbContextFactory<TradingDbContext> DbFactory
 @inject NexusApp.Services.TradeHistoryService TradeHistory
 @inject ISnackbar Snackbar
+@inject IJSRuntime JS
 
 <PageTitle>NexusApp - PNL Statements</PageTitle>
 
-<MudText Typo="Typo.h4" Class="mb-4">PNL Statements</MudText>
+<MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-4">
+    <MudText Typo="Typo.h4">PNL Statements</MudText>
+    <MudButtonGroup Color="Color.Success" Variant="Variant.Filled">
+        <MudButton StartIcon="@Icons.Material.Filled.Download"
+                   OnClick="() => DownloadAsync(false)"
+                   Disabled="_downloading || _rows.Count == 0">
+            @(_downloading ? "Preparing..." : $"Download Statement ({FilteredRows.Count})")
+        </MudButton>
+        <MudMenu Icon="@Icons.Material.Filled.ArrowDropDown" Disabled="_downloading || _rows.Count == 0">
+            <MudMenuItem OnClick="() => DownloadAsync(false)">Full Statement (Summary + Trades)</MudMenuItem>
+            <MudMenuItem OnClick="() => DownloadAsync(true)">Trades Only (Clean CSV)</MudMenuItem>
+        </MudMenu>
+    </MudButtonGroup>
+</MudStack>
 
 <MudPaper Class="pa-4 mb-4" Elevation="2">
     <MudGrid Spacing="2" Justify="Justify.FlexStart">
@@ -48,7 +64,7 @@
 <MudGrid Spacing="3" Class="mb-4">
     <MudItem xs="12" sm="6" md="3">
         <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Net P&amp;L</MudText>
+            <MudText Typo="Typo.subtitle2" Color="Color.Secondary">Net P&amp;L (All)</MudText>
             <MudText Typo="Typo.h4" Color="@(_totalPnL >= 0 ? Color.Success : Color.Error)">@_totalPnL.ToString("N2")</MudText>
         </MudPaper>
     </MudItem>
@@ -76,17 +92,91 @@
     </MudItem>
 </MudGrid>
 
+@* Separate Live vs Paper summaries so a mixed book never blends the two P&Ls
+   into one confusing "All" number. Each card pair is computed from its own
+   filtered subset of _rows (see ComputeStats), never from the combined total. *@
+<MudGrid Spacing="3" Class="mb-4">
+    <MudItem xs="12" md="6">
+        <MudPaper Class="pa-4" Elevation="2" Style="border-left: 4px solid var(--mud-palette-success);">
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-2">
+                <MudText Typo="Typo.h6">⚡ Live</MudText>
+                <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Outlined">Real Account</MudChip>
+            </MudStack>
+            <MudGrid Spacing="2">
+                <MudItem xs="6" sm="3">
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Net P&amp;L</MudText>
+                    <MudText Typo="Typo.h6" Color="@(_liveStats.NetPnL >= 0 ? Color.Success : Color.Error)">@_liveStats.NetPnL.ToString("N2")</MudText>
+                </MudItem>
+                <MudItem xs="6" sm="3">
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Trades</MudText>
+                    <MudText Typo="Typo.h6">@_liveStats.Trades</MudText>
+                </MudItem>
+                <MudItem xs="6" sm="3">
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Win Rate</MudText>
+                    <MudText Typo="Typo.h6" Color="@(_liveStats.WinRate >= 50 ? Color.Success : Color.Warning)">@_liveStats.WinRate.ToString("N1")%</MudText>
+                </MudItem>
+                <MudItem xs="6" sm="3">
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Wins / Losses</MudText>
+                    <MudText Typo="Typo.h6">
+                        <MudText Typo="Typo.h6" Color="Color.Success" Inline="true">@_liveStats.Wins</MudText>
+                        <MudText Typo="Typo.h6" Inline="true"> / </MudText>
+                        <MudText Typo="Typo.h6" Color="Color.Error" Inline="true">@_liveStats.Losses</MudText>
+                    </MudText>
+                </MudItem>
+            </MudGrid>
+        </MudPaper>
+    </MudItem>
+    <MudItem xs="12" md="6">
+        <MudPaper Class="pa-4" Elevation="2" Style="border-left: 4px solid var(--mud-palette-tertiary);">
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-2">
+                <MudText Typo="Typo.h6">📝 Paper</MudText>
+                <MudChip T="string" Size="Size.Small" Color="Color.Tertiary" Variant="Variant.Outlined">Simulated Account</MudChip>
+            </MudStack>
+            <MudGrid Spacing="2">
+                <MudItem xs="6" sm="3">
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Net P&amp;L</MudText>
+                    <MudText Typo="Typo.h6" Color="@(_paperStats.NetPnL >= 0 ? Color.Success : Color.Error)">@_paperStats.NetPnL.ToString("N2")</MudText>
+                </MudItem>
+                <MudItem xs="6" sm="3">
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Trades</MudText>
+                    <MudText Typo="Typo.h6">@_paperStats.Trades</MudText>
+                </MudItem>
+                <MudItem xs="6" sm="3">
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Win Rate</MudText>
+                    <MudText Typo="Typo.h6" Color="@(_paperStats.WinRate >= 50 ? Color.Success : Color.Warning)">@_paperStats.WinRate.ToString("N1")%</MudText>
+                </MudItem>
+                <MudItem xs="6" sm="3">
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Wins / Losses</MudText>
+                    <MudText Typo="Typo.h6">
+                        <MudText Typo="Typo.h6" Color="Color.Success" Inline="true">@_paperStats.Wins</MudText>
+                        <MudText Typo="Typo.h6" Inline="true"> / </MudText>
+                        <MudText Typo="Typo.h6" Color="Color.Error" Inline="true">@_paperStats.Losses</MudText>
+                    </MudText>
+                </MudItem>
+            </MudGrid>
+        </MudPaper>
+    </MudItem>
+</MudGrid>
+
 <MudPaper Class="pa-4 mb-4" Elevation="2">
-    <MudText Typo="Typo.h6" Class="mb-2">Performance by Channel</MudText>
-    @if (_channelStats.Count == 0)
+    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-2">
+        <MudText Typo="Typo.h6">Performance by Channel</MudText>
+        <MudToggleGroup T="string" @bind-Value="_channelBookFilter" Color="Color.Primary" Size="Size.Small">
+            <MudToggleItem Value="@AllBooks">All</MudToggleItem>
+            <MudToggleItem Value="@LiveBook">Live</MudToggleItem>
+            <MudToggleItem Value="@PaperBook">Paper</MudToggleItem>
+        </MudToggleGroup>
+    </MudStack>
+    @if (FilteredChannelStats.Count == 0)
     {
         <MudText Typo="Typo.body2" Color="Color.Secondary">No closed trades in the selected range.</MudText>
     }
     else
     {
-        <MudTable Items="_channelStats" Dense="true" Hover="true" Striped="true" HorizontalScrollbar="true">
+        <MudTable Items="FilteredChannelStats" Dense="true" Hover="true" Striped="true" HorizontalScrollbar="true">
             <HeaderContent>
                 <MudTh>Channel</MudTh>
+                <MudTh>Book</MudTh>
                 <MudTh>Trades</MudTh>
                 <MudTh>Wins</MudTh>
                 <MudTh>Losses</MudTh>
@@ -95,6 +185,11 @@
             </HeaderContent>
             <RowTemplate>
                 <MudTd DataLabel="Channel">@context.Channel</MudTd>
+                <MudTd DataLabel="Book">
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="@(context.IsPaper ? Color.Tertiary : Color.Success)">
+                        @(context.IsPaper ? "PAPER" : "LIVE")
+                    </MudChip>
+                </MudTd>
                 <MudTd DataLabel="Trades">@context.Trades</MudTd>
                 <MudTd DataLabel="Wins">@context.Wins</MudTd>
                 <MudTd DataLabel="Losses">@context.Losses</MudTd>
@@ -108,16 +203,24 @@
 </MudPaper>
 
 <MudPaper Class="pa-4 mb-4" Elevation="2">
-    <MudText Typo="Typo.h6" Class="mb-2">Performance by Terminal</MudText>
-    @if (_terminalStats.Count == 0)
+    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-2">
+        <MudText Typo="Typo.h6">Performance by Terminal</MudText>
+        <MudToggleGroup T="string" @bind-Value="_terminalBookFilter" Color="Color.Primary" Size="Size.Small">
+            <MudToggleItem Value="@AllBooks">All</MudToggleItem>
+            <MudToggleItem Value="@LiveBook">Live</MudToggleItem>
+            <MudToggleItem Value="@PaperBook">Paper</MudToggleItem>
+        </MudToggleGroup>
+    </MudStack>
+    @if (FilteredTerminalStats.Count == 0)
     {
         <MudText Typo="Typo.body2" Color="Color.Secondary">No closed trades in the selected range.</MudText>
     }
     else
     {
-        <MudTable Items="_terminalStats" Dense="true" Hover="true" Striped="true" HorizontalScrollbar="true">
+        <MudTable Items="FilteredTerminalStats" Dense="true" Hover="true" Striped="true" HorizontalScrollbar="true">
             <HeaderContent>
                 <MudTh>Terminal</MudTh>
+                <MudTh>Book</MudTh>
                 <MudTh>Trades</MudTh>
                 <MudTh>Wins</MudTh>
                 <MudTh>Losses</MudTh>
@@ -126,6 +229,11 @@
             </HeaderContent>
             <RowTemplate>
                 <MudTd DataLabel="Terminal">@context.Terminal</MudTd>
+                <MudTd DataLabel="Book">
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="@(context.IsPaper ? Color.Tertiary : Color.Success)">
+                        @(context.IsPaper ? "PAPER" : "LIVE")
+                    </MudChip>
+                </MudTd>
                 <MudTd DataLabel="Trades">@context.Trades</MudTd>
                 <MudTd DataLabel="Wins">@context.Wins</MudTd>
                 <MudTd DataLabel="Losses">@context.Losses</MudTd>
@@ -139,17 +247,34 @@
 </MudPaper>
 
 <MudPaper Class="pa-4" Elevation="2">
-    <MudText Typo="Typo.h6" Class="mb-2">Executed Trades</MudText>
-    @if (_rows.Count == 0)
+    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-2">
+        <MudText Typo="Typo.h6">Executed Trades</MudText>
+        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
+            <MudToggleGroup T="string" @bind-Value="_rowsBookFilter" Color="Color.Primary" Size="Size.Small">
+                <MudToggleItem Value="@AllBooks">All</MudToggleItem>
+                <MudToggleItem Value="@LiveBook">Live</MudToggleItem>
+                <MudToggleItem Value="@PaperBook">Paper</MudToggleItem>
+            </MudToggleGroup>
+            <MudTooltip Text="Download executed trades as CSV">
+                <MudIconButton Icon="@Icons.Material.Filled.Download"
+                               Color="Color.Primary"
+                               Size="Size.Small"
+                               OnClick="() => DownloadAsync(true)"
+                               Disabled="_downloading || FilteredRows.Count == 0" />
+            </MudTooltip>
+        </MudStack>
+    </MudStack>
+    @if (FilteredRows.Count == 0)
     {
         <MudText Typo="Typo.body2" Color="Color.Secondary">No executed trades in the selected range.</MudText>
     }
     else
     {
-        <MudTable Items="_rows" Dense="true" Hover="true" Striped="true" HorizontalScrollbar="true"
+        <MudTable Items="FilteredRows" Dense="true" Hover="true" Striped="true" HorizontalScrollbar="true"
                   Filter="null" Bordered="false" FixedHeader="true" Height="480px">
             <HeaderContent>
                 <MudTh>Closed</MudTh>
+                <MudTh>Book</MudTh>
                 <MudTh>Channel</MudTh>
                 <MudTh>Terminal</MudTh>
                 <MudTh>Symbol</MudTh>
@@ -160,6 +285,11 @@
             </HeaderContent>
             <RowTemplate>
                 <MudTd DataLabel="Closed">@context.ClosedAt.ToIstString("dd-MMM hh:mm:ss tt")</MudTd>
+                <MudTd DataLabel="Book">
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="@(context.IsPaper ? Color.Tertiary : Color.Success)">
+                        @(context.IsPaper ? "PAPER" : "LIVE")
+                    </MudChip>
+                </MudTd>
                 <MudTd DataLabel="Channel">@context.Channel</MudTd>
                 <MudTd DataLabel="Terminal">@context.Terminal</MudTd>
                 <MudTd DataLabel="Symbol">@context.Symbol</MudTd>
@@ -180,10 +310,23 @@
     private const string UnknownChannel = "Unknown";
     private const string UnknownTerminal = "Unknown";
 
-    private DateTime? _fromDate = DateTime.Today.AddDays(-30);
-    private DateTime? _toDate = DateTime.Today;
+    private const string AllBooks = "all";
+    private const string LiveBook = "live";
+    private const string PaperBook = "paper";
+
+    private static DateTime IstToday() => DateTime.UtcNow.ToIst().Date;
+    private static DateTime DefaultFromDate() => IstToday().AddDays(-30);
+
+    private DateTime? _fromDate = DefaultFromDate();
+    private DateTime? _toDate = IstToday();
     private string _selectedChannel = AllChannels;
     private string _selectedTerminal = AllTerminals;
+
+    // Independent Book filters per section so, e.g., viewing the Live channel
+    // breakdown does not force the trade list into the same filter.
+    private string _channelBookFilter = AllBooks;
+    private string _terminalBookFilter = AllBooks;
+    private string _rowsBookFilter = AllBooks;
 
     private readonly List<string> _channels = new();
     private readonly List<string> _terminals = new();
@@ -196,6 +339,30 @@
     private int _wins;
     private int _losses;
     private double _winRate;
+
+    private BookSummary _liveStats;
+    private BookSummary _paperStats;
+
+    private List<ChannelStat> FilteredChannelStats => _channelBookFilter switch
+    {
+        LiveBook => _channelStats.Where(c => !c.IsPaper).ToList(),
+        PaperBook => _channelStats.Where(c => c.IsPaper).ToList(),
+        _ => _channelStats
+    };
+
+    private List<TerminalStat> FilteredTerminalStats => _terminalBookFilter switch
+    {
+        LiveBook => _terminalStats.Where(t => !t.IsPaper).ToList(),
+        PaperBook => _terminalStats.Where(t => t.IsPaper).ToList(),
+        _ => _terminalStats
+    };
+
+    private List<TradeRow> FilteredRows => _rowsBookFilter switch
+    {
+        LiveBook => _rows.Where(r => !r.IsPaper).ToList(),
+        PaperBook => _rows.Where(r => r.IsPaper).ToList(),
+        _ => _rows
+    };
 
     protected override async Task OnInitializedAsync()
     {
@@ -242,8 +409,9 @@
     {
         try
         {
-            var fromUtc = (_fromDate ?? DateTime.Today.AddDays(-30)).Date.EnsureUtc();
-            var toUtc = (_toDate ?? DateTime.Today).Date.AddDays(1).EnsureUtc(); // inclusive end-of-day
+            // Pickers hold IST calendar dates; ClosedAt is stored in UTC.
+            var fromUtc = (_fromDate ?? DefaultFromDate()).Date.IstToUtc();
+            var toUtc = (_toDate ?? IstToday()).Date.AddDays(1).IstToUtc(); // inclusive end-of-day
 
             using var db = await DbFactory.CreateDbContextAsync();
 
@@ -253,6 +421,7 @@
                 where h.ClosedAt >= fromUtc && h.ClosedAt < toUtc
                 select new TradeRow
                 {
+                    OpenedAt = h.OpenedAt,
                     ClosedAt = h.ClosedAt,
                     Channel = h.ChannelName != null && h.ChannelName != string.Empty ? h.ChannelName : UnknownChannel,
                     Terminal = h.TerminalName != null && h.TerminalName != string.Empty ? h.TerminalName : UnknownTerminal,
@@ -260,7 +429,8 @@
                     Quantity = h.Quantity,
                     EntryPrice = h.EntryPrice,
                     ExitPrice = h.ExitPrice,
-                    RealizedPnL = h.RealizedPnL
+                    RealizedPnL = h.RealizedPnL,
+                    IsPaper = h.IsPaper
                 };
 
             var rows = await query.OrderByDescending(r => r.ClosedAt).ToListAsync();
@@ -283,11 +453,26 @@
 
     private async Task ResetAsync()
     {
-        _fromDate = DateTime.Today.AddDays(-30);
-        _toDate = DateTime.Today;
+        _fromDate = DefaultFromDate();
+        _toDate = IstToday();
         _selectedChannel = AllChannels;
         _selectedTerminal = AllTerminals;
         await ApplyAsync();
+    }
+
+    private static BookSummary Summarize(IReadOnlyCollection<TradeRow> rows)
+    {
+        var trades = rows.Count;
+        var wins = rows.Count(r => r.RealizedPnL > 0);
+        var losses = rows.Count(r => r.RealizedPnL < 0);
+        return new BookSummary
+        {
+            Trades = trades,
+            Wins = wins,
+            Losses = losses,
+            NetPnL = rows.Sum(r => r.RealizedPnL),
+            WinRate = trades > 0 ? (double)wins / trades * 100.0 : 0
+        };
     }
 
     private void ComputeStats()
@@ -298,37 +483,48 @@
         _losses = _rows.Count(r => r.RealizedPnL < 0);
         _winRate = _totalTrades > 0 ? (double)_wins / _totalTrades * 100.0 : 0;
 
+        // Live and Paper are summarised independently — never derived from or
+        // blended into the "All" total above, so a losing paper session can
+        // never be masked by (or confused with) live profits and vice versa.
+        _liveStats = Summarize(_rows.Where(r => !r.IsPaper).ToList());
+        _paperStats = Summarize(_rows.Where(r => r.IsPaper).ToList());
+
         _channelStats = _rows
-            .GroupBy(r => r.Channel)
+            .GroupBy(r => (r.Channel, r.IsPaper))
             .Select(g => new ChannelStat
             {
-                Channel = g.Key,
+                Channel = g.Key.Channel,
+                IsPaper = g.Key.IsPaper,
                 Trades = g.Count(),
                 Wins = g.Count(r => r.RealizedPnL > 0),
                 Losses = g.Count(r => r.RealizedPnL < 0),
                 NetPnL = g.Sum(r => r.RealizedPnL),
                 WinRate = g.Count() > 0 ? (double)g.Count(r => r.RealizedPnL > 0) / g.Count() * 100.0 : 0
             })
-            .OrderByDescending(c => c.NetPnL)
+            .OrderBy(c => c.IsPaper)
+            .ThenByDescending(c => c.NetPnL)
             .ToList();
 
         _terminalStats = _rows
-            .GroupBy(r => r.Terminal)
+            .GroupBy(r => (r.Terminal, r.IsPaper))
             .Select(g => new TerminalStat
             {
-                Terminal = g.Key,
+                Terminal = g.Key.Terminal,
+                IsPaper = g.Key.IsPaper,
                 Trades = g.Count(),
                 Wins = g.Count(r => r.RealizedPnL > 0),
                 Losses = g.Count(r => r.RealizedPnL < 0),
                 NetPnL = g.Sum(r => r.RealizedPnL),
                 WinRate = g.Count() > 0 ? (double)g.Count(r => r.RealizedPnL > 0) / g.Count() * 100.0 : 0
             })
-            .OrderByDescending(t => t.NetPnL)
+            .OrderBy(t => t.IsPaper)
+            .ThenByDescending(t => t.NetPnL)
             .ToList();
     }
 
     private sealed class TradeRow
     {
+        public DateTime OpenedAt { get; set; }
         public DateTime ClosedAt { get; set; }
         public string Channel { get; set; } = string.Empty;
         public string Terminal { get; set; } = string.Empty;
@@ -337,11 +533,13 @@
         public decimal EntryPrice { get; set; }
         public decimal? ExitPrice { get; set; }
         public decimal RealizedPnL { get; set; }
+        public bool IsPaper { get; set; }
     }
 
     private sealed class ChannelStat
     {
         public string Channel { get; set; } = string.Empty;
+        public bool IsPaper { get; set; }
         public int Trades { get; set; }
         public int Wins { get; set; }
         public int Losses { get; set; }
@@ -352,10 +550,240 @@
     private sealed class TerminalStat
     {
         public string Terminal { get; set; } = string.Empty;
+        public bool IsPaper { get; set; }
         public int Trades { get; set; }
         public int Wins { get; set; }
         public int Losses { get; set; }
         public double WinRate { get; set; }
         public decimal NetPnL { get; set; }
+    }
+
+    private struct BookSummary
+    {
+        public int Trades { get; set; }
+        public int Wins { get; set; }
+        public int Losses { get; set; }
+        public double WinRate { get; set; }
+        public decimal NetPnL { get; set; }
+    }
+
+    private bool _downloading;
+
+    private async Task DownloadAsync(bool tradesOnly = false)
+    {
+        if (_downloading) return;
+        _downloading = true;
+
+        try
+        {
+            var rows = FilteredRows;
+            if (rows.Count == 0)
+            {
+                Snackbar.Add("No trades to download in the selected range.", Severity.Info);
+                return;
+            }
+
+            var csv = tradesOnly
+                ? BuildTradesOnlyCsv(rows)
+                : BuildFullStatementCsv(rows);
+
+            var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(csv)).ToArray();
+            var fromStr = (_fromDate ?? DefaultFromDate()).ToString("yyyyMMdd");
+            var toStr = (_toDate ?? IstToday()).ToString("yyyyMMdd");
+            var fileName = tradesOnly
+                ? $"pnl-trades-{fromStr}-to-{toStr}.csv"
+                : $"pnl-statement-{fromStr}-to-{toStr}.csv";
+
+            await JS.InvokeVoidAsync("NexusApp.downloadFile", fileName, "text/csv", Convert.ToBase64String(bytes));
+            Snackbar.Add($"Downloaded {rows.Count} trades to {fileName}", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Download failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _downloading = false;
+        }
+    }
+
+    private string BuildTradesOnlyCsv(List<TradeRow> rows)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(string.Join(",",
+            "Trade #",
+            "Opened (IST)",
+            "Closed (IST)",
+            "Book",
+            "Channel",
+            "Terminal",
+            "Symbol",
+            "Quantity",
+            "Entry Price",
+            "Exit Price",
+            "Points Captured",
+            "Realized PnL (INR)",
+            "Return (%)",
+            "Outcome"));
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var r = rows[i];
+            var points = r.Quantity > 0 ? r.RealizedPnL / r.Quantity : 0m;
+            var returnPct = (r.EntryPrice > 0 && r.Quantity > 0)
+                ? (r.RealizedPnL / (r.EntryPrice * r.Quantity)) * 100m
+                : 0m;
+            var outcome = r.RealizedPnL > 0 ? "WIN" : (r.RealizedPnL < 0 ? "LOSS" : "BREAKEVEN");
+
+            sb.AppendLine(string.Join(",",
+                Csv(i + 1),
+                Csv(r.OpenedAt.ToIstString()),
+                Csv(r.ClosedAt.ToIstString()),
+                Csv(r.IsPaper ? "PAPER" : "LIVE"),
+                Csv(r.Channel),
+                Csv(r.Terminal),
+                Csv(r.Symbol),
+                Csv(r.Quantity),
+                Csv(r.EntryPrice),
+                Csv(r.ExitPrice),
+                Csv(points),
+                Csv(r.RealizedPnL),
+                Csv(returnPct.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+                Csv(outcome)));
+        }
+
+        return sb.ToString();
+    }
+
+    private string BuildFullStatementCsv(List<TradeRow> rows)
+    {
+        var sb = new StringBuilder();
+        var fromText = (_fromDate ?? DefaultFromDate()).ToString("dd-MMM-yyyy");
+        var toText = (_toDate ?? IstToday()).ToString("dd-MMM-yyyy");
+
+        sb.AppendLine("# ==============================================================================");
+        sb.AppendLine("# NEXUSAPP — P&L STATEMENT");
+        sb.AppendLine("# ==============================================================================");
+        sb.AppendLine($"# Statement Period: {fromText} to {toText} (IST)");
+        sb.AppendLine($"# Generated At: {DateTime.UtcNow.ToIstString()} IST");
+        sb.AppendLine($"# Channel Filter: {(_selectedChannel == AllChannels ? "All Channels" : _selectedChannel)}");
+        sb.AppendLine($"# Terminal Filter: {(_selectedTerminal == AllTerminals ? "All Terminals" : _selectedTerminal)}");
+        sb.AppendLine($"# Book Filter: {_rowsBookFilter.ToUpperInvariant()}");
+        sb.AppendLine("# ==============================================================================");
+        sb.AppendLine();
+
+        sb.AppendLine("# EXECUTIVE SUMMARY");
+        sb.AppendLine(string.Join(",", "Book", "Trades", "Wins", "Losses", "Win Rate (%)", "Net Realized PnL (INR)"));
+        sb.AppendLine(string.Join(",",
+            "Overall (All)",
+            Csv(_totalTrades),
+            Csv(_wins),
+            Csv(_losses),
+            Csv(_winRate.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+            Csv(_totalPnL)));
+        sb.AppendLine(string.Join(",",
+            "Live Book",
+            Csv(_liveStats.Trades),
+            Csv(_liveStats.Wins),
+            Csv(_liveStats.Losses),
+            Csv(_liveStats.WinRate.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+            Csv(_liveStats.NetPnL)));
+        sb.AppendLine(string.Join(",",
+            "Paper Book",
+            Csv(_paperStats.Trades),
+            Csv(_paperStats.Wins),
+            Csv(_paperStats.Losses),
+            Csv(_paperStats.WinRate.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+            Csv(_paperStats.NetPnL)));
+        sb.AppendLine();
+
+        sb.AppendLine("# PERFORMANCE BY CHANNEL");
+        sb.AppendLine(string.Join(",", "Channel", "Book", "Trades", "Wins", "Losses", "Win Rate (%)", "Net Realized PnL (INR)"));
+        foreach (var cs in FilteredChannelStats)
+        {
+            sb.AppendLine(string.Join(",",
+                Csv(cs.Channel),
+                Csv(cs.IsPaper ? "PAPER" : "LIVE"),
+                Csv(cs.Trades),
+                Csv(cs.Wins),
+                Csv(cs.Losses),
+                Csv(cs.WinRate.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+                Csv(cs.NetPnL)));
+        }
+        sb.AppendLine();
+
+        sb.AppendLine("# PERFORMANCE BY TERMINAL");
+        sb.AppendLine(string.Join(",", "Terminal", "Book", "Trades", "Wins", "Losses", "Win Rate (%)", "Net Realized PnL (INR)"));
+        foreach (var ts in FilteredTerminalStats)
+        {
+            sb.AppendLine(string.Join(",",
+                Csv(ts.Terminal),
+                Csv(ts.IsPaper ? "PAPER" : "LIVE"),
+                Csv(ts.Trades),
+                Csv(ts.Wins),
+                Csv(ts.Losses),
+                Csv(ts.WinRate.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+                Csv(ts.NetPnL)));
+        }
+        sb.AppendLine();
+
+        sb.AppendLine("# EXECUTED TRADES");
+        sb.AppendLine(string.Join(",",
+            "Trade #",
+            "Opened (IST)",
+            "Closed (IST)",
+            "Book",
+            "Channel",
+            "Terminal",
+            "Symbol",
+            "Quantity",
+            "Entry Price",
+            "Exit Price",
+            "Points Captured",
+            "Realized PnL (INR)",
+            "Return (%)",
+            "Outcome"));
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var r = rows[i];
+            var points = r.Quantity > 0 ? r.RealizedPnL / r.Quantity : 0m;
+            var returnPct = (r.EntryPrice > 0 && r.Quantity > 0)
+                ? (r.RealizedPnL / (r.EntryPrice * r.Quantity)) * 100m
+                : 0m;
+            var outcome = r.RealizedPnL > 0 ? "WIN" : (r.RealizedPnL < 0 ? "LOSS" : "BREAKEVEN");
+
+            sb.AppendLine(string.Join(",",
+                Csv(i + 1),
+                Csv(r.OpenedAt.ToIstString()),
+                Csv(r.ClosedAt.ToIstString()),
+                Csv(r.IsPaper ? "PAPER" : "LIVE"),
+                Csv(r.Channel),
+                Csv(r.Terminal),
+                Csv(r.Symbol),
+                Csv(r.Quantity),
+                Csv(r.EntryPrice),
+                Csv(r.ExitPrice),
+                Csv(points),
+                Csv(r.RealizedPnL),
+                Csv(returnPct.ToString("0.##", CultureInfo.InvariantCulture) + "%"),
+                Csv(outcome)));
+        }
+
+        return sb.ToString();
+    }
+
+    private static string Csv(object? value)
+    {
+        if (value is null) return string.Empty;
+
+        var text = value is IFormattable formattable
+            ? formattable.ToString(null, CultureInfo.InvariantCulture)
+            : value.ToString() ?? string.Empty;
+
+        if (text.IndexOfAny([',', '"', '\n', '\r']) < 0)
+            return text;
+
+        return $"\"{text.Replace("\"", "\"\"")}\"";
     }
 }

@@ -20,14 +20,32 @@ namespace NexusApp.BackgroundServices;
 public sealed class HealthMonitorService(
     ILogger<HealthMonitorService> logger,
     IServiceProvider serviceProvider,
-    IHubContext<TradingHub> hub) : BackgroundService
+    IHubContext<TradingHub> hub,
+    NexusApp.Services.HealthSnapshotCache healthSnapshots,
+    NexusApp.Services.McxToggle mcx) : BackgroundService
 {
-    private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(30);
+    // Reduced from 30s -> 10s. Safe to do because ReadBrokerPnlAsync now prefers the
+    // BrokerPnlTracker cache (fed continuously by SmartStream ticks) over a direct
+    // broker getPosition call - the comment on that call site notes the previous
+    // 30s-cadence direct call is what previously tripped Angel One's rate limit.
+    // The health tick itself is otherwise a local DB read + in-memory broadcast, so
+    // a tighter cadence only costs a bit more DB/CPU work, not extra broker calls.
+    private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(10);
     private DateTime? _lastSquareOffDateLocal;
 
     private readonly ILogger<HealthMonitorService> _logger = logger;
     private readonly IServiceProvider _serviceProvider = serviceProvider;
     private readonly IHubContext<TradingHub> _hub = hub;
+    private readonly NexusApp.Services.HealthSnapshotCache _healthSnapshots = healthSnapshots;
+    private readonly NexusApp.Services.McxToggle _mcx = mcx;
+
+    /// <summary>
+    /// True while any enabled segment is in its polling window. With commodity trading
+    /// off this collapses to the equity window, leaving cadence unchanged from before
+    /// MCX support existed.
+    /// </summary>
+    private async Task<bool> IsPollingWindowAsync(CancellationToken ct = default) =>
+        MarketHours.IsAnySegmentPollingWindowNow(await _mcx.IsEnabledAsync(ct));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -63,23 +81,86 @@ public sealed class HealthMonitorService(
                 var broker = scope.ServiceProvider.GetRequiredService<IBroker>();
                 var engine = scope.ServiceProvider.GetRequiredService<ITradingEngine>();
 
-                if (broker.IsConnected)
+                // Position reconciliation hits the rate-limited getPosition endpoint.
+                // The book is static once the exchange closes, so this is confined to
+                // the trading window; BrokerPnlTracker keeps the last snapshot for the
+                // end-of-day figures.
+                if (broker.IsConnected && await IsPollingWindowAsync(stoppingToken))
                 {
                     await engine.UpdatePositionsAsync();
                 }
 
-                var (mtm, realizedToday, openCount) = await LogAndComputePnlAsync(scope.ServiceProvider, stoppingToken);
+                var pnl = await LogAndComputePnlAsync(scope.ServiceProvider, broker, stoppingToken);
 
-                await _hub.Clients.All.SendAsync("HealthTick", new
+                // Connectivity is always reported. The P&L fields are only added when we
+                // actually computed them - the client applies fields it finds and keeps
+                // its previous values otherwise, so a failed tick leaves the cards on the
+                // last good figures instead of flashing 0.00.
+                var tick = new Dictionary<string, object?>
                 {
-                    BrokerConnected = broker.IsConnected,
-                    Broker = broker.BrokerName,
-                    Mtm = mtm,
-                    RealizedToday = realizedToday,
-                    NetPnL = mtm + realizedToday,
-                    OpenPositions = openCount,
-                    Timestamp = DateTime.UtcNow
-                }, stoppingToken);
+                    ["BrokerConnected"] = broker.IsConnected,
+                    ["Broker"] = broker.BrokerName,
+                    ["Timestamp"] = DateTime.UtcNow
+                };
+
+                if (pnl is { } p)
+                {
+                    tick["BrokerPnlAvailable"] = p.BrokerAvailable;
+
+                    if (p.BrokerAvailable)
+                    {
+                        var liveUnrealized = p.BrokerUnrealized;
+                        var liveRealized = p.BrokerRealized;
+
+                        _logger.LogInformation(
+                            "HealthTick live figures sourced from BROKER position book: unrealised {Unrealised:N2} | realised {Realised:N2}",
+                            liveUnrealized, liveRealized);
+
+                        tick["LiveUnrealized"] = liveUnrealized;
+                        tick["LiveRealized"] = liveRealized;
+                        tick["LiveNetPnL"] = liveUnrealized + liveRealized;
+
+                        // Include broker open positions so the Dashboard grid can
+                        // render terminal positions that have no local DB row.
+                        var tracker = scope.ServiceProvider.GetService<BrokerPnlTracker>();
+                        if (tracker is not null)
+                        {
+                            tick["BrokerPositions"] = tracker.GetOpenPositions()
+                                .Select(bp => new
+                                {
+                                    bp.Symbol,
+                                    bp.Quantity,
+                                    AvgPrice = bp.AveragePrice,
+                                    LTP = bp.CurrentPrice,
+                                    PnL = bp.UnrealizedPnL
+                                })
+                                .ToList();
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("HealthTick broker P&L unavailable; live cards will be marked unavailable until next successful broker read.");
+                    }
+
+                    tick["LiveOpenPositions"] = p.LiveOpenCount;
+                    tick["PaperUnrealized"] = p.PaperUnrealized;
+                    tick["PaperRealized"] = p.PaperRealized;
+                    tick["PaperNetPnL"] = p.PaperUnrealized + p.PaperRealized;
+                    tick["PaperOpenPositions"] = p.PaperOpenCount;
+                }
+
+                // Cache before broadcasting so a page that renders between two ticks
+                // can pick the figures up immediately instead of waiting for the next one.
+                var cachedTracker = scope.ServiceProvider.GetService<BrokerPnlTracker>();
+                _healthSnapshots.Latest = new NexusApp.Services.HealthSnapshot(
+                    broker.IsConnected,
+                    pnl is { } snap && snap.BrokerAvailable,
+                    pnl?.BrokerUnrealized ?? 0m,
+                    pnl?.BrokerRealized ?? 0m,
+                    DateTime.UtcNow,
+                    cachedTracker?.GetOpenPositions());
+
+                await _hub.Clients.All.SendAsync("HealthTick", tick, stoppingToken);
 
                 // Auto Square-Off Check
                 var settings = scope.ServiceProvider.GetRequiredService<ISettingsService>();
@@ -100,15 +181,15 @@ public sealed class HealthMonitorService(
                         if (openPositions.Count > 0)
                         {
                             _logger.LogInformation("Auto squaring off {Count} open position(s) at Market price.", openPositions.Count);
-                            foreach (var position in openPositions)
+                            foreach (var positionId in openPositions.Select(p => p.Id))
                             {
                                 try
                                 {
-                                    await engine.SquareOffPositionAsync(position.Id);
+                                    await engine.SquareOffPositionAsync(positionId);
                                 }
                                 catch (Exception ex)
                                 {
-                                    _logger.LogError(ex, "Failed to auto square off position {PositionId}", position.Id);
+                                    _logger.LogError(ex, "Failed to auto square off position {PositionId}", positionId);
                                 }
                             }
                         }
@@ -132,13 +213,37 @@ public sealed class HealthMonitorService(
     }
 
     /// <summary>
+    /// Aggregate P&amp;L for a single health tick, split by simulated (paper) vs real
+    /// broker accounts.
+    /// <para>
+    /// <paramref name="BrokerAvailable"/> distinguishes "the broker book was read and
+    /// reports a flat 0.00" from "the broker book could not be read". Both produce a
+    /// zero figure, so testing the value alone silently substitutes local numbers for a
+    /// genuinely flat book.
+    /// </para>
+    /// </summary>
+    private readonly record struct PnlSnapshot(
+        decimal PaperUnrealized,
+        decimal PaperRealized,
+        int PaperOpenCount,
+        decimal LiveUnrealized,
+        decimal LiveRealized,
+        int LiveOpenCount,
+        bool BrokerAvailable,
+        decimal BrokerUnrealized,
+        decimal BrokerRealized);
+
+    /// <summary>
     /// Reads the freshly-marked positions, logs a per-symbol MTM breakdown plus a
     /// session summary to the console/Output window, and returns the aggregate
     /// numbers so they can be pushed to the UI on the same health tick.
     /// "Realized today" is scoped to the current IST trading day.
+    /// Returns <c>null</c> when the figures could not be computed, so the caller can
+    /// omit them from the broadcast rather than publishing misleading zeros.
     /// </summary>
-    private async Task<(decimal Mtm, decimal RealizedToday, int OpenCount)> LogAndComputePnlAsync(
+    private async Task<PnlSnapshot?> LogAndComputePnlAsync(
         IServiceProvider scopedProvider,
+        IBroker broker,
         CancellationToken cancellationToken)
     {
         try
@@ -148,31 +253,65 @@ public sealed class HealthMonitorService(
             var open = await db.Positions
                 .AsNoTracking()
                 .Where(p => p.ClosedAt == null)
-                .Select(p => new { p.Symbol, p.Quantity, p.EntryPrice, p.CurrentPrice, p.UnrealizedPnL })
+                .Select(p => new
+                {
+                    p.Symbol,
+                    p.Quantity,
+                    p.EntryPrice,
+                    p.CurrentPrice,
+                    p.UnrealizedPnL,
+                    IsPaper = EF.Functions.Like(p.TradingAccount.ClientId, BookScope.PaperClientId)
+                })
                 .ToListAsync(cancellationToken);
-
-            var mtm = open.Sum(p => p.UnrealizedPnL);
 
             // Positions store UTC timestamps, so translate "today in IST" into a UTC
             // window before querying, keeping the filter translatable by EF Core.
-            var istDayStartUtc = DateTime.UtcNow.ToIst().Date.IstToUtc();
-            var realizedToday = await db.Positions
+            // The window is half-open so it matches the dashboard's realised query
+            // exactly; an open-ended ">=" would also pick up future-dated closures.
+            var istToday = DateTime.UtcNow.ToIst().Date;
+            var istDayStartUtc = istToday.IstToUtc();
+            var istNextDayStartUtc = istToday.AddDays(1).IstToUtc();
+            var realized = await db.Positions
                 .AsNoTracking()
-                .Where(p => p.ClosedAt != null && p.ClosedAt >= istDayStartUtc)
-                .SumAsync(p => p.RealizedPnL ?? 0m, cancellationToken);
+                .Where(p => p.ClosedAt >= istDayStartUtc && p.ClosedAt < istNextDayStartUtc)
+                .GroupBy(p => EF.Functions.Like(p.TradingAccount.ClientId, BookScope.PaperClientId))
+                .Select(g => new { IsPaper = g.Key, Total = g.Sum(p => p.RealizedPnL ?? 0m) })
+                .ToListAsync(cancellationToken);
+
+            var paperUnrealized = open.Where(p => p.IsPaper).Sum(p => p.UnrealizedPnL);
+            var liveUnrealized = open.Where(p => !p.IsPaper).Sum(p => p.UnrealizedPnL);
+            var paperRealized = realized.Where(r => r.IsPaper).Sum(r => r.Total);
+            var liveRealized = realized.Where(r => !r.IsPaper).Sum(r => r.Total);
+
+            // Broker truth: the position book carries realised P&L even for legs that
+            // are fully squared off (netqty 0), which have no matching open Position row.
+            var (Available, Unrealized, Realized) = await ReadBrokerPnlAsync(scopedProvider, broker);
 
             _logger.LogInformation(
-                "MTM {Mtm:N2} | Realized {Realized:N2} | Net {Net:N2} | Open {Count}",
-                mtm, realizedToday, mtm + realizedToday, open.Count);
+                "LIVE  mtm {Mtm:N2} | realized {Realized:N2} | open {Count}",
+                liveUnrealized, liveRealized, open.Count(p => !p.IsPaper));
+            _logger.LogInformation(
+                "PAPER mtm {Mtm:N2} | realized {Realized:N2} | open {Count}",
+                paperUnrealized, paperRealized, open.Count(p => p.IsPaper));
+
+            if (Available)
+            {
+                _logger.LogInformation(
+                    "BROKER mtm {Mtm:N2} | realized {Realized:N2} (from position book)",
+                    Unrealized, Realized);
+            }
 
             foreach (var p in open)
             {
                 _logger.LogInformation(
-                    "  {Symbol} qty={Qty} entry={Entry:N2} ltp={Ltp:N2} mtm={Pnl:N2}",
-                    p.Symbol, p.Quantity, p.EntryPrice, p.CurrentPrice, p.UnrealizedPnL);
+                    "  [{Mode}] {Symbol} qty={Qty} entry={Entry:N2} ltp={Ltp:N2} mtm={Pnl:N2}",
+                    p.IsPaper ? "PAPER" : "LIVE", p.Symbol, p.Quantity, p.EntryPrice, p.CurrentPrice, p.UnrealizedPnL);
             }
 
-            return (mtm, realizedToday, open.Count);
+            return new PnlSnapshot(
+                paperUnrealized, paperRealized, open.Count(p => p.IsPaper),
+                liveUnrealized, liveRealized, open.Count(p => !p.IsPaper),
+                Available, Unrealized, Realized);
         }
         catch (OperationCanceledException)
         {
@@ -180,8 +319,46 @@ public sealed class HealthMonitorService(
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to compute P&L summary for health tick");
-            return (0m, 0m, 0);
+            // Do not return a zeroed snapshot: the caller would broadcast it and every
+            // live P&L card would read 0.00 with no indication anything went wrong.
+            _logger.LogError(ex, "Failed to compute P&L summary for health tick");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Aggregates the broker position book into unrealised/realised totals.
+    /// Deliberately not persisted - it is a live read-through of broker state,
+    /// avoiding the problem that squared-off legs have no local Position to map onto.
+    /// </summary>
+    private async Task<(bool Available, decimal Unrealized, decimal Realized)> ReadBrokerPnlAsync(
+        IServiceProvider services, IBroker broker)
+    {
+        if (!broker.IsConnected)
+            return (false, 0m, 0m);
+
+        // Preferred path: figures derived from the slow broker snapshot re-marked by
+        // SmartStream ticks. Avoids a getPosition call on every health tick, which
+        // is what pushed the account into Angel One's access-rate limit.
+        var tracker = services.GetService<BrokerPnlTracker>();
+        if (tracker?.TryGetLivePnl() is { } live)
+            return (true, live.Unrealized, live.Realized);
+
+        // Fallback only: outside the session the book is static, so a direct
+        // getPosition on every tick would burn rate-limit budget for figures
+        // that cannot have changed. Report unavailable instead of polling.
+        if (!await IsPollingWindowAsync())
+            return (false, 0m, 0m);
+
+        try
+        {
+            var book = await broker.GetPositionBookAsync();
+            return (true, book.Sum(p => p.UnrealizedPnL), book.Sum(p => p.RealizedPnL));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read broker position book for P&L");
+            return (false, 0m, 0m);
         }
     }
 }
@@ -197,9 +374,10 @@ public sealed class CmpStreamingService(
     IServiceProvider serviceProvider,
     IHubContext<TradingHub> hub,
     AngelOneWebSocketClient ws,
-    AngelInstrumentMaster instrumentMaster) : BackgroundService
+    AngelInstrumentMaster instrumentMaster,
+    BrokerPnlTracker brokerPnlTracker) : BackgroundService
 {
-    private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan Cadence = TimeSpan.FromMilliseconds(250);
 
     private readonly ILogger<CmpStreamingService> _logger = logger;
     private readonly IServiceProvider _serviceProvider = serviceProvider;
@@ -231,6 +409,15 @@ public sealed class CmpStreamingService(
     // over, the running High/Low are cleared so each day starts fresh.
     private DateTime _highLowDateIst = DateTime.MinValue;
 
+    // Signal ids whose CMP has been observed strictly BELOW the entry trigger at
+    // least once. A "BUY ABOVE 90" signal is only armed once the contract actually
+    // trades below 90; only then may an upward cross through 90 fire the order.
+    // This prevents instant execution when the signal arrives while the contract is
+    // already trading far above the stated entry. In-memory by design: entries are
+    // short-lived (they expire via PendingOrderTimeoutMinutes) and losing the armed
+    // state on restart fails safe (the signal simply does not fire).
+    private readonly ConcurrentDictionary<int, byte> _entryArmedSignals = new();
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("CMP streaming service started (Angel SmartStream WS, cadence {Seconds}s)", Cadence.TotalSeconds);
@@ -252,6 +439,15 @@ public sealed class CmpStreamingService(
                     _lowBySymbol.Clear();
                     _highLowDateIst = todayIst;
                 }
+
+                // Staleness guard for every signal parked waiting for something to happen
+                // (activation message or entry crossing). Runs before the broker/price checks:
+                // it must not depend on a live connection or a quotable contract, otherwise the
+                // signal stays "Cancelling..." in the UI forever.
+                await ExpireStaleAwaitingSignalsAsync(
+                    db,
+                    scope.ServiceProvider.GetRequiredService<ISettingsService>(),
+                    stoppingToken);
 
                 if (!broker.IsConnected)
                 {
@@ -301,11 +497,18 @@ public sealed class CmpStreamingService(
                     var entry = _instrumentMaster.FindByTradingSymbol(sym);
                     if (entry is not null && !string.IsNullOrWhiteSpace(entry.Token))
                     {
-                        _tokenBySymbol[sym] = (entry.Token, entry.ExchangeSegment ?? "NFO");
-                        subs.Add((entry.Token, entry.ExchangeSegment ?? "NFO"));
+                        // A blank exch_seg must not default an MCX contract to NFO: the WS
+                        // exchangeType would then be 2 (NSE_FO) and no tick would ever arrive,
+                        // leaving the CMP column empty for commodity signals.
+                        var exch = string.IsNullOrWhiteSpace(entry.ExchangeSegment)
+                            ? MarketSegments.ExchangeForTradingSymbol(sym)
+                            : entry.ExchangeSegment;
+
+                        _tokenBySymbol[sym] = (entry.Token, exch);
+                        subs.Add((entry.Token, exch));
                         _logger.LogInformation(
                             "CMP: added {Symbol} (token={Token}, {Exch}) to broker watchlist",
-                            sym, entry.Token, entry.ExchangeSegment ?? "NFO");
+                            sym, entry.Token, exch);
                     }
                     else
                     {
@@ -385,6 +588,33 @@ public sealed class CmpStreamingService(
                     await _hub.Clients.All.SendAsync("CmpTick", ticks, stoppingToken);
                 }
 
+                // Push live broker P&L and open positions on every 1s CMP tick so the
+                // Dashboard stat cards and Open Positions grid update continuously,
+                // without waiting for the 10s HealthTick cadence.
+                var livePnl = brokerPnlTracker.TryGetLivePnl();
+                if (livePnl is { } pnl)
+                {
+                    var brokerOpenPositions = brokerPnlTracker.GetOpenPositions()
+                        .Select(p => new
+                        {
+                            p.Symbol,
+                            p.Quantity,
+                            AvgPrice = p.AveragePrice,
+                            LTP = p.CurrentPrice,
+                            PnL = p.UnrealizedPnL
+                        })
+                        .ToList();
+
+                    await _hub.Clients.All.SendAsync("BrokerPnlTick", new
+                    {
+                        LiveUnrealized = pnl.Unrealized,
+                        LiveRealized = pnl.Realized,
+                        OpenCount = pnl.OpenCount,
+                        Positions = brokerOpenPositions,
+                        Timestamp = DateTime.UtcNow
+                    }, stoppingToken);
+                }
+
                 // --- Entry Price Crossing Trigger ---
                 // Check AwaitingEntry signals: execute when CMP crosses entry price,
                 // expire when older than 10 minutes (staleness guard).
@@ -398,60 +628,24 @@ public sealed class CmpStreamingService(
                     var entryOffset = await settings.GetSettingAsync<decimal?>("EntryPriceOffset") ?? 0m;
                     var orderVariety = await settings.GetSettingAsync<string>("OrderVariety") ?? "Robo";
                     var isMarketOrder = string.Equals(orderVariety, "Market", StringComparison.OrdinalIgnoreCase);
-                    // Staleness cutoff follows the same setting used for pending order auto-cancel.
-                    var stalenessMinutes = await settings.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
+                    // When enabled, a signal must first be seen trading BELOW the trigger
+                    // before an upward cross can fire it (true breakout confirmation).
+                    var requireCrossFromBelow = await settings.GetSettingAsync<bool?>("RequireEntryCrossFromBelow") ?? true;
 
                     // Use a tracked query so we can update status directly
                     var awaitingSignals = await db.TradingSignals
                         .Where(s => s.Status == SignalStatus.AwaitingEntry)
                         .ToListAsync(stoppingToken);
 
+                    // Drop armed state for signals that are no longer awaiting entry.
+                    var awaitingIds = awaitingSignals.Select(s => s.Id).ToHashSet();
+                    foreach (var armedId in _entryArmedSignals.Keys.Where(id => !awaitingIds.Contains(id)))
+                    {
+                        _entryArmedSignals.TryRemove(armedId, out _);
+                    }
+
                     foreach (var sig in awaitingSignals)
                     {
-                        // Staleness guard: expire signals older than the configured cutoff (0 = disabled)
-                        var signalAge = DateTime.UtcNow - sig.TelegramTimestamp.EnsureUtc();
-                        if (stalenessMinutes > 0 && signalAge > TimeSpan.FromMinutes(stalenessMinutes))
-                        {
-                            sig.Status = SignalStatus.Failed;
-                            var reason = $"Expired: {signalAge.TotalMinutes:0.0}/{stalenessMinutes} min stale";
-                            _logger.LogWarning(
-                                "AwaitingEntry signal {Id} expired — {Age:0.0} min old (>{Cutoff} min staleness cutoff)",
-                                sig.Id, signalAge.TotalMinutes, stalenessMinutes);
-
-                            var defaultAccId = await db.TradingAccounts
-                                .AsNoTracking()
-                                .Where(a => a.IsEnabled)
-                                .Select(a => a.Id)
-                                .FirstOrDefaultAsync(stoppingToken);
-
-                            if (defaultAccId > 0)
-                            {
-                                db.Orders.Add(new Order
-                                {
-                                    SignalId = sig.Id,
-                                    TradingAccountId = defaultAccId,
-                                    Symbol = sig.Symbol ?? sig.Index,
-                                    Quantity = 0,
-                                    Price = sig.EntryPrice,
-                                    Side = sig.Action == SignalAction.Buy ? OrderSide.Buy : OrderSide.Sell,
-                                    OrderType = OrderType.Limit,
-                                    ProductType = ProductType.Nrml,
-                                    Status = OrderStatus.Rejected,
-                                    ErrorMessage = reason,
-                                    CreatedAt = DateTime.UtcNow
-                                });
-                            }
-
-                            await db.SaveChangesAsync(stoppingToken);
-
-                            await _hub.Clients.All.SendAsync("SignalStatusChanged", new
-                            {
-                                sig.Id,
-                                Status = sig.Status.ToString()
-                            }, stoppingToken);
-                            continue;
-                        }
-
                         if (!crossingEnabled)
                             continue;
 
@@ -470,6 +664,27 @@ public sealed class CmpStreamingService(
                             : sig.EntryPrice;
 
                         var crossed = PriceComparison.IsGreaterThanOrEqual(cmp, triggerPrice);
+
+                        if (crossed && requireCrossFromBelow && !_entryArmedSignals.ContainsKey(sig.Id))
+                        {
+                            // CMP is at/above the trigger but the contract was never observed
+                            // below it, i.e. the entry level was already gone when the signal
+                            // arrived. Chasing it would enter far away from the stated entry,
+                            // so hold the signal (it expires via the staleness guard above).
+                            _logger.LogInformation(
+                                "Entry crossing suppressed for signal {Id}: CMP {Cmp} is already at/above Trigger {Trigger} without ever trading below it (raw entry {Entry}). Waiting for a genuine cross from below.",
+                                sig.Id, cmp, triggerPrice, sig.EntryPrice);
+                            continue;
+                        }
+
+                        if (!crossed && _entryArmedSignals.TryAdd(sig.Id, 0))
+                        {
+                            // Contract is trading below the trigger — arm the signal so the
+                            // next upward cross through the trigger executes it.
+                            _logger.LogInformation(
+                                "Entry armed for signal {Id}: CMP {Cmp} is below Trigger {Trigger} (raw entry {Entry}).",
+                                sig.Id, cmp, triggerPrice, sig.EntryPrice);
+                        }
 
                         if (crossed)
                         {
@@ -496,6 +711,8 @@ public sealed class CmpStreamingService(
 
                             sig.Status = SignalStatus.Pending;
                             await db.SaveChangesAsync(stoppingToken);
+
+                            _entryArmedSignals.TryRemove(sig.Id, out _);
 
                             var engine = scope.ServiceProvider.GetRequiredService<ITradingEngine>();
                             var ok = await engine.ExecuteSignalAsync(parsed);
@@ -543,6 +760,80 @@ public sealed class CmpStreamingService(
     ///     Uses the signal's expiry if present, otherwise the nearest future expiry.
     ///  3. Else fall back to a composite key (won't produce ticks but keeps grouping stable).
     /// </summary>
+    /// <summary>
+    /// Fails every signal that has been parked in <see cref="SignalStatus.AwaitingEntry"/> or
+    /// <see cref="SignalStatus.AwaitingActivation"/> longer than the "Pending Order Auto-Cancel"
+    /// window (<c>PendingOrderTimeoutMinutes</c>, 0 = disabled) — the same window the dashboard
+    /// counts down before it shows "Cancelling...". AwaitingActivation signals used to be left
+    /// untouched, so a call whose channel never posted the activation message stayed live
+    /// indefinitely with the countdown stuck at "Cancelling...".
+    /// </summary>
+    private async Task ExpireStaleAwaitingSignalsAsync(TradingDbContext db, ISettingsService settings, CancellationToken ct)
+    {
+        var stalenessMinutes = await settings.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
+        if (stalenessMinutes <= 0)
+            return;
+
+        var cutoff = DateTime.UtcNow - TimeSpan.FromMinutes(stalenessMinutes);
+        var stale = await db.TradingSignals
+            .Where(s => (s.Status == SignalStatus.AwaitingEntry || s.Status == SignalStatus.AwaitingActivation) &&
+                        s.TelegramTimestamp < cutoff)
+            .ToListAsync(ct);
+
+        if (stale.Count == 0)
+            return;
+
+        var defaultAccId = await db.TradingAccounts
+            .AsNoTracking()
+            .Where(a => a.IsEnabled)
+            .Select(a => a.Id)
+            .FirstOrDefaultAsync(ct);
+
+        foreach (var sig in stale)
+        {
+            var previousStatus = sig.Status;
+            var signalAge = DateTime.UtcNow - sig.TelegramTimestamp.EnsureUtc();
+            var reason = $"Expired: {signalAge.TotalMinutes:0.0}/{stalenessMinutes} min stale";
+
+            sig.Status = SignalStatus.Failed;
+
+            _logger.LogWarning(
+                "{Status} signal {Id} expired — {Age:0.0} min old (>{Cutoff} min staleness cutoff)",
+                previousStatus, sig.Id, signalAge.TotalMinutes, stalenessMinutes);
+
+            if (defaultAccId > 0)
+            {
+                db.Orders.Add(new Order
+                {
+                    SignalId = sig.Id,
+                    TradingAccountId = defaultAccId,
+                    Symbol = sig.Symbol ?? sig.Index,
+                    Quantity = 0,
+                    Price = sig.EntryPrice,
+                    Side = sig.Action == SignalAction.Buy ? OrderSide.Buy : OrderSide.Sell,
+                    OrderType = OrderType.Limit,
+                    ProductType = ProductType.Nrml,
+                    Status = OrderStatus.Rejected,
+                    ErrorMessage = reason,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+
+            _entryArmedSignals.TryRemove(sig.Id, out _);
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        foreach (var sig in stale)
+        {
+            await _hub.Clients.All.SendAsync("SignalStatusChanged", new
+            {
+                sig.Id,
+                Status = sig.Status.ToString()
+            }, ct);
+        }
+    }
+
     private string ResolveTradingSymbol(TradingSignal signal)
     {
         var stored = signal.Symbol?.Trim();
@@ -554,7 +845,15 @@ public sealed class CmpStreamingService(
 
         try
         {
-            var expiry = signal.ExpiryDate != default ? signal.ExpiryDate : DateTime.Today;
+            // A commodity signal's expiry is only a month marker ("EXPIRY - SEP"), so it
+            // is mapped onto the contract listed in that month rather than used as-is.
+            var expiry = DateTimeExtensions.IstToday();
+            if (signal.ExpiryDate != default)
+            {
+                expiry = MarketSegments.IsCommodity(signal.Index)
+                    ? _instrumentMaster.ExpiryInMonth(signal.Index, signal.ExpiryDate.Year, signal.ExpiryDate.Month) ?? expiry
+                    : signal.ExpiryDate;
+            }
             var optType = signal.OptionType.ToString().ToUpperInvariant();
             var entry = _instrumentMaster.FindOption(signal.Index, expiry, signal.Strike, optType);
             if (entry is not null && !string.IsNullOrWhiteSpace(entry.TradingSymbol))

@@ -27,7 +27,22 @@ public sealed class AngelOneWebSocketClient : IAsyncDisposable
 {
     private const string DefaultWsUrl = "wss://smartapisocket.angelone.in/smart-stream";
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(30);
+
+    /// <summary>Delay before the first reconnect attempt after a failure.</summary>
     private static readonly TimeSpan ReconnectBackoff = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Upper bound for the reconnect delay. Angel throttles the SmartStream handshake
+    /// (HTTP 429 instead of 101) and keeps rejecting while attempts keep arriving, so the
+    /// retry gap grows instead of hammering the endpoint every 10s indefinitely.
+    /// </summary>
+    private static readonly TimeSpan MaxReconnectBackoff = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Cool-down applied when the handshake is rejected with HTTP 429 (too many connection
+    /// attempts). Reconnecting sooner only extends the throttling window.
+    /// </summary>
+    private static readonly TimeSpan RateLimitedBackoff = TimeSpan.FromMinutes(1);
 
     private readonly AngelOneApiClient _apiClient;
     private readonly ILogger<AngelOneWebSocketClient> _logger;
@@ -36,11 +51,25 @@ public sealed class AngelOneWebSocketClient : IAsyncDisposable
     private readonly ConcurrentDictionary<string, SubscribedToken> _subscribed = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
+    /// <summary>
+    /// Serializes the handshake. <see cref="SubscribeAsync"/> is called concurrently (and
+    /// fire-and-forget) from the CMP poller, the P&amp;L tracker and every
+    /// <c>AngelOneBroker.GetLtp</c> lookup, so without this gate a closed socket produced a burst
+    /// of parallel <c>ConnectAsync</c> calls — exactly what Angel answers with HTTP 429.
+    /// </summary>
+    private readonly SemaphoreSlim _connectLock = new(1, 1);
+
     private ClientWebSocket? _socket;
     private CancellationTokenSource? _loopCts;
     private Task? _receiveTask;
     private Task? _heartbeatTask;
     private DateTime _lastConnectAttempt = DateTime.MinValue;
+
+    /// <summary>
+    /// Current wait between connect attempts. Grows on every consecutive failure and is reset
+    /// as soon as a handshake succeeds.
+    /// </summary>
+    private TimeSpan _currentBackoff = ReconnectBackoff;
     private long _tickCount;
 
     public AngelOneWebSocketClient(AngelOneApiClient apiClient, ILogger<AngelOneWebSocketClient> logger)
@@ -125,44 +154,93 @@ public sealed class AngelOneWebSocketClient : IAsyncDisposable
         if (IsOpen)
             return;
 
-        if (DateTime.UtcNow - _lastConnectAttempt < ReconnectBackoff)
+        if (DateTime.UtcNow - _lastConnectAttempt < _currentBackoff)
             return;
 
-        _lastConnectAttempt = DateTime.UtcNow;
-
-        if (!_apiClient.IsAuthenticated ||
-            string.IsNullOrWhiteSpace(_apiClient.JwtToken) ||
-            string.IsNullOrWhiteSpace(_apiClient.FeedToken) ||
-            string.IsNullOrWhiteSpace(_apiClient.ApiKey) ||
-            string.IsNullOrWhiteSpace(_apiClient.ClientCode))
-        {
-            _logger.LogDebug("WebSocket connect skipped: broker not authenticated (need JWT + feedToken + apiKey + clientCode)");
+        // Only one caller may attempt the handshake; the rest return immediately and will use
+        // the REST fallback until the socket is up. Waiting here would just queue the burst.
+        if (!await _connectLock.WaitAsync(0, ct))
             return;
-        }
-
-        await DisposeSocketAsync();
 
         try
         {
-            _socket = new ClientWebSocket();
-            _socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
-            _socket.Options.SetRequestHeader("Authorization", $"Bearer {_apiClient.JwtToken}");
-            _socket.Options.SetRequestHeader("x-api-key", _apiClient.ApiKey!);
-            _socket.Options.SetRequestHeader("x-client-code", _apiClient.ClientCode!);
-            _socket.Options.SetRequestHeader("x-feed-token", _apiClient.FeedToken!);
+            // Re-check under the lock: a queued caller may have connected (or started the
+            // backoff window) while this one was racing for the gate.
+            if (IsOpen)
+                return;
 
-            await _socket.ConnectAsync(new Uri(DefaultWsUrl), ct);
-            _logger.LogInformation("Connected to Angel One SmartStream at {Url}", DefaultWsUrl);
+            if (DateTime.UtcNow - _lastConnectAttempt < _currentBackoff)
+                return;
 
-            _loopCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            _receiveTask = Task.Run(() => ReceiveLoopAsync(_socket, _loopCts.Token));
-            _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_loopCts.Token));
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Angel WebSocket connect failed; will retry after backoff");
+            _lastConnectAttempt = DateTime.UtcNow;
+
+            if (!_apiClient.IsAuthenticated ||
+                string.IsNullOrWhiteSpace(_apiClient.JwtToken) ||
+                string.IsNullOrWhiteSpace(_apiClient.FeedToken) ||
+                string.IsNullOrWhiteSpace(_apiClient.ApiKey) ||
+                string.IsNullOrWhiteSpace(_apiClient.ClientCode))
+            {
+                _logger.LogDebug("WebSocket connect skipped: broker not authenticated (need JWT + feedToken + apiKey + clientCode)");
+                return;
+            }
+
             await DisposeSocketAsync();
+
+            try
+            {
+                _socket = new ClientWebSocket();
+                _socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
+                _socket.Options.SetRequestHeader("Authorization", $"Bearer {_apiClient.JwtToken}");
+                _socket.Options.SetRequestHeader("x-api-key", _apiClient.ApiKey!);
+                _socket.Options.SetRequestHeader("x-client-code", _apiClient.ClientCode!);
+                _socket.Options.SetRequestHeader("x-feed-token", _apiClient.FeedToken!);
+
+                await _socket.ConnectAsync(new Uri(DefaultWsUrl), ct);
+                _currentBackoff = ReconnectBackoff;
+                _logger.LogInformation("Connected to Angel One SmartStream at {Url}", DefaultWsUrl);
+
+                _loopCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                _receiveTask = Task.Run(() => ReceiveLoopAsync(_socket, _loopCts.Token));
+                _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_loopCts.Token));
+            }
+            catch (Exception ex)
+            {
+                _currentBackoff = NextBackoff(_currentBackoff, IsRateLimited(ex));
+                _logger.LogWarning(ex,
+                    "Angel WebSocket connect failed; next attempt in {Backoff:0.#}s",
+                    _currentBackoff.TotalSeconds);
+                await DisposeSocketAsync();
+            }
         }
+        finally
+        {
+            _connectLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// True when the handshake was rejected because Angel is rate-limiting connection attempts
+    /// (HTTP 429 where 101 Switching Protocols was expected).
+    /// </summary>
+    private static bool IsRateLimited(Exception ex) =>
+        ex is WebSocketException && ex.Message.Contains("429", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Doubles the wait (capped at <see cref="MaxReconnectBackoff"/>) and adds up to 20% jitter so
+    /// several clients/accounts do not retry in lockstep. A rate-limited handshake jumps straight
+    /// to <see cref="RateLimitedBackoff"/> because retrying sooner keeps the throttle open.
+    /// </summary>
+    private static TimeSpan NextBackoff(TimeSpan current, bool rateLimited)
+    {
+        var baseDelay = rateLimited
+            ? TimeSpan.FromTicks(Math.Max(RateLimitedBackoff.Ticks, current.Ticks * 2))
+            : TimeSpan.FromTicks(current.Ticks * 2);
+
+        if (baseDelay > MaxReconnectBackoff)
+            baseDelay = MaxReconnectBackoff;
+
+        var jitter = Random.Shared.NextDouble() * 0.2 * baseDelay.TotalSeconds;
+        return TimeSpan.FromSeconds(baseDelay.TotalSeconds + jitter);
     }
 
     private async Task SendSubscribeAsync(List<SubscribedToken> tokens, CancellationToken ct)
@@ -327,7 +405,6 @@ public sealed class AngelOneWebSocketClient : IAsyncDisposable
         try
         {
             var mode = data[0];
-            // var exchangeType = data[1];
             var tokenBytes = new ReadOnlySpan<byte>(data, 2, 25);
             var nullIdx = tokenBytes.IndexOf((byte)0);
             var tokenLen = nullIdx >= 0 ? nullIdx : tokenBytes.Length;
@@ -395,6 +472,7 @@ public sealed class AngelOneWebSocketClient : IAsyncDisposable
     {
         await DisposeSocketAsync();
         _sendLock.Dispose();
+        _connectLock.Dispose();
     }
 
     private readonly record struct SubscribedToken(string Token, int ExchangeType);

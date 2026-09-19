@@ -5,6 +5,7 @@ using NexusApp.Helpers;
 using NexusApp.Hubs;
 using NexusApp.Interfaces;
 using NexusApp.Models;
+using System.Linq;
 
 namespace NexusApp.BackgroundServices;
 
@@ -23,23 +24,16 @@ namespace NexusApp.BackgroundServices;
 /// Emits <c>OrderStatusChanged</c> on the SignalR hub whenever anything changes
 /// so the Orders grid updates live.
 /// </summary>
-public sealed class OrderSyncService : BackgroundService
+public sealed class OrderSyncService(
+    ILogger<OrderSyncService> logger,
+    IServiceProvider services,
+    IHubContext<TradingHub> hub) : BackgroundService
 {
     private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(5);
 
-    private readonly ILogger<OrderSyncService> _logger;
-    private readonly IServiceProvider _services;
-    private readonly IHubContext<TradingHub> _hub;
-
-    public OrderSyncService(
-        ILogger<OrderSyncService> logger,
-        IServiceProvider services,
-        IHubContext<TradingHub> hub)
-    {
-        _logger = logger;
-        _services = services;
-        _hub = hub;
-    }
+    private readonly ILogger<OrderSyncService> _logger = logger;
+    private readonly IServiceProvider _services = services;
+    private readonly IHubContext<TradingHub> _hub = hub;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -90,11 +84,10 @@ public sealed class OrderSyncService : BackgroundService
         // Resting broker-side target orders (Sell LIMIT / MIS) are deliberately long-lived —
         // they must survive until the target fills or an exit cancels them, so the stale
         // timeout must never touch them.
-        staleOrders = staleOrders
+        staleOrders = [.. staleOrders
             .Where(o => !o.BrokerId.StartsWith("REJ-", StringComparison.OrdinalIgnoreCase) &&
                         !o.BrokerId.StartsWith("Paper", StringComparison.OrdinalIgnoreCase) &&
-                        !RestingTargetOrders.IsRestingTarget(o))
-            .ToList();
+                        !RestingTargetOrders.IsRestingTarget(o))];
         if (staleOrders.Count == 0)
             return;
 
@@ -153,14 +146,14 @@ public sealed class OrderSyncService : BackgroundService
         _logger.LogInformation("Auto-cancelled {Count} stale pending order(s)", cancelled.Count);
 
         // Notify via Telegram & SignalR
-        foreach (var order in cancelled)
+        if (notifications is not null)
         {
-            if (notifications is not null)
+            foreach (var order in cancelled)
             {
                 await notifications.SendOrderNotificationAsync(
-                    order.Symbol,
-                    "AUTO-CANCELLED",
-                    $"Order {order.BrokerId} auto-cancelled after pending for >{timeoutMinutes} min");
+                                order.Symbol,
+                                "AUTO-CANCELLED",
+                                $"Order {order.BrokerId} auto-cancelled after pending for >{timeoutMinutes} min");
 
                 var tgMsg = $@"⏰ ORDER AUTO-CANCELLED (TIMEOUT)
 
@@ -170,11 +163,11 @@ public sealed class OrderSyncService : BackgroundService
 • Reason: {order.ErrorMessage}
 • Time: {DateTime.UtcNow.ToIstString("hh:mm:ss tt")} IST";
 
-                await notifications.SendTelegramCustomNotificationAsync(tgMsg);
+                    await notifications.SendTelegramCustomNotificationAsync(tgMsg);
+                }
             }
-        }
 
-        try
+            try
         {
             await _hub.Clients.All.SendAsync("OrderStatusChanged",
                 cancelled.Select(o => new
@@ -306,6 +299,9 @@ public sealed class OrderSyncService : BackgroundService
 
             if (order.Status == OrderStatus.Executed)
             {
+                await notifications.SendTradeSoundAsync(
+                    order.Side == OrderSide.Sell ? "live-exit" : "live-entry");
+
                 var priceDisplay = order.ExecutedPrice > 0 ? order.ExecutedPrice : order.Price;
                 await notifications.SendOrderNotificationAsync(
                     order.Symbol,
@@ -367,21 +363,22 @@ public sealed class OrderSyncService : BackgroundService
     /// <summary>
     /// Creates or closes locally-tracked live positions in response to broker fills.
     ///
-    /// Only <b>non-Robo (Limit / MIS)</b> orders on <b>live</b> accounts are tracked here:
-    /// Robo/bracket orders (<see cref="ProductType.Mos"/>) are managed by the broker,
-    /// and paper positions are simulated by <see cref="PaperTradingEngine"/> — creating a
-    /// locally-managed row for either would risk a double exit.
+    /// All <b>live</b> account fills are tracked (paper positions are simulated by
+    /// <see cref="PaperTradingEngine"/> and are excluded), so the dashboard can report
+    /// live open positions and MTM:
     ///
-    ///   * BUY  fill → opens a position carrying the signal's StopLoss/Targets and
-    ///                 flags it <see cref="Position.ManagedLocally"/> so the price
-    ///                 monitor can square it off when LTP crosses SL/target.
+    ///   * BUY  fill → opens a position carrying the signal's StopLoss/Targets.
+    ///                 Non-Robo (Limit / MIS) entries are flagged
+    ///                 <see cref="Position.ManagedLocally"/> so the price monitor can
+    ///                 square them off on SL/target; Robo/bracket entries
+    ///                 (<see cref="ProductType.Mos"/>) are tracked for reporting only
+    ///                 because the broker owns their exits.
     ///   * SELL fill → closes the matching open position (exit already happened at broker).
     /// </summary>
     private async Task ReconcileLivePositionsAsync(TradingDbContext db, List<Order> changed, CancellationToken ct)
     {
         var executed = changed
             .Where(o => o.Status == OrderStatus.Executed &&
-                        o.ProductType != ProductType.Mos &&           // skip Robo/bracket (broker-managed)
                         !string.IsNullOrEmpty(o.BrokerId) &&
                         !o.BrokerId.StartsWith("Paper", StringComparison.OrdinalIgnoreCase) &&
                         !o.BrokerId.StartsWith("REJ-", StringComparison.OrdinalIgnoreCase))
@@ -424,7 +421,11 @@ public sealed class OrderSyncService : BackgroundService
                 }
                 else
                 {
-                    // Opening BUY fill — create a locally-managed position if one isn't tracked yet.
+                    // Opening BUY fill — track the position if one isn't tracked yet.
+                    // Robo/bracket (Mos) fills are tracked for reporting only; their
+                    // SL/target exits stay with the broker.
+                    var isBrokerManaged = order.ProductType == ProductType.Mos;
+
                     var already = await db.Positions.AnyAsync(p =>
                         p.TradingAccountId == order.TradingAccountId &&
                         p.Symbol == order.Symbol &&
@@ -438,7 +439,27 @@ public sealed class OrderSyncService : BackgroundService
 
                     var qty = order.FilledQuantity is > 0 ? order.FilledQuantity.Value : order.Quantity;
                     var slValue = signal is { StopLoss: > 0 } ? signal.StopLoss : (decimal?)null;
-                    var targetList = signal?.Targets.ToList() ?? new List<decimal>();
+                    var targetList = signal?.Targets.ToList() ?? [];
+
+                    using var scope = _services.CreateScope();
+                    var riskProfileService = scope.ServiceProvider.GetService<IIndexRiskProfileService>();
+                    var overridePts = riskProfileService != null
+                        ? await riskProfileService.GetOverrideTargetPointsAsync(signal?.Index)
+                        : 0m;
+
+                    if (overridePts > 0 && fillPrice > 0)
+                    {
+                        var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                        var tgt = isBuy ? fillPrice + overridePts : Math.Max(0.05m, fillPrice - overridePts);
+                        targetList = [tgt];
+                    }
+                    else if (targetList.Count == 0 && fillPrice > 0)
+                    {
+                        var profile = riskProfileService != null ? await riskProfileService.GetProfileAsync(signal?.Index) : null;
+                        var defPts = profile is { DefaultTargetPoints: > 0 } ? profile.DefaultTargetPoints : 20m;
+                        var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                        targetList = [isBuy ? fillPrice + defPts : Math.Max(0.05m, fillPrice - defPts)];
+                    }
 
                     db.Positions.Add(new Position
                     {
@@ -453,15 +474,17 @@ public sealed class OrderSyncService : BackgroundService
                         OpenedAt = order.ExecutedAt ?? DateTime.UtcNow,
                         UnrealizedPnL = 0,
                         UnrealizedPnLPercentage = 0,
-                        ManagedLocally = true
+                        ManagedLocally = !isBrokerManaged
                     });
                     mutated = true;
                     _logger.LogInformation(
-                        "Tracking live position for SL/target monitoring: {Symbol} @ {Price} (SL={SL}, Targets={Targets})",
+                        "Tracking live position ({Mode}): {Symbol} @ {Price} (SL={SL}, Targets={Targets})",
+                        isBrokerManaged ? "broker-managed Robo/BO, reporting only" : "app-managed SL/target",
                         order.Symbol, fillPrice, slValue?.ToString() ?? "None",
                         string.Join("/", targetList));
 
-                    await PlaceRestingTargetOrderAsync(db, order, qty, fillPrice, targetList, ct);
+                    if (!isBrokerManaged)
+                        await PlaceRestingTargetOrderAsync(db, order, qty, fillPrice, targetList, ct);
                 }
             }
             catch (Exception ex)
@@ -496,8 +519,15 @@ public sealed class OrderSyncService : BackgroundService
             using var scope = _services.CreateScope();
             var settings = scope.ServiceProvider.GetRequiredService<ISettingsService>();
 
+            // A Robo order carries its own broker-side target, so it needs no resting
+            // order; Market orders opt out. The order's ProductType is the reliable
+            // signal here rather than the global setting: MCX and BSE F&O orders are
+            // downgraded from Robo to a plain Limit at placement time (bracket orders
+            // are blocked on those exchanges), and those downgraded orders do need a
+            // resting target even though OrderVariety still reads "Robo".
             var variety = await settings.GetSettingAsync<string>("OrderVariety") ?? string.Empty;
-            if (!string.Equals(variety, "Limit", StringComparison.OrdinalIgnoreCase))
+            var isMarket = string.Equals(variety, "Market", StringComparison.OrdinalIgnoreCase);
+            if (isMarket || order.ProductType == ProductType.Mos)
                 return;
 
             // Only targets above the fill make sense for a long exit; take the nearest one.
@@ -531,7 +561,7 @@ public sealed class OrderSyncService : BackgroundService
                 var instrumentMaster = scope.ServiceProvider.GetService<NexusApp.Brokers.AngelOne.AngelInstrumentMaster>();
                 if (instrumentMaster is not null)
                 {
-                    await instrumentMaster.EnsureLoadedAsync();
+                    await instrumentMaster.EnsureLoadedAsync(ct);
                     var entry = instrumentMaster.FindByTradingSymbol(order.Symbol);
                     if (entry is not null)
                     {
@@ -544,6 +574,11 @@ public sealed class OrderSyncService : BackgroundService
             {
                 _logger.LogDebug(ex, "Instrument master lookup failed for resting target {Symbol}", order.Symbol);
             }
+
+            // Never leave the segment unset: the broker would fall back to NFO and the
+            // exchange would report the commodity order under NSECMD.
+            if (string.IsNullOrWhiteSpace(exchange))
+                exchange = MarketSegments.ExchangeForTradingSymbol(order.Symbol);
 
             var response = await broker.PlaceOrderAsync(new BrokerOrderRequest
             {
