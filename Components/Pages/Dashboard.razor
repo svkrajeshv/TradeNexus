@@ -423,7 +423,7 @@
                                 </MudChip>
                             </MudTd>
                             <MudTd DataLabel="Signal">@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
-                            <MudTd DataLabel="Entry">@GetEdit(context).EntryPrice.ToString("0.##")</MudTd>
+                            <MudTd DataLabel="Entry">@context.EntryPrice.ToString("0.##")</MudTd>
                             <MudTd DataLabel="CMP">
                                 <MudChip T="string"
                                          Color="@(HasCmpCrossedEntry(context) ? Color.Success : Color.Info)"
@@ -1448,99 +1448,63 @@
 
         try
         {
-            var allRecent = await SignalService.GetRecentSignalsAsync(50);
             var todayIst = DateTime.UtcNow.ToIst().Date;
+            var todayStart = todayIst.IstToUtc();
+            var tomorrowStart = todayIst.AddDays(1).IstToUtc();
+
+            // ── Phase 1: fire independent queries in parallel ─────────────
+            // Each helper creates its own DbContext because EF contexts are not
+            // thread-safe. All queries are read-only so SQLite WAL mode allows
+            // full concurrency across readers.
+            var signalsTask   = SignalService.GetRecentSignalsAsync(50);
+            var positionsTask = QueryOpenPositionsAsync();
+            var watchTask     = QueryWatchlistSignalsAsync();
+            var realizedTask  = QueryRealizedPnLAsync(todayStart, tomorrowStart);
+            var executedTask  = QueryExecutedCountsAsync(todayStart, tomorrowStart);
+
+            await Task.WhenAll(signalsTask, positionsTask, watchTask, realizedTask, executedTask);
+
+            // ── Process Phase 1 results ───────────────────────────────────
+            var allRecent = await signalsTask;
             _signals = allRecent
                 .Where(s => s.ReceivedTimestamp.ToIst().Date == todayIst &&
                             s.Status != SignalStatus.Executed)
                 .Take(30)
                 .ToList();
-
             _todaySignals = allRecent.Count(s => s.ReceivedTimestamp.ToIst().Date == todayIst);
 
-            using var db = await DbFactory.CreateDbContextAsync();
-            // Load every open position, not a page of them: these rows are the single
-            // source of truth for the Open Positions and Unrealised P&L cards, and a
-            // capped list silently under-reported both. Only the table is paged.
-            _positions = await db.Positions.AsNoTracking()
-                .Include(p => p.Signal)
-                .Include(p => p.TradingAccount)
-                .Where(p => p.ClosedAt == null)
-                .OrderByDescending(p => p.OpenedAt)
-                .ToListAsync();
-            var watch = await db.TradingSignals.AsNoTracking()
-                .Where(s => s.Status == SignalStatus.Pending || s.Status == SignalStatus.Executed)
-                .OrderByDescending(s => s.ProcessedTimestamp)
-                .Take(20)
-                .ToListAsync();
+            _positions = await positionsTask;
+
+            var watch = await watchTask;
             _watchlist = watch
                 .Where(s => !_hiddenWatchlistSignalIds.Contains(s.Id))
                 .ToList();
 
-            var watchSignalIds = _watchlist.Select(s => s.Id).ToList();
-            _exitBySignal.Clear();
-            if (watchSignalIds.Count > 0)
-            {
-                var closedPositions = await db.Positions.AsNoTracking()
-                    .Where(p => watchSignalIds.Contains(p.SignalId) && p.ClosedAt != null && p.ClosingPrice != null)
-                    .OrderByDescending(p => p.ClosedAt)
-                    .ToListAsync();
+            var (realizedPaper, realizedLive) = await realizedTask;
+            _realizedPaper = realizedPaper;
+            _realizedLive  = realizedLive;
 
-                foreach (var position in closedPositions)
-                    _exitBySignal.TryAdd(position.SignalId, position.ClosingPrice!.Value);
-            }
+            var (exPaper, exLive, exAll) = await executedTask;
+            _executedPaper = exPaper;
+            _executedLive  = exLive;
+            _executedAll   = exAll;
 
-            // A signal only records that it failed, never why: the broker/engine message
-            // lives on the order it produced. Pull the newest error text per signal so the
-            // status chip can explain the failure in a tooltip.
+            // ── Phase 2: dependent queries in parallel ────────────────────
+            var watchSignalIds  = _watchlist.Select(s => s.Id).ToList();
             var statusSignalIds = _signals.Select(s => s.Id).Concat(watchSignalIds).Distinct().ToList();
+
+            var exitTask    = QueryExitPricesAsync(watchSignalIds);
+            var failureTask = QueryFailureReasonsAsync(statusSignalIds);
+
+            await Task.WhenAll(exitTask, failureTask);
+
+            _exitBySignal.Clear();
+            foreach (var (signalId, price) in await exitTask)
+                _exitBySignal.TryAdd(signalId, price);
+
             _failureReasonBySignal.Clear();
-            if (statusSignalIds.Count > 0)
-            {
-                var failedOrders = await db.Orders.AsNoTracking()
-                    .Where(o => statusSignalIds.Contains(o.SignalId) &&
-                                (o.Status == OrderStatus.Failed || o.Status == OrderStatus.Rejected) &&
-                                o.ErrorMessage != null && o.ErrorMessage != "")
-                    .OrderByDescending(o => o.CreatedAt)
-                    .Select(o => new { o.SignalId, o.ErrorMessage })
-                    .ToListAsync();
-
-                foreach (var order in failedOrders)
-                    _failureReasonBySignal.TryAdd(order.SignalId, order.ErrorMessage!);
-            }
-
-            // Realised P&L is reported for the IST trading day, so the window is the
-            // IST midnight boundary expressed in UTC (the storage timezone).
-            var todayStart = todayIst.IstToUtc();
-            var tomorrowStart = todayIst.AddDays(1).IstToUtc();
-            var realizedByBook = await db.Positions
-                .Where(p => p.ClosedAt >= todayStart && p.ClosedAt < tomorrowStart)
-                .GroupBy(p => EF.Functions.Like(p.TradingAccount.ClientId, BookScope.PaperClientId))
-                .Select(g => new { IsPaper = g.Key, Total = g.Sum(p => p.RealizedPnL ?? 0m) })
-                .ToListAsync();
-            _realizedPaper = realizedByBook.Where(r => r.IsPaper).Sum(r => r.Total);
-            _realizedLive = realizedByBook.Where(r => !r.IsPaper).Sum(r => r.Total);
-
-            // "Executed today" counts distinct signals that actually traded, not order
-            // fills: one signal produces an entry order and an exit order, which would
-            // otherwise double the figure. Order is also the only entity that identifies
-            // which book it traded on.
-            var executedSignals = await db.Orders
-                .Where(o => o.Status == OrderStatus.Executed &&
-                            o.ExecutedAt >= todayStart && o.ExecutedAt < tomorrowStart)
-                .Select(o => new
-                {
-                    IsPaper = EF.Functions.Like(o.TradingAccount.ClientId, BookScope.PaperClientId),
-                    o.SignalId
-                })
-                .Distinct()
-                .ToListAsync();
-
-            _executedPaper = executedSignals.Count(x => x.IsPaper);
-            _executedLive = executedSignals.Count(x => !x.IsPaper);
-            // A signal traded on both books yields one row per book above, so the combined
-            // figure must be a distinct count rather than live + paper.
-            _executedAll = executedSignals.Select(x => x.SignalId).Distinct().Count();
+            foreach (var (signalId, message) in await failureTask)
+                _failureReasonBySignal.TryAdd(signalId, message);
 
             SyncEdits();
             RebuildPositionViews();
@@ -1562,6 +1526,108 @@
             StateHasChanged();
         }
     }
+
+    // ── RefreshAsync helper queries ───────────────────────────────────────
+    // Each creates its own DbContext so they can execute concurrently.
+
+    private async Task<List<NexusApp.Models.Position>> QueryOpenPositionsAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        return await db.Positions.AsNoTracking()
+            .Include(p => p.Signal)
+            .Include(p => p.TradingAccount)
+            .Where(p => p.ClosedAt == null)
+            .OrderByDescending(p => p.OpenedAt)
+            .ToListAsync();
+    }
+
+    private async Task<List<TradingSignal>> QueryWatchlistSignalsAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        return await db.TradingSignals.AsNoTracking()
+            .Where(s => s.Status == SignalStatus.Pending || s.Status == SignalStatus.Executed)
+            .OrderByDescending(s => s.ProcessedTimestamp)
+            .Take(20)
+            .ToListAsync();
+    }
+
+    private async Task<(decimal Paper, decimal Live)> QueryRealizedPnLAsync(
+        DateTime todayStart, DateTime tomorrowStart)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var realizedByBook = await db.Positions
+            .Where(p => p.ClosedAt >= todayStart && p.ClosedAt < tomorrowStart)
+            .GroupBy(p => EF.Functions.Like(p.TradingAccount.ClientId, BookScope.PaperClientId))
+            .Select(g => new { IsPaper = g.Key, Total = g.Sum(p => p.RealizedPnL ?? 0m) })
+            .ToListAsync();
+        return (realizedByBook.Where(r => r.IsPaper).Sum(r => r.Total),
+                realizedByBook.Where(r => !r.IsPaper).Sum(r => r.Total));
+    }
+
+    private async Task<(int Paper, int Live, int All)> QueryExecutedCountsAsync(
+        DateTime todayStart, DateTime tomorrowStart)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var executedSignals = await db.Orders
+            .Where(o => o.Status == OrderStatus.Executed &&
+                        o.ExecutedAt >= todayStart && o.ExecutedAt < tomorrowStart)
+            .Select(o => new
+            {
+                IsPaper = EF.Functions.Like(o.TradingAccount.ClientId, BookScope.PaperClientId),
+                o.SignalId
+            })
+            .Distinct()
+            .ToListAsync();
+        return (executedSignals.Count(x => x.IsPaper),
+                executedSignals.Count(x => !x.IsPaper),
+                executedSignals.Select(x => x.SignalId).Distinct().Count());
+    }
+
+    private async Task<List<(int SignalId, decimal Price)>> QueryExitPricesAsync(List<int> watchSignalIds)
+    {
+        if (watchSignalIds.Count == 0)
+            return [];
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var closedPositions = await db.Positions.AsNoTracking()
+            .Where(p => watchSignalIds.Contains(p.SignalId) && p.ClosedAt != null && p.ClosingPrice != null)
+            .OrderByDescending(p => p.ClosedAt)
+            .ToListAsync();
+
+        var result = new List<(int, decimal)>();
+        var seen = new HashSet<int>();
+        foreach (var p in closedPositions)
+        {
+            if (seen.Add(p.SignalId))
+                result.Add((p.SignalId, p.ClosingPrice!.Value));
+        }
+        return result;
+    }
+
+    private async Task<List<(int SignalId, string Message)>> QueryFailureReasonsAsync(List<int> statusSignalIds)
+    {
+        if (statusSignalIds.Count == 0)
+            return [];
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var failedOrders = await db.Orders.AsNoTracking()
+            .Where(o => statusSignalIds.Contains(o.SignalId) &&
+                        (o.Status == OrderStatus.Failed || o.Status == OrderStatus.Rejected) &&
+                        o.ErrorMessage != null && o.ErrorMessage != "")
+            .OrderByDescending(o => o.CreatedAt)
+            .Select(o => new { o.SignalId, o.ErrorMessage })
+            .ToListAsync();
+
+        var result = new List<(int, string)>();
+        var seen = new HashSet<int>();
+        foreach (var order in failedOrders)
+        {
+            if (seen.Add(order.SignalId))
+                result.Add((order.SignalId, order.ErrorMessage!));
+        }
+        return result;
+    }
+
 
     private Color StatusColor(SignalStatus s) => s switch
     {
