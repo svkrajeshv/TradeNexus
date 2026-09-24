@@ -11,50 +11,76 @@ public class IndexRiskProfileService(ISettingsService settings) : IIndexRiskProf
 {
     private readonly ISettingsService _settings = settings;
 
-    private static readonly Dictionary<string, (decimal SlPts, decimal TgtPts, decimal SlPct, decimal TgtPct, decimal OverrideTgtPts)> BaselineProfiles =
+    private static readonly Dictionary<string, (decimal SlPts, decimal TgtPts, decimal OverrideSlPts, decimal OverrideTgtPts)> BaselineProfiles =
         new(StringComparer.OrdinalIgnoreCase)
         {
             // NSE / BSE index options
-            ["NIFTY"] = (20m, 35m, 18m, 35m, 15m),
-            ["BANKNIFTY"] = (40m, 70m, 20m, 40m, 15m),
-            ["FINNIFTY"] = (20m, 35m, 18m, 35m, 15m),
-            ["MIDCPNIFTY"] = (15m, 25m, 15m, 30m, 15m),
-            ["SENSEX"] = (80m, 140m, 25m, 50m, 15m),
-            ["BANKEX"] = (90m, 150m, 25m, 50m, 15m),
+            ["NIFTY"] = (20m, 35m, 0m, 15m),
+            ["BANKNIFTY"] = (40m, 70m, 0m, 15m),
+            ["FINNIFTY"] = (20m, 35m, 0m, 15m),
+            ["MIDCPNIFTY"] = (15m, 25m, 0m, 15m),
+            ["SENSEX"] = (80m, 140m, 0m, 15m),
+            ["BANKEX"] = (90m, 150m, 0m, 15m),
 
             // MCX commodity options. Point values are deliberately NOT copied from the
             // index rows: commodity option premiums sit in a different range entirely,
             // so an index-derived points buffer would be far too wide or too tight.
-            // Percent buffers are kept a little wider than equity to absorb the higher
-            // intraday volatility of energy contracts.
-            ["CRUDEOIL"] = (15m, 30m, 22m, 45m, 15m),
-            ["NATURALGAS"] = (5m, 10m, 25m, 50m, 15m),
-            ["GOLD"] = (60m, 120m, 20m, 40m, 15m),
-            ["SILVER"] = (50m, 100m, 22m, 45m, 15m),
+            ["CRUDEOIL"] = (15m, 30m, 0m, 15m),
+            ["NATURALGAS"] = (5m, 10m, 0m, 15m),
+            ["GOLD"] = (60m, 120m, 0m, 15m),
+            ["SILVER"] = (50m, 100m, 0m, 15m),
 
             // Mini / micro contracts. Premiums are quoted on the same scale as the
             // full-size contract, so the point buffers match; only the lot size differs.
-            ["CRUDEOILM"] = (15m, 30m, 22m, 45m, 15m),
-            ["NATGASMINI"] = (5m, 10m, 25m, 50m, 15m),
-            ["GOLDM"] = (60m, 120m, 20m, 40m, 15m),
-            ["SILVERM"] = (50m, 100m, 22m, 45m, 15m),
-            ["SILVERMIC"] = (50m, 100m, 22m, 45m, 15m),
+            ["CRUDEOILM"] = (15m, 30m, 0m, 15m),
+            ["NATGASMINI"] = (5m, 10m, 0m, 15m),
+            ["GOLDM"] = (60m, 120m, 0m, 15m),
+            ["SILVERM"] = (50m, 100m, 0m, 15m),
+            ["SILVERMIC"] = (50m, 100m, 0m, 15m),
         };
 
     public async Task<IndexRiskProfile> GetProfileAsync(string? index)
     {
         var normalized = string.IsNullOrWhiteSpace(index) ? "NIFTY" : MarketSegments.NormalizeUnderlying(index);
-        var (SlPts, TgtPts, SlPct, TgtPct, OverrideTgtPts) = BaselineProfiles.TryGetValue(normalized, out var baseVal)
+        var (SlPts, TgtPts, OverrideSlPts, OverrideTgtPts) = BaselineProfiles.TryGetValue(normalized, out var baseVal)
             ? baseVal
-            : (SlPts: 25m, TgtPts: 50m, SlPct: 20m, TgtPct: 40m, OverrideTgtPts: 15m);
+            : (SlPts: 25m, TgtPts: 50m, OverrideSlPts: 0m, OverrideTgtPts: 15m);
 
-        var slPts = await _settings.GetSettingAsync<decimal?>($"SL.Points.{normalized}") ?? SlPts;
-        var tgtPts = await _settings.GetSettingAsync<decimal?>($"Target.Points.{normalized}") ?? TgtPts;
-        var slPct = await _settings.GetSettingAsync<decimal?>($"SL.Percent.{normalized}") ?? SlPct;
-        var tgtPct = await _settings.GetSettingAsync<decimal?>($"Target.Percent.{normalized}") ?? TgtPct;
-        var overrideTgt = await _settings.GetSettingAsync<decimal?>($"Target.Override.{normalized}") ?? OverrideTgtPts;
+        var baseUnderlying = normalized switch
+        {
+            "CRUDEOILM" => "CRUDEOIL",
+            "NATGASMINI" => "NATURALGAS",
+            "GOLDM" => "GOLD",
+            "SILVERM" or "SILVERMIC" => "SILVER",
+            _ => normalized
+        };
 
-        return new IndexRiskProfile(normalized, slPts, tgtPts, slPct, tgtPct, overrideTgt);
+        var slPts = await _settings.GetSettingAsync<decimal?>($"SL.Points.{normalized}")
+            ?? (normalized != baseUnderlying ? await _settings.GetSettingAsync<decimal?>($"SL.Points.{baseUnderlying}") : null)
+            ?? SlPts;
+
+        var tgtPts = await _settings.GetSettingAsync<decimal?>($"Target.Points.{normalized}")
+            ?? (normalized != baseUnderlying ? await _settings.GetSettingAsync<decimal?>($"Target.Points.{baseUnderlying}") : null)
+            ?? TgtPts;
+
+        var overrideSl = await _settings.GetSettingAsync<decimal?>($"SL.Override.{normalized}")
+            ?? (normalized != baseUnderlying ? await _settings.GetSettingAsync<decimal?>($"SL.Override.{baseUnderlying}") : null)
+            ?? OverrideSlPts;
+
+        var overrideTgt = await _settings.GetSettingAsync<decimal?>($"Target.Override.{normalized}")
+            ?? (normalized != baseUnderlying ? await _settings.GetSettingAsync<decimal?>($"Target.Override.{baseUnderlying}") : null)
+            ?? OverrideTgtPts;
+
+        return new IndexRiskProfile(normalized, slPts, tgtPts, overrideSl, overrideTgt);
+    }
+
+    public async Task<decimal> GetOverrideSlPointsAsync(string? index)
+    {
+        if (string.IsNullOrWhiteSpace(index))
+            return 0m;
+
+        var profile = await GetProfileAsync(index);
+        return profile.OverrideSlPoints;
     }
 
     public async Task<decimal> GetOverrideTargetPointsAsync(string? index)
@@ -74,12 +100,9 @@ public class IndexRiskProfileService(ISettingsService settings) : IIndexRiskProf
         }
 
         var profile = await GetProfileAsync(index);
-        var mode = await _settings.GetSettingAsync<string>("Risk.SlMode") ?? "Points";
-
-        if (mode.Equals("Percent", StringComparison.OrdinalIgnoreCase) && entryPrice > 0)
+        if (profile.OverrideSlPoints > 0)
         {
-            var calculatedPts = Math.Round(entryPrice * (profile.SlPercent / 100m), 2);
-            return Math.Max(0.05m, calculatedPts);
+            return profile.OverrideSlPoints;
         }
 
         return profile.DefaultSlPoints > 0 ? profile.DefaultSlPoints : 50m;

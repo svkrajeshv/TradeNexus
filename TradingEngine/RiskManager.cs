@@ -63,7 +63,7 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
             decimal dailyPnL = realizedPnL + unrealizedPnL;
 
             // Check account daily loss limit
-            if (dailyMaxLoss > 0 && dailyPnL < -dailyMaxLoss)
+            if (dailyMaxLoss > 0 && dailyPnL <= -dailyMaxLoss)
             {
                 var reason = $"Account daily max loss limit reached (P&L: ₹{dailyPnL:N2}, Limit: ₹{dailyMaxLoss:N2})";
                 _logger.LogWarning(AccountReasonLogTemplate, account.Name, reason);
@@ -71,7 +71,7 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
             }
 
             // Check account daily profit limit
-            if (dailyMaxProfit > 0 && dailyPnL > dailyMaxProfit)
+            if (dailyMaxProfit > 0 && dailyPnL >= dailyMaxProfit)
             {
                 var reason = $"Account daily max profit target reached (P&L: ₹{dailyPnL:N2}, Limit: ₹{dailyMaxProfit:N2})";
                 _logger.LogWarning(AccountReasonLogTemplate, account.Name, reason);
@@ -359,10 +359,10 @@ public class RiskMetrics
     public decimal DailyMaxProfit { get; set; }
 
     public bool IsWithinLimits => 
-        TradesPerDayUsed < MaxTradesPerDay &&
-        OpenPositionsCount < MaxOpenPositions &&
-        DailyPnL >= -DailyMaxLoss &&
-        DailyPnL <= DailyMaxProfit;
+        (MaxTradesPerDay <= 0 || TradesPerDayUsed < MaxTradesPerDay) &&
+        (MaxOpenPositions <= 0 || OpenPositionsCount < MaxOpenPositions) &&
+        (DailyMaxLoss <= 0 || DailyPnL >= -DailyMaxLoss) &&
+        (DailyMaxProfit <= 0 || DailyPnL <= DailyMaxProfit);
 }
 
 /// <summary>
@@ -465,6 +465,20 @@ public class PaperTradingEngine(
 
             if (_riskProfiles is not null)
             {
+                var overrideSlPts = await _riskProfiles.GetOverrideSlPointsAsync(signal?.Index);
+                if (overrideSlPts > 0 && currentPrice > 0)
+                {
+                    var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                    stopLoss = isBuy ? Math.Max(0.05m, currentPrice - overrideSlPts) : currentPrice + overrideSlPts;
+                }
+                else if ((stopLoss is null || stopLoss <= 0) && currentPrice > 0)
+                {
+                    var profile = await _riskProfiles.GetProfileAsync(signal?.Index);
+                    var defSlPts = profile is { DefaultSlPoints: > 0 } ? profile.DefaultSlPoints : 50m;
+                    var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                    stopLoss = isBuy ? Math.Max(0.05m, currentPrice - defSlPts) : currentPrice + defSlPts;
+                }
+
                 var overridePts = await _riskProfiles.GetOverrideTargetPointsAsync(signal?.Index);
                 if (overridePts > 0 && currentPrice > 0)
                 {

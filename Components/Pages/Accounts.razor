@@ -167,10 +167,10 @@
                     <MudTextField T="string" Label="WebSocket URL (optional)" Variant="Variant.Outlined" @bind-Value="_newWsUrl" />
                 </MudItem>
                 <MudItem xs="6" md="3">
-                    <MudNumericField T="decimal" Label="Daily Max Loss" Variant="Variant.Outlined" @bind-Value="_newDailyMaxLoss" />
+                    <MudNumericField T="decimal" Label="Daily Max Loss (₹)" HelperText="Auto square-off &amp; blocks trades on reaching loss limit. 0 = disabled" Variant="Variant.Outlined" @bind-Value="_newDailyMaxLoss" />
                 </MudItem>
                 <MudItem xs="6" md="3">
-                    <MudNumericField T="decimal" Label="Daily Max Profit" Variant="Variant.Outlined" @bind-Value="_newDailyMaxProfit" />
+                    <MudNumericField T="decimal" Label="Daily Max Profit (₹)" HelperText="Auto square-off &amp; blocks trades on reaching profit target. 0 = disabled" Variant="Variant.Outlined" @bind-Value="_newDailyMaxProfit" />
                 </MudItem>
                 <MudItem xs="6" md="3">
                     <MudNumericField T="int" Label="Max Trades/Day" Variant="Variant.Outlined" @bind-Value="_newMaxTrades" />

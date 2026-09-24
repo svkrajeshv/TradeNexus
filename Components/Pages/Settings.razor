@@ -189,11 +189,11 @@
                 <MudTextField T="string" @bind-Value="_signalTimeWindowEnd" Label="Signal End Time (24h IST, e.g. 15:00)" Variant="Variant.Outlined" HelperText="Signals received after this IST time are skipped" />
                 <MudDivider Class="my-3" />
                 <MudText Typo="Typo.subtitle2" Class="mb-2 font-weight-bold">Slippage Guard</MudText>
-                <MudSwitch T="bool" @bind-Value="_slippageGuardEnabled" Color="Color.Warning" Label="Reject live orders on excessive slippage" Class="mb-2" />
+                <MudSwitch T="bool" @bind-Value="_slippageGuardEnabled" Color="Color.Warning" Label="Reject orders on excessive slippage (Live + Paper)" Class="mb-2" />
                 <MudNumericField T="decimal"
                                   @bind-Value="_maxSlippagePercent"
                                   Label="Max Slippage (%)"
-                                  HelperText="Reject order if CMP has moved adversely beyond this % from signal entry"
+                                  HelperText="Reject order if CMP has moved adversely beyond this % from signal entry (applies to Live and Paper)"
                                   Variant="Variant.Outlined"
                                   Min="0m" />
             </MudPaper>
@@ -217,8 +217,18 @@
                     <MudSelectItem Value="@("Limit")">Plain Limit Order (manual SL/target management)</MudSelectItem>
                     <MudSelectItem Value="@("Market")">Market Order (immediate execution at live CMP)</MudSelectItem>
                 </MudSelect>
-                <MudSwitch T="bool" @bind-Value="_enableEntryCrossingTrigger" Color="Color.Primary" Label="Enable Entry Price Crossing Trigger" Class="mb-3" />
-                <MudSwitch T="bool" @bind-Value="_requireEntryCrossFromBelow" Color="Color.Primary" Label="Require Cross From Below" Class="mb-3" />
+                <div>
+                    <MudSwitch T="bool" @bind-Value="_enableEntryCrossingTrigger" Color="Color.Primary" Label="Wait for Breakout Confirmation" />
+                    <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block mb-2 ml-2">
+                        Holds order execution until live market price reaches or crosses the signal entry price.
+                    </MudText>
+                </div>
+                <div class="ml-4 mb-3">
+                    <MudSwitch T="bool" @bind-Value="_requireEntryCrossFromBelow" Color="Color.Primary" Disabled="!_enableEntryCrossingTrigger" Label="Block Late Signals (No Chasing Extended Prices)" />
+                    <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block ml-2">
+                        Only triggers if price was observed below entry before crossing up. Prevents chasing if market already surged.
+                    </MudText>
+                </div>
                 <MudNumericField T="decimal"
                                   @bind-Value="_entryPriceOffset"
                                   Label="Entry Price Offset (pts)"
@@ -320,7 +330,7 @@
 
     private decimal _dailyMaxLoss = 1000;
     private decimal _dailyMaxProfit = 5000;
-    private bool _riskAutoSquareOffEnabled = false;
+    private bool _riskAutoSquareOffEnabled = true;
     private int _maxOpenPositions = 5;
     private int _maxTradesPerDay = 10;
     private decimal _stopLossBuffer = 0;
@@ -352,16 +362,16 @@
 
     private List<IndexRiskProfileVm> _indexProfiles =
     [
-        new() { Index = "NIFTY",      DefaultSlPoints = 20, DefaultTargetPoints = 35,  OverrideTargetPoints = 15, SlPercent = 18, TargetPercent = 35 },
-        new() { Index = "BANKNIFTY",  DefaultSlPoints = 40, DefaultTargetPoints = 70,  OverrideTargetPoints = 15, SlPercent = 20, TargetPercent = 40 },
-        new() { Index = "FINNIFTY",   DefaultSlPoints = 20, DefaultTargetPoints = 35,  OverrideTargetPoints = 15, SlPercent = 18, TargetPercent = 35 },
-        new() { Index = "MIDCPNIFTY", DefaultSlPoints = 15, DefaultTargetPoints = 25,  OverrideTargetPoints = 15, SlPercent = 15, TargetPercent = 30 },
-        new() { Index = "SENSEX",     DefaultSlPoints = 80, DefaultTargetPoints = 140, OverrideTargetPoints = 15, SlPercent = 25, TargetPercent = 50 },
-        new() { Index = "BANKEX",     DefaultSlPoints = 90, DefaultTargetPoints = 150, OverrideTargetPoints = 15, SlPercent = 25, TargetPercent = 50 },
-        new() { Index = "CRUDEOIL",   Segment = MarketSegment.Commodity, DefaultSlPoints = 15, DefaultTargetPoints = 30,  OverrideTargetPoints = 15, SlPercent = 22, TargetPercent = 45 },
-        new() { Index = "NATURALGAS", Segment = MarketSegment.Commodity, DefaultSlPoints = 5,  DefaultTargetPoints = 10,  OverrideTargetPoints = 15, SlPercent = 25, TargetPercent = 50 },
-        new() { Index = "GOLD",       Segment = MarketSegment.Commodity, DefaultSlPoints = 60, DefaultTargetPoints = 120, OverrideTargetPoints = 15, SlPercent = 20, TargetPercent = 40 },
-        new() { Index = "SILVER",     Segment = MarketSegment.Commodity, DefaultSlPoints = 50, DefaultTargetPoints = 100, OverrideTargetPoints = 15, SlPercent = 22, TargetPercent = 45 },
+        new() { Index = "NIFTY",      DefaultSlPoints = 20, OverrideSlPoints = 0, DefaultTargetPoints = 35,  OverrideTargetPoints = 15 },
+        new() { Index = "BANKNIFTY",  DefaultSlPoints = 40, OverrideSlPoints = 0, DefaultTargetPoints = 70,  OverrideTargetPoints = 15 },
+        new() { Index = "FINNIFTY",   DefaultSlPoints = 20, OverrideSlPoints = 0, DefaultTargetPoints = 35,  OverrideTargetPoints = 15 },
+        new() { Index = "MIDCPNIFTY", DefaultSlPoints = 15, OverrideSlPoints = 0, DefaultTargetPoints = 25,  OverrideTargetPoints = 15 },
+        new() { Index = "SENSEX",     DefaultSlPoints = 80, OverrideSlPoints = 0, DefaultTargetPoints = 140, OverrideTargetPoints = 15 },
+        new() { Index = "BANKEX",     DefaultSlPoints = 90, OverrideSlPoints = 0, DefaultTargetPoints = 150, OverrideTargetPoints = 15 },
+        new() { Index = "CRUDEOIL",   Segment = MarketSegment.Commodity, DefaultSlPoints = 15, OverrideSlPoints = 0, DefaultTargetPoints = 30,  OverrideTargetPoints = 15 },
+        new() { Index = "NATURALGAS", Segment = MarketSegment.Commodity, DefaultSlPoints = 5,  OverrideSlPoints = 0, DefaultTargetPoints = 10,  OverrideTargetPoints = 15 },
+        new() { Index = "GOLD",       Segment = MarketSegment.Commodity, DefaultSlPoints = 60, OverrideSlPoints = 0, DefaultTargetPoints = 120, OverrideTargetPoints = 15 },
+        new() { Index = "SILVER",     Segment = MarketSegment.Commodity, DefaultSlPoints = 50, OverrideSlPoints = 0, DefaultTargetPoints = 100, OverrideTargetPoints = 15 },
     ];
 
     private string _adminUsername = "admin";
@@ -390,7 +400,7 @@
             var dml  = await SettingsService.GetSettingAsync<decimal?>("DailyMaxLoss");       if (dml.HasValue)  _dailyMaxLoss     = dml.Value;
             var dmp  = await SettingsService.GetSettingAsync<decimal?>("DailyMaxProfit");     if (dmp.HasValue)  _dailyMaxProfit   = dmp.Value;
             var rase = await SettingsService.GetSettingAsync<bool?>("RiskAutoSquareOffEnabled");
-            if (rase.HasValue) _riskAutoSquareOffEnabled = rase.Value;
+            _riskAutoSquareOffEnabled = rase ?? true;
             var mop  = await SettingsService.GetSettingAsync<int?>("MaxOpenPositions");       if (mop.HasValue)  _maxOpenPositions  = mop.Value;
             var mtpd = await SettingsService.GetSettingAsync<int?>("MaxTradesPerDay");        if (mtpd.HasValue) _maxTradesPerDay   = mtpd.Value;
             var slb  = await SettingsService.GetSettingAsync<decimal?>("StopLossBuffer");     if (slb.HasValue)  _stopLossBuffer    = slb.Value;
@@ -441,17 +451,14 @@
                 var slPts = await SettingsService.GetSettingAsync<decimal?>($"SL.Points.{profile.Index}");
                 if (slPts.HasValue) profile.DefaultSlPoints = slPts.Value;
 
+                var overrideSl = await SettingsService.GetSettingAsync<decimal?>($"SL.Override.{profile.Index}");
+                if (overrideSl.HasValue) profile.OverrideSlPoints = overrideSl.Value;
+
                 var tgtPts = await SettingsService.GetSettingAsync<decimal?>($"Target.Points.{profile.Index}");
                 if (tgtPts.HasValue) profile.DefaultTargetPoints = tgtPts.Value;
 
                 var overrideTgt = await SettingsService.GetSettingAsync<decimal?>($"Target.Override.{profile.Index}");
                 if (overrideTgt.HasValue) profile.OverrideTargetPoints = overrideTgt.Value;
-
-                var slPct = await SettingsService.GetSettingAsync<decimal?>($"SL.Percent.{profile.Index}");
-                if (slPct.HasValue) profile.SlPercent = slPct.Value;
-
-                var tgtPct = await SettingsService.GetSettingAsync<decimal?>($"Target.Percent.{profile.Index}");
-                if (tgtPct.HasValue) profile.TargetPercent = tgtPct.Value;
             }
 
             _adminUsername = await Auth.GetAdminUsernameAsync();
@@ -513,10 +520,9 @@
             foreach (var profile in _indexProfiles)
             {
                 await SettingsService.SetSettingAsync($"SL.Points.{profile.Index}", profile.DefaultSlPoints);
+                await SettingsService.SetSettingAsync($"SL.Override.{profile.Index}", profile.OverrideSlPoints);
                 await SettingsService.SetSettingAsync($"Target.Points.{profile.Index}", profile.DefaultTargetPoints);
                 await SettingsService.SetSettingAsync($"Target.Override.{profile.Index}", profile.OverrideTargetPoints);
-                await SettingsService.SetSettingAsync($"SL.Percent.{profile.Index}", profile.SlPercent);
-                await SettingsService.SetSettingAsync($"Target.Percent.{profile.Index}", profile.TargetPercent);
             }
 
             if (!string.IsNullOrWhiteSpace(_adminUsername))
