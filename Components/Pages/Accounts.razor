@@ -127,79 +127,93 @@
 
 @if (_showAddDialog)
 {
-    <MudOverlay Visible="true" DarkBackground="true" AutoClose="false" ZIndex="1500">
-        <MudPaper Class="pa-4 mx-auto mt-8" Style="max-width:760px; width:95%;">
-            <MudText Typo="Typo.h6" Class="mb-2">@(_isEditMode ? "Edit Trading Account" : "Add Trading Account")</MudText>
-            <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3">
-                @(_isEditMode ? "Update account properties, broker type, and API parameters below." : "Login is validated with the selected broker before the account is saved.")
-            </MudText>
+    <MudOverlay Visible="true" DarkBackground="true" AutoClose="false" ZIndex="1500"
+                Style="overflow-y: auto; padding: 12px 8px; display: flex; align-items: center; justify-content: center;">
+        <MudPaper Elevation="8" Class="pa-4 pa-sm-5 d-flex flex-column"
+                  Style="max-width: 760px; width: 100%; max-height: 90vh; border-radius: 12px; margin: auto;">
+            <!-- Header (Sticky at top) -->
+            <div class="d-flex align-center justify-space-between pb-2 mb-2" style="border-bottom: 1px solid var(--mud-palette-divider); flex-shrink: 0;">
+                <div>
+                    <MudText Typo="Typo.h6" Class="font-weight-bold">@(_isEditMode ? "Edit Trading Account" : "Add Trading Account")</MudText>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block">
+                        @(_isEditMode ? "Update account properties, broker type, and API parameters below." : "Login is validated with the selected broker before the account is saved.")
+                    </MudText>
+                </div>
+                <MudIconButton Icon="@Icons.Material.Filled.Close" Size="Size.Small" Color="Color.Default" OnClick="CloseAddDialog" aria-label="Close" Class="ml-2" />
+            </div>
 
-            <MudGrid Spacing="2">
-                <MudItem xs="12" md="6">
-                    <MudTextField T="string" Label="Account Name" Variant="Variant.Outlined" @bind-Value="_newName" />
-                </MudItem>
-                <MudItem xs="12" md="6">
-                    <MudSelect T="string" Label="Broker Type" Variant="Variant.Outlined" @bind-Value="_newBrokerType">
-                        <MudSelectItem Value="@("AngelOne")">AngelOne</MudSelectItem>
-                        <MudSelectItem Value="@("AliceBlue")">AliceBlue</MudSelectItem>
-                    </MudSelect>
-                </MudItem>
-                <MudItem xs="12" md="6">
-                    <MudTextField T="string" Label="API Key" Variant="Variant.Outlined" InputType="InputType.Password" @bind-Value="_newApiKey" />
-                </MudItem>
-                <MudItem xs="12" md="6">
-                    <MudTextField T="string" Label="Client ID" Variant="Variant.Outlined" @bind-Value="_newClientId" />
-                </MudItem>
-                <MudItem xs="12" md="6">
-                    <MudTextField T="string" Label="Password / PIN" Variant="Variant.Outlined" InputType="InputType.Password" @bind-Value="_newPassword" />
-                </MudItem>
-                <MudItem xs="12" md="6">
-                    <MudTextField T="string"
-                                  Label="TOTP (6-digit) or Secret (Base32)"
-                                  Variant="Variant.Outlined"
-                                  InputType="InputType.Password"
-                                  @bind-Value="_newTotp" />
-                </MudItem>
-                <MudItem xs="12" md="6">
-                    <MudTextField T="string" Label="API URL" Variant="Variant.Outlined" @bind-Value="_newApiUrl" />
-                </MudItem>
-                <MudItem xs="12" md="6">
-                    <MudTextField T="string" Label="WebSocket URL (optional)" Variant="Variant.Outlined" @bind-Value="_newWsUrl" />
-                </MudItem>
-                <MudItem xs="6" md="3">
-                    <MudNumericField T="decimal" Label="Daily Max Loss (₹)" HelperText="Auto square-off &amp; blocks trades on reaching loss limit. 0 = disabled" Variant="Variant.Outlined" @bind-Value="_newDailyMaxLoss" />
-                </MudItem>
-                <MudItem xs="6" md="3">
-                    <MudNumericField T="decimal" Label="Daily Max Profit (₹)" HelperText="Auto square-off &amp; blocks trades on reaching profit target. 0 = disabled" Variant="Variant.Outlined" @bind-Value="_newDailyMaxProfit" />
-                </MudItem>
-                <MudItem xs="6" md="3">
-                    <MudNumericField T="int" Label="Max Trades/Day" Variant="Variant.Outlined" @bind-Value="_newMaxTrades" />
-                </MudItem>
-                <MudItem xs="6" md="3">
-                    <MudNumericField T="int" Label="Max Positions" Variant="Variant.Outlined" @bind-Value="_newMaxPositions" />
-                </MudItem>
-                <MudItem xs="6" md="3">
-                    <MudNumericField T="decimal" Label="Default Lots" Variant="Variant.Outlined" @bind-Value="_newDefaultLots" />
-                </MudItem>
-                <MudItem xs="6" md="3">
-                    <MudSwitch T="bool" @bind-Value="_newIsEnabled" Color="Color.Success" Label="Enabled" />
-                </MudItem>
-                <MudItem xs="6" md="3">
-                    <MudSwitch T="bool" @bind-Value="_newIsDefault" Color="Color.Warning" Label="Default" />
-                </MudItem>
-            </MudGrid>
+            <!-- Scrollable Form Body -->
+            <div style="overflow-y: auto; flex: 1 1 auto; padding: 8px 4px; -webkit-overflow-scrolling: touch;">
+                <MudGrid Spacing="2">
+                    <MudItem xs="12" md="6">
+                        <MudTextField T="string" Label="Account Name" Variant="Variant.Outlined" @bind-Value="_newName" />
+                    </MudItem>
+                    <MudItem xs="12" md="6">
+                        <MudSelect T="string" Label="Broker Type" Variant="Variant.Outlined" @bind-Value="_newBrokerType">
+                            <MudSelectItem Value="@("AngelOne")">AngelOne</MudSelectItem>
+                            <MudSelectItem Value="@("AliceBlue")">AliceBlue</MudSelectItem>
+                        </MudSelect>
+                    </MudItem>
+                    <MudItem xs="12" md="6">
+                        <MudTextField T="string" Label="API Key" Variant="Variant.Outlined" InputType="InputType.Password" @bind-Value="_newApiKey" />
+                    </MudItem>
+                    <MudItem xs="12" md="6">
+                        <MudTextField T="string" Label="Client ID" Variant="Variant.Outlined" @bind-Value="_newClientId" />
+                    </MudItem>
+                    <MudItem xs="12" md="6">
+                        <MudTextField T="string" Label="Password / PIN" Variant="Variant.Outlined" InputType="InputType.Password" @bind-Value="_newPassword" />
+                    </MudItem>
+                    <MudItem xs="12" md="6">
+                        <MudTextField T="string"
+                                      Label="TOTP (6-digit) or Secret (Base32)"
+                                      Variant="Variant.Outlined"
+                                      InputType="InputType.Password"
+                                      @bind-Value="_newTotp" />
+                    </MudItem>
+                    <MudItem xs="12" md="6">
+                        <MudTextField T="string" Label="API URL" Variant="Variant.Outlined" @bind-Value="_newApiUrl" />
+                    </MudItem>
+                    <MudItem xs="12" md="6">
+                        <MudTextField T="string" Label="WebSocket URL (optional)" Variant="Variant.Outlined" @bind-Value="_newWsUrl" />
+                    </MudItem>
+                    <MudItem xs="12" sm="6" md="3">
+                        <MudNumericField T="decimal" Label="Daily Max Loss (₹)" HelperText="Auto square-off &amp; blocks trades on reaching loss limit. 0 = disabled" Variant="Variant.Outlined" @bind-Value="_newDailyMaxLoss" />
+                    </MudItem>
+                    <MudItem xs="12" sm="6" md="3">
+                        <MudNumericField T="decimal" Label="Daily Max Profit (₹)" HelperText="Auto square-off &amp; blocks trades on reaching profit target. 0 = disabled" Variant="Variant.Outlined" @bind-Value="_newDailyMaxProfit" />
+                    </MudItem>
+                    <MudItem xs="6" sm="6" md="3">
+                        <MudNumericField T="int" Label="Max Trades/Day" Variant="Variant.Outlined" @bind-Value="_newMaxTrades" />
+                    </MudItem>
+                    <MudItem xs="6" sm="6" md="3">
+                        <MudNumericField T="int" Label="Max Positions" Variant="Variant.Outlined" @bind-Value="_newMaxPositions" />
+                    </MudItem>
+                    <MudItem xs="12" sm="6" md="3">
+                        <MudNumericField T="decimal" Label="Default Lots" Variant="Variant.Outlined" @bind-Value="_newDefaultLots" />
+                    </MudItem>
+                    <MudItem xs="6" sm="3" md="3">
+                        <MudSwitch T="bool" @bind-Value="_newIsEnabled" Color="Color.Success" Label="Enabled" />
+                    </MudItem>
+                    <MudItem xs="6" sm="3" md="3">
+                        <MudSwitch T="bool" @bind-Value="_newIsDefault" Color="Color.Warning" Label="Default" />
+                    </MudItem>
+                </MudGrid>
+            </div>
 
-            <MudStack Row="true" Class="mt-3" Spacing="2">
-                @if (_isEditMode)
-                {
-                    <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="SaveEditedAccountAsync">Save Changes</MudButton>
-                }
-                else
-                {
-                    <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="ValidateAndCreateAccountAsync">Validate Login &amp; Save</MudButton>
-                }
-                <MudButton Color="Color.Default" Variant="Variant.Outlined" OnClick="CloseAddDialog">Cancel</MudButton>
-            </MudStack>
+            <!-- Footer Action Buttons (Sticky at bottom, always visible) -->
+            <div class="pt-3 mt-1" style="border-top: 1px solid var(--mud-palette-divider); flex-shrink: 0;">
+                <MudStack Row="true" Wrap="Wrap.Wrap" Spacing="2" Justify="Justify.FlexEnd" Class="w-100">
+                    <MudButton Color="Color.Default" Variant="Variant.Outlined" OnClick="CloseAddDialog" Class="flex-grow-1 flex-sm-grow-0">Cancel</MudButton>
+                    @if (_isEditMode)
+                    {
+                        <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="SaveEditedAccountAsync" Class="flex-grow-1 flex-sm-grow-0">Save Changes</MudButton>
+                    }
+                    else
+                    {
+                        <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="ValidateAndCreateAccountAsync" Class="flex-grow-1 flex-sm-grow-0">Validate Login &amp; Save</MudButton>
+                    }
+                </MudStack>
+            </div>
         </MudPaper>
     </MudOverlay>
 }
