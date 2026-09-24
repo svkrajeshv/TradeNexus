@@ -1,6 +1,7 @@
 @page "/logs"
 @using MudBlazor
 @inject ISnackbar Snackbar
+@inject IJSRuntime JS
 
 <PageTitle>NexusApp - Logs</PageTitle>
 
@@ -14,6 +15,8 @@
             }
         </MudSelect>
         <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="LoadAsync" StartIcon="@Icons.Material.Filled.Refresh">Load</MudButton>
+        <MudButton Color="Color.Error" Variant="Variant.Outlined" OnClick="DeleteCurrentLogAsync" StartIcon="@Icons.Material.Filled.Delete" Disabled="@(string.IsNullOrEmpty(_selectedFile))">Delete Log</MudButton>
+        <MudButton Color="Color.Error" Variant="Variant.Filled" OnClick="DeleteAllLogsAsync" StartIcon="@Icons.Material.Filled.DeleteSweep" Disabled="@(_files.Count == 0)">Delete All</MudButton>
     </MudStack>
 </MudStack>
 
@@ -26,14 +29,28 @@
     private string _selectedFile = string.Empty;
     private string _content = string.Empty;
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
+    {
+        RefreshFileList();
+        if (!string.IsNullOrEmpty(_selectedFile))
+        {
+            await LoadAsync();
+        }
+    }
+
+    private string GetLogsDirectory()
     {
         var dir = System.IO.Path.Combine(AppContext.BaseDirectory, "Logs");
         if (!System.IO.Directory.Exists(dir))
         {
             dir = System.IO.Path.Combine(Environment.CurrentDirectory, "Logs");
         }
+        return dir;
+    }
 
+    private void RefreshFileList()
+    {
+        var dir = GetLogsDirectory();
         try
         {
             if (System.IO.Directory.Exists(dir))
@@ -42,7 +59,16 @@
                     .OrderByDescending(f => f)
                     .Take(30)
                     .ToList();
-                _selectedFile = _files.FirstOrDefault() ?? string.Empty;
+
+                if (string.IsNullOrEmpty(_selectedFile) || !_files.Contains(_selectedFile))
+                {
+                    _selectedFile = _files.FirstOrDefault() ?? string.Empty;
+                }
+            }
+            else
+            {
+                _files.Clear();
+                _selectedFile = string.Empty;
             }
         }
         catch (Exception ex)
@@ -69,10 +95,132 @@
             fs.Seek(start, System.IO.SeekOrigin.Begin);
             using var reader = new System.IO.StreamReader(fs);
             _content = await reader.ReadToEndAsync();
+            if (string.IsNullOrWhiteSpace(_content))
+            {
+                _content = "(Log file is empty)";
+            }
         }
         catch (Exception ex)
         {
             _content = $"Error reading log: {ex.Message}";
+        }
+    }
+
+    private async Task DeleteCurrentLogAsync()
+    {
+        if (string.IsNullOrEmpty(_selectedFile) || !System.IO.File.Exists(_selectedFile))
+        {
+            Snackbar.Add("No log file selected to delete.", Severity.Warning);
+            return;
+        }
+
+        var fileName = System.IO.Path.GetFileName(_selectedFile);
+        var confirmed = await JS.InvokeAsync<bool>("confirm", $"Are you sure you want to delete '{fileName}'?");
+        if (!confirmed)
+            return;
+
+        var deleted = DeleteOrClearFile(_selectedFile);
+        if (deleted)
+        {
+            Snackbar.Add($"Log '{fileName}' deleted.", Severity.Success);
+            _content = string.Empty;
+            RefreshFileList();
+            if (!string.IsNullOrEmpty(_selectedFile))
+            {
+                await LoadAsync();
+            }
+            else
+            {
+                _content = "No logs remaining.";
+            }
+        }
+    }
+
+    private async Task DeleteAllLogsAsync()
+    {
+        if (_files.Count == 0)
+        {
+            Snackbar.Add("No log files found to delete.", Severity.Info);
+            return;
+        }
+
+        var confirmed = await JS.InvokeAsync<bool>("confirm", $"Are you sure you want to delete all {_files.Count} log files? This action cannot be undone.");
+        if (!confirmed)
+            return;
+
+        int deletedCount = 0;
+        int lockedCount = 0;
+        foreach (var file in _files.ToList())
+        {
+            if (DeleteOrClearFile(file, notifyFailure: false))
+            {
+                deletedCount++;
+            }
+            else
+            {
+                lockedCount++;
+            }
+        }
+
+        if (deletedCount > 0)
+        {
+            Snackbar.Add($"Deleted/cleared {deletedCount} log file(s).", Severity.Success);
+        }
+        if (lockedCount > 0)
+        {
+            Snackbar.Add($"{lockedCount} active log file(s) are locked by the running process and could not be removed.", Severity.Warning);
+        }
+        _content = string.Empty;
+        RefreshFileList();
+        if (!string.IsNullOrEmpty(_selectedFile))
+        {
+            await LoadAsync();
+        }
+        else
+        {
+            _content = "No logs remaining.";
+        }
+    }
+
+    private bool DeleteOrClearFile(string path, bool notifyFailure = true)
+    {
+        try
+        {
+            if (!System.IO.File.Exists(path))
+                return true;
+
+            try
+            {
+                System.IO.File.Delete(path);
+                return true;
+            }
+            catch (IOException)
+            {
+                try
+                {
+                    // If actively locked by Serilog, truncate the file contents:
+                    using var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Write, System.IO.FileShare.ReadWrite);
+                    fs.SetLength(0);
+                    fs.Flush();
+                    return true;
+                }
+                catch (IOException)
+                {
+                    if (notifyFailure)
+                    {
+                        Snackbar.Add($"'{System.IO.Path.GetFileName(path)}' is actively locked by the running application process. Once restarted with the updated shared file sink, active logs can be cleared.", Severity.Warning);
+                    }
+                    return false;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            if (notifyFailure)
+            {
+                Snackbar.Add($"Failed to delete {System.IO.Path.GetFileName(path)}: {ex.Message}", Severity.Error);
+            }
+            return false;
         }
     }
 }

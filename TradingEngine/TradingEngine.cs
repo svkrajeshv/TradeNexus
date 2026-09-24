@@ -401,16 +401,50 @@ public class TradingEngine(
                     $"Entry offset (-{entryOffset}): {signal.EntryPrice} → {limitPrice}");
             }
 
-            if (stopLossBuffer > 0 && signalEntity.StopLoss > 0)
+            var riskProfileService = _serviceProvider.GetService<IIndexRiskProfileService>();
+            var overrideSlPts = riskProfileService is not null
+                ? await riskProfileService.GetOverrideSlPointsAsync(signal.Index)
+                : 0m;
+
+            if (overrideSlPts > 0)
             {
-                var bufferedSl = Math.Max(0.05m, signalEntity.StopLoss - stopLossBuffer);
+                var overrideSl = signal.Action == SignalAction.Buy
+                    ? Math.Max(0.05m, limitPrice - overrideSlPts)
+                    : limitPrice + overrideSlPts;
+                signalEntity.StopLoss = overrideSl;
+                signal.StopLoss = overrideSl;
                 priceAdjustments.Add(
-                    $"StopLoss buffer (-{stopLossBuffer}): {signalEntity.StopLoss} → {bufferedSl}");
-                signalEntity.StopLoss = bufferedSl;
+                    $"Override SL (-{overrideSlPts} pts): [{overrideSl}]");
                 await _context.SaveChangesAsync();
             }
+            else
+            {
+                // Override SL is 0: use signal SL or default SL points
+                if (signalEntity.StopLoss <= 0)
+                {
+                    var profile = riskProfileService is not null ? await riskProfileService.GetProfileAsync(signal.Index) : null;
+                    var defSlPts = profile is { DefaultSlPoints: > 0 }
+                        ? profile.DefaultSlPoints
+                        : (await _settings.GetSettingAsync<decimal?>("DefaultStopLossPoints") ?? 50m);
+                    var defSl = signal.Action == SignalAction.Buy
+                        ? Math.Max(0.05m, limitPrice - defSlPts)
+                        : limitPrice + defSlPts;
+                    signalEntity.StopLoss = defSl;
+                    signal.StopLoss = defSl;
+                    priceAdjustments.Add($"Default SL (-{defSlPts} pts): [{defSl}]");
+                    await _context.SaveChangesAsync();
+                }
+                else if (stopLossBuffer > 0)
+                {
+                    var bufferedSl = Math.Max(0.05m, signalEntity.StopLoss - stopLossBuffer);
+                    priceAdjustments.Add(
+                        $"StopLoss buffer (-{stopLossBuffer}): {signalEntity.StopLoss} → {bufferedSl}");
+                    signalEntity.StopLoss = bufferedSl;
+                    signal.StopLoss = bufferedSl;
+                    await _context.SaveChangesAsync();
+                }
+            }
 
-            var riskProfileService = _serviceProvider.GetService<IIndexRiskProfileService>();
             var overrideTargetPts = riskProfileService is not null
                 ? await riskProfileService.GetOverrideTargetPointsAsync(signal.Index)
                 : 0m;
@@ -534,6 +568,69 @@ public class TradingEngine(
 
             var isPaper = account.IsPaperAccount;
 
+            // Slippage guard: before executing an order (live or paper), compare the current
+            // market price (CMP) against the signal entry price. If the market
+            // has moved adversely beyond the configured percentage, reject the
+            // order to avoid a bad fill.
+            var slippageGuardEnabled = await _settings.GetSettingAsync<bool?>("SlippageGuardEnabled") ?? false;
+            decimal slippageCheckedCmp = 0m;
+            if (slippageGuardEnabled && signal.EntryPrice > 0)
+            {
+                var maxSlippagePercent = await _settings.GetSettingAsync<decimal?>("MaxSlippagePercent") ?? 1.0m;
+                if (maxSlippagePercent > 0)
+                {
+                    try
+                    {
+                        IBroker? quoteBroker = null;
+                        if (!string.IsNullOrWhiteSpace(account.BrokerType))
+                        {
+                            quoteBroker = _serviceProvider.GetKeyedService<IBroker>(account.BrokerType);
+                        }
+                        quoteBroker ??= _broker;
+                        if (quoteBroker != null)
+                        {
+                            slippageCheckedCmp = await quoteBroker.GetLiveQuoteAsync(resolved.Symbol);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Slippage guard: failed to fetch CMP for {Symbol}; proceeding without check", resolved.Symbol);
+                    }
+
+                    if (slippageCheckedCmp > 0)
+                    {
+                        // Adverse move: for a Buy, price rising above entry; for a Sell, price falling below entry.
+                        var adverseMove = side == OrderSide.Buy
+                            ? slippageCheckedCmp - signal.EntryPrice
+                            : signal.EntryPrice - slippageCheckedCmp;
+                        var slippagePercent = adverseMove / signal.EntryPrice * 100m;
+                        if (slippagePercent > maxSlippagePercent)
+                        {
+                            var reason =
+                                $"Slippage guard: CMP {slippageCheckedCmp} vs entry {signal.EntryPrice} = {slippagePercent:0.00}% adverse (> {maxSlippagePercent:0.00}% limit); rejecting order.";
+                            _logger.LogWarning(
+                                "Slippage guard rejected {Symbol} on {Broker} (Paper={IsPaper}): CMP={Cmp} entry={Entry} slip={Slip:0.00}% limit={Limit:0.00}%",
+                                resolved.Symbol, account.BrokerType, isPaper, slippageCheckedCmp, signal.EntryPrice, slippagePercent, maxSlippagePercent);
+                            order.Status = OrderStatus.Rejected;
+                            order.ErrorMessage = reason;
+                            _context.Orders.Add(order);
+                            if (signalEntity.Status != SignalStatus.Executed)
+                            {
+                                signalEntity.Status = SignalStatus.Failed;
+                            }
+                            await _context.SaveChangesAsync();
+                            order.BrokerId = $"REJ-{order.Id}";
+                            await _context.SaveChangesAsync();
+                            return false;
+                        }
+
+                        _logger.LogInformation(
+                            "Slippage guard OK for {Symbol} (Paper={IsPaper}): CMP={Cmp} entry={Entry} slip={Slip:0.00}% (limit {Limit:0.00}%)",
+                            resolved.Symbol, isPaper, slippageCheckedCmp, signal.EntryPrice, slippagePercent, maxSlippagePercent);
+                    }
+                }
+            }
+
             if (isPaper)
             {
                 _context.Orders.Add(order);
@@ -548,18 +645,31 @@ public class TradingEngine(
                 var fillPrice = limitPrice;
                 if (isMarket)
                 {
-                    try
+                    if (slippageCheckedCmp > 0)
                     {
-                        var quoteBroker = _serviceProvider.GetRequiredKeyedService<IBroker>(account.BrokerType);
-                        var cmp = await quoteBroker.GetLiveQuoteAsync(resolved.Symbol);
-                        if (cmp > 0)
-                            fillPrice = cmp;
+                        fillPrice = slippageCheckedCmp;
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        _logger.LogWarning(ex,
-                            "Paper market order: failed to fetch CMP for {Symbol}; falling back to signal entry price {Price}",
-                            resolved.Symbol, limitPrice);
+                        try
+                        {
+                            var quoteBroker = !string.IsNullOrWhiteSpace(account.BrokerType)
+                                ? _serviceProvider.GetKeyedService<IBroker>(account.BrokerType)
+                                : null;
+                            quoteBroker ??= _broker;
+                            if (quoteBroker != null)
+                            {
+                                var cmp = await quoteBroker.GetLiveQuoteAsync(resolved.Symbol);
+                                if (cmp > 0)
+                                    fillPrice = cmp;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex,
+                                "Paper market order: failed to fetch CMP for {Symbol}; falling back to signal entry price {Price}",
+                                resolved.Symbol, limitPrice);
+                        }
                     }
                 }
                 _logger.LogInformation(
@@ -611,60 +721,6 @@ public class TradingEngine(
                 "Placing {Variety} order for {Symbol} on {Broker}: entry={Price}, SqOff={SqOff}, SL={SL}",
                 brokerRequest.Variety, resolved.Symbol, account.BrokerType,
                 limitPrice, squareOffPts, stopLossPts);
-
-            // Slippage guard: before sending a live order, compare the current
-            // market price (CMP) against the signal entry price. If the market
-            // has moved adversely beyond the configured percentage, reject the
-            // order to avoid a bad fill.
-            var slippageGuardEnabled = await _settings.GetSettingAsync<bool?>("SlippageGuardEnabled") ?? false;
-            if (slippageGuardEnabled && signal.EntryPrice > 0)
-            {
-                var maxSlippagePercent = await _settings.GetSettingAsync<decimal?>("MaxSlippagePercent") ?? 1.0m;
-                if (maxSlippagePercent > 0)
-                {
-                    decimal cmp = 0m;
-                    try
-                    {
-                        cmp = await accountBroker.GetLiveQuoteAsync(resolved.Symbol);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Slippage guard: failed to fetch CMP for {Symbol}; proceeding without check", resolved.Symbol);
-                    }
-
-                    if (cmp > 0)
-                    {
-                        // Adverse move: for a Buy, price rising above entry; for a Sell, price falling below entry.
-                        var adverseMove = side == OrderSide.Buy
-                            ? cmp - signal.EntryPrice
-                            : signal.EntryPrice - cmp;
-                        var slippagePercent = adverseMove / signal.EntryPrice * 100m;
-                        if (slippagePercent > maxSlippagePercent)
-                        {
-                            var reason =
-                                $"Slippage guard: CMP {cmp} vs entry {signal.EntryPrice} = {slippagePercent:0.00}% adverse (> {maxSlippagePercent:0.00}% limit); rejecting order.";
-                            _logger.LogWarning(
-                                "Slippage guard rejected {Symbol} on {Broker}: CMP={Cmp} entry={Entry} slip={Slip:0.00}% limit={Limit:0.00}%",
-                                resolved.Symbol, account.BrokerType, cmp, signal.EntryPrice, slippagePercent, maxSlippagePercent);
-                            order.Status = OrderStatus.Rejected;
-                            order.ErrorMessage = reason;
-                            _context.Orders.Add(order);
-                            if (signalEntity.Status != SignalStatus.Executed)
-                            {
-                                signalEntity.Status = SignalStatus.Failed;
-                            }
-                            await _context.SaveChangesAsync();
-                            order.BrokerId = $"REJ-{order.Id}";
-                            await _context.SaveChangesAsync();
-                            return false;
-                        }
-
-                        _logger.LogInformation(
-                            "Slippage guard OK for {Symbol}: CMP={Cmp} entry={Entry} slip={Slip:0.00}% (limit {Limit:0.00}%)",
-                            resolved.Symbol, cmp, signal.EntryPrice, slippagePercent, maxSlippagePercent);
-                    }
-                }
-            }
 
             var response = await accountBroker.PlaceOrderAsync(brokerRequest);
 
@@ -1268,6 +1324,22 @@ public class TradingEngine(
             }
 
             var isPaper = account.IsPaperAccount;
+
+            if (ContractExpiryHelper.IsExpiredOptionSymbol(position.Symbol))
+            {
+                _logger.LogInformation("Position {Symbol} (id {Id}) is an expired option; squaring off locally without routing to broker", position.Symbol, position.Id);
+                position.ClosedAt = DateTime.UtcNow;
+                position.ClosingPrice = ltp;
+                position.RealizedPnL = PnlCalculator.RealizedPnl(position.EntryPrice, ltp, position.Quantity);
+                position.UnrealizedPnL = 0;
+                position.UnrealizedPnLPercentage = 0;
+
+                await _context.SaveChangesAsync();
+                await _notifications.SendTelegramOrderClosedAsync(account.Name, !isPaper, position.Symbol, position.EntryPrice, ltp, position.RealizedPnL.Value, position.Quantity, $"{reason} (Contract Expired)");
+                await _hub.Clients.All.SendAsync(PositionChanged, new { Timestamp = DateTime.UtcNow });
+                await _hub.Clients.All.SendAsync("OrderStatusChanged", new { Timestamp = DateTime.UtcNow });
+                return true;
+            }
 
             if (isPaper)
             {

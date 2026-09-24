@@ -318,128 +318,163 @@
 
     <MudItem xs="12">
         <MudPaper Class="pa-4" Elevation="2">
-            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-2">
-                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="@(_isLiveSignalsExpanded ? "mb-2" : string.Empty)">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Style="cursor: pointer;" @onclick="ToggleLiveSignalsExpandedAsync">
                     <MudText Typo="Typo.h6">Live Signals</MudText>
                     <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Outlined">
                         Crossed: @GetCrossedCount() / @_signals.Count
                     </MudChip>
                 </MudStack>
-                <MudButton StartIcon="@Icons.Material.Filled.Refresh" OnClick="RefreshAsync" Size="Size.Small">Refresh</MudButton>
+                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+                    <MudButton StartIcon="@Icons.Material.Filled.Refresh" OnClick="RefreshAsync" Size="Size.Small">Refresh</MudButton>
+                    <MudTooltip Text="@(_isLiveSignalsExpanded ? "Collapse" : "Expand")">
+                        <MudIconButton Icon="@(_isLiveSignalsExpanded ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)"
+                                       Size="Size.Small"
+                                       Color="Color.Default"
+                                       OnClick="ToggleLiveSignalsExpandedAsync"
+                                       aria-label="@(_isLiveSignalsExpanded ? "Collapse Live Signals" : "Expand Live Signals")" />
+                    </MudTooltip>
+                </MudStack>
             </MudStack>
-            @if (_signals.Count == 0)
-            {
-                <MudAlert Severity="Severity.Info">No signals received yet. Configure Telegram in appsettings.json and enable it.</MudAlert>
-            }
-            else
-            {
-                <div class="table-scroll">
-                <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" Breakpoint="Breakpoint.Sm" RowStyleFunc="GetSignalRowStyle" FixedHeader="true">
-                    <HeaderContent>
-                        <MudTh>Time</MudTh>
-                        <MudTh>Channel</MudTh>
-                        <MudTh>Signal</MudTh>
-                        <MudTh>Signal Values</MudTh>
-                        <MudTh>CMP</MudTh>
-                        <MudTh>Delay</MudTh>
-                        <MudTh>Status</MudTh>
-                        <MudTh>Actions</MudTh>
-                    </HeaderContent>
-                    <RowTemplate>
-                        <LiveSignalRow Signal="context"
-                                       CmpDisplay="@GetCmpDisplay(context)"
-                                       HasCrossed="@HasCmpCrossedEntry(context)"
-                                       BlinkClass="@GetCmpBlinkClass(context)"
-                                       DelayText="@FormatDelay(context.SignalDelayMs)"
-                                       Staleness="@ToTuple(GetSignalStaleness(context))"
-                                       StatusColor="@StatusColor(context.Status)"
-                                       StatusReason="@GetStatusReason(context)"                                       IsEditable="@IsEditable(context)"
-                                       IsPendingAutoExecution="@IsPendingAutoExecution(context)"
-                                       OnSave="@(s => SaveAsync(s))"
-                                       OnBuy="@(s => BuyAsync(s))"
-                                       OnIgnore="@(s => IgnoreAsync(s))"
-                                       OnCancelPendingAuto="@(s => CancelPendingAutoAsync(s))" />
-                    </RowTemplate>
-                </MudTable>
-                </div>
-            }
+            <MudCollapse Expanded="_isLiveSignalsExpanded">
+                @if (_signals.Count == 0)
+                {
+                    <MudAlert Severity="Severity.Info">No signals received yet. Configure Telegram in appsettings.json and enable it.</MudAlert>
+                }
+                else
+                {
+                    <div class="table-scroll">
+                    <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" Breakpoint="Breakpoint.Sm" RowStyleFunc="GetSignalRowStyle" FixedHeader="true">
+                        <HeaderContent>
+                            <MudTh>Time</MudTh>
+                            <MudTh>Channel</MudTh>
+                            <MudTh>Signal</MudTh>
+                            <MudTh>Signal Values</MudTh>
+                            <MudTh>CMP</MudTh>
+                            <MudTh>Delay</MudTh>
+                            <MudTh>Status</MudTh>
+                            <MudTh>Actions</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <LiveSignalRow Signal="context"
+                                           CmpDisplay="@GetCmpDisplay(context)"
+                                           HasCrossed="@HasCmpCrossedEntry(context)"
+                                           BlinkClass="@GetCmpBlinkClass(context)"
+                                           DelayText="@FormatDelay(context.SignalDelayMs)"
+                                           Staleness="@ToTuple(GetSignalStaleness(context))"
+                                           StatusColor="@StatusColor(context.Status)"
+                                           StatusReason="@GetStatusReason(context)"                                       IsEditable="@IsEditable(context)"
+                                           IsPendingAutoExecution="@IsPendingAutoExecution(context)"
+                                           OnSave="@(s => SaveAsync(s))"
+                                           OnBuy="@(s => BuyAsync(s))"
+                                           OnIgnore="@(s => IgnoreAsync(s))"
+                                           OnCancelPendingAuto="@(s => CancelPendingAutoAsync(s))" />
+                        </RowTemplate>
+                    </MudTable>
+                    </div>
+                }
+            </MudCollapse>
         </MudPaper>
     </MudItem>
 
     <MudItem xs="12">
         <MudPaper Class="pa-4" Elevation="2">
-            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-2">
-                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="@(_isWatchlistExpanded ? "mb-2" : string.Empty)">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Style="cursor: pointer;" @onclick="ToggleWatchlistExpandedAsync">
                     <MudText Typo="Typo.h6">Watchlist (Active Traded Signals)</MudText>
                     <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
                         @_watchlist.Count active
                     </MudChip>
                 </MudStack>
+                <MudTooltip Text="@(_isWatchlistExpanded ? "Collapse" : "Expand")">
+                    <MudIconButton Icon="@(_isWatchlistExpanded ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)"
+                                   Size="Size.Small"
+                                   Color="Color.Default"
+                                   OnClick="ToggleWatchlistExpandedAsync"
+                                   aria-label="@(_isWatchlistExpanded ? "Collapse Watchlist" : "Expand Watchlist")" />
+                </MudTooltip>
             </MudStack>
-            @if (_watchlist.Count == 0)
-            {
-                <MudText Typo="Typo.body2" Color="Color.Secondary">No active traded signals in watchlist.</MudText>
-            }
-            else
-            {
-                <div class="table-scroll">
-                <MudTable Class="watchlist-table" Items="_watchlist" Dense="true" Hover="true" Bordered="false" Breakpoint="Breakpoint.Sm" FixedHeader="true">
-                    <HeaderContent>
-                        <MudTh>Time</MudTh>
-                        <MudTh>Channel</MudTh>
-                        <MudTh>Signal</MudTh>
-                        <MudTh>Entry</MudTh>
-                        <MudTh>CMP</MudTh>
-                        <MudTh>Low</MudTh>
-                        <MudTh>High</MudTh>
-                        <MudTh>Exit</MudTh>
-                        <MudTh>Status</MudTh>
-                        <MudTh>Actions</MudTh>
-                    </HeaderContent>
-                    <RowTemplate>
-                        <MudTd DataLabel="Time">@context.ReceivedTimestamp.ToIstString("hh:mm:ss tt")</MudTd>
-                        <MudTd DataLabel="Channel">
-                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
-                                @(string.IsNullOrWhiteSpace(context.ChannelName) ? "-" : context.ChannelName)
-                            </MudChip>
-                        </MudTd>
-                        <MudTd DataLabel="Signal">@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
-                        <MudTd DataLabel="Entry">@GetEdit(context).EntryPrice.ToString("0.##")</MudTd>
-                        <MudTd DataLabel="CMP">
-                            <MudChip T="string"
-                                     Color="@(HasCmpCrossedEntry(context) ? Color.Success : Color.Info)"
-                                     Variant="Variant.Filled"
-                                     Size="Size.Small"
-                                     Class="@GetCmpBlinkClass(context)">
-                                @GetCmpDisplay(context)
-                            </MudChip>
-                        </MudTd>
-                        <MudTd DataLabel="Low">@GetTickValueDisplay(_lowBySignal, context.Id)</MudTd>
-                        <MudTd DataLabel="High">@GetTickValueDisplay(_highBySignal, context.Id)</MudTd>
-                        <MudTd DataLabel="Exit">@GetExitDisplay(context.Id)</MudTd>
-                        <MudTd DataLabel="Status">
-                            <MudTooltip Text="@GetStatusReason(context)" Placement="Placement.Top" Arrow="true" Disabled="@(string.IsNullOrWhiteSpace(GetStatusReason(context)))">
-                                <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
-                            </MudTooltip>
-                        </MudTd>
-                        <MudTd DataLabel="Actions">
-                            <MudButton Size="Size.Small"
-                                       Color="Color.Default"
-                                       Variant="Variant.Outlined"
-                                       OnClick="@(() => RemoveFromWatchlistAsync(context))">
-                                Remove
-                            </MudButton>
-                        </MudTd>
-                    </RowTemplate>
-                </MudTable>
-                </div>
-            }
+            <MudCollapse Expanded="_isWatchlistExpanded">
+                @if (_watchlist.Count == 0)
+                {
+                    <MudText Typo="Typo.body2" Color="Color.Secondary">No active traded signals in watchlist.</MudText>
+                }
+                else
+                {
+                    <div class="table-scroll">
+                    <MudTable Class="watchlist-table" Items="_watchlist" Dense="true" Hover="true" Bordered="false" Breakpoint="Breakpoint.Sm" FixedHeader="true">
+                        <HeaderContent>
+                            <MudTh>Time</MudTh>
+                            <MudTh>Channel</MudTh>
+                            <MudTh>Signal</MudTh>
+                            <MudTh>Entry</MudTh>
+                            <MudTh>CMP</MudTh>
+                            <MudTh>Low</MudTh>
+                            <MudTh>High</MudTh>
+                            <MudTh>Exit</MudTh>
+                            <MudTh>Status</MudTh>
+                            <MudTh>Actions</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd DataLabel="Time">@context.ReceivedTimestamp.ToIstString("hh:mm:ss tt")</MudTd>
+                            <MudTd DataLabel="Channel">
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                    @(string.IsNullOrWhiteSpace(context.ChannelName) ? "-" : context.ChannelName)
+                                </MudChip>
+                            </MudTd>
+                            <MudTd DataLabel="Signal">@context.Index @FormatStrike(context.Strike) @context.OptionType.ToString().ToUpper()</MudTd>
+                            <MudTd DataLabel="Entry">@context.EntryPrice.ToString("0.##")</MudTd>
+                            <MudTd DataLabel="CMP">
+                                <MudChip T="string"
+                                         Color="@(HasCmpCrossedEntry(context) ? Color.Success : Color.Info)"
+                                         Variant="Variant.Filled"
+                                         Size="Size.Small"
+                                         Class="@GetCmpBlinkClass(context)">
+                                    @GetCmpDisplay(context)
+                                </MudChip>
+                            </MudTd>
+                            <MudTd DataLabel="Low">@GetTickValueDisplay(_lowBySignal, context.Id)</MudTd>
+                            <MudTd DataLabel="High">@GetTickValueDisplay(_highBySignal, context.Id)</MudTd>
+                            <MudTd DataLabel="Exit">@GetExitDisplay(context.Id)</MudTd>
+                            <MudTd DataLabel="Status">
+                                <MudTooltip Text="@GetStatusReason(context)" Placement="Placement.Top" Arrow="true" Disabled="@(string.IsNullOrWhiteSpace(GetStatusReason(context)))">
+                                    <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
+                                </MudTooltip>
+                            </MudTd>
+                            <MudTd DataLabel="Actions">
+                                <MudButton Size="Size.Small"
+                                           Color="Color.Default"
+                                           Variant="Variant.Outlined"
+                                           OnClick="@(() => RemoveFromWatchlistAsync(context))">
+                                    Remove
+                                </MudButton>
+                            </MudTd>
+                        </RowTemplate>
+                    </MudTable>
+                    </div>
+                }
+            </MudCollapse>
         </MudPaper>
     </MudItem>
 
     <MudItem xs="12">
         <MudPaper Class="pa-4" Elevation="2">
-            <MudText Typo="Typo.h6" Class="mb-2">Open Positions</MudText>
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="@(_isPositionsExpanded ? "mb-2" : string.Empty)">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Style="cursor: pointer;" @onclick="TogglePositionsExpandedAsync">
+                    <MudText Typo="Typo.h6">Open Positions</MudText>
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                        @_openPositions open
+                    </MudChip>
+                </MudStack>
+                <MudTooltip Text="@(_isPositionsExpanded ? "Collapse" : "Expand")">
+                    <MudIconButton Icon="@(_isPositionsExpanded ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)"
+                                   Size="Size.Small"
+                                   Color="Color.Default"
+                                   OnClick="TogglePositionsExpandedAsync"
+                                   aria-label="@(_isPositionsExpanded ? "Collapse Open Positions" : "Expand Open Positions")" />
+                </MudTooltip>
+            </MudStack>
+            <MudCollapse Expanded="_isPositionsExpanded">
             @if (_openPositions == 0)
             {
                 <MudText Typo="Typo.body2" Color="Color.Secondary">No open positions.</MudText>
@@ -497,7 +532,6 @@
                             }
                             else if (context is BrokerPositionVm brokerPos)
                             {
-                                var matchedSignal = FindMatchingSignal(brokerPos.Symbol);
                                 <MudTd>@brokerPos.Symbol</MudTd>
                                 <MudTd>
                                     <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
@@ -506,10 +540,10 @@
                                     </MudChip>
                                 </MudTd>
                                 <MudTd>
-                                    @if (!string.IsNullOrWhiteSpace(matchedSignal?.ChannelName))
+                                    @if (!string.IsNullOrWhiteSpace(brokerPos.ChannelName))
                                     {
                                         <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
-                                            @matchedSignal.ChannelName
+                                            @brokerPos.ChannelName
                                         </MudChip>
                                     }
                                     else
@@ -520,8 +554,8 @@
                                 <MudTd>@brokerPos.Quantity</MudTd>
                                 <MudTd>@brokerPos.AvgPrice.ToString("0.##")</MudTd>
                                 <MudTd>@brokerPos.LTP.ToString("0.##")</MudTd>
-                                <MudTd>@(matchedSignal?.StopLoss > 0 ? matchedSignal.StopLoss.ToString("0.##") : "-")</MudTd>
-                                <MudTd>@(matchedSignal?.Targets.Count > 0 ? matchedSignal.Targets[0].ToString("0.##") : "-")</MudTd>
+                                <MudTd>@(brokerPos.StopLoss > 0 ? brokerPos.StopLoss.ToString("0.##") : "-")</MudTd>
+                                <MudTd>@(brokerPos.Target1 > 0 ? brokerPos.Target1.ToString("0.##") : "-")</MudTd>
                                 <MudTd>
                                     <MudText Color="@(brokerPos.PnL >= 0 ? Color.Success : Color.Error)">
                                         @brokerPos.PnL.ToString("N2")
@@ -546,7 +580,7 @@
                     <MudStack Class="w-100">
                         @foreach (var position in DisplayPositions)
                         {
-                            <div class="position-card @(BookScope.IsPaper(position) ? "position-card--paper" : "position-card--live")">
+                            <div @key="@($"local_{position.Id}")" class="position-card @(BookScope.IsPaper(position) ? "position-card--paper" : "position-card--live")">
                                 <div class="watchlist-card-full d-flex justify-space-between align-center">
                                     <div class="watchlist-card-value" style="font-weight:600;">@position.Symbol</div>
                                     <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
@@ -605,8 +639,7 @@
                         }
                         @foreach (var bp in BrokerOnlyPositions)
                         {
-                            var matchedSignal = FindMatchingSignal(bp.Symbol);
-                            <div class="position-card position-card--live" style="border-left-color: var(--mud-palette-info);">
+                            <div @key="@($"broker_{bp.Symbol}")" class="position-card position-card--live" style="border-left-color: var(--mud-palette-info);">
                                 <div class="watchlist-card-full d-flex justify-space-between align-center">
                                     <div class="watchlist-card-value" style="font-weight:600;">@bp.Symbol</div>
                                     <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
@@ -618,10 +651,10 @@
                                 <div>
                                     <div class="watchlist-card-label">Channel</div>
                                     <div class="watchlist-card-value">
-                                        @if (!string.IsNullOrWhiteSpace(matchedSignal?.ChannelName))
+                                        @if (!string.IsNullOrWhiteSpace(bp.ChannelName))
                                         {
                                             <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
-                                                @matchedSignal.ChannelName
+                                                @bp.ChannelName
                                             </MudChip>
                                         }
                                         else
@@ -648,12 +681,12 @@
 
                                 <div>
                                     <div class="watchlist-card-label">SL</div>
-                                    <div class="watchlist-card-value">@(matchedSignal?.StopLoss > 0 ? matchedSignal.StopLoss.ToString("0.##") : "-")</div>
+                                    <div class="watchlist-card-value">@(bp.StopLoss > 0 ? bp.StopLoss.ToString("0.##") : "-")</div>
                                 </div>
 
                                 <div>
                                     <div class="watchlist-card-label">Target 1</div>
-                                    <div class="watchlist-card-value">@(matchedSignal?.Targets.Count > 0 ? matchedSignal.Targets[0].ToString("0.##") : "-")</div>
+                                    <div class="watchlist-card-value">@(bp.Target1 > 0 ? bp.Target1.ToString("0.##") : "-")</div>
                                 </div>
 
                                 <div class="watchlist-card-full">
@@ -677,6 +710,7 @@
                     </MudStack>
                 </div>
             }
+            </MudCollapse>
         </MudPaper>
     </MudItem>
 </MudGrid>
@@ -684,6 +718,9 @@
 @code {
     private HubConnection? _hub;
     private bool _disposed;
+    private bool _isLiveSignalsExpanded = true;
+    private bool _isWatchlistExpanded = true;
+    private bool _isPositionsExpanded = true;
     private List<TradingSignal> _signals = new();
     private List<TradingSignal> _watchlist = new();
     private List<NexusApp.Models.Position> _positions = new();
@@ -737,8 +774,17 @@
     /// Lightweight view-model for broker-terminal positions that have no local
     /// Position row (manual trades, carry-forward legs, non-NexusApp orders).
     /// </summary>
-    private sealed record BrokerPositionVm(
-        string Symbol, decimal Quantity, decimal AvgPrice, decimal LTP, decimal PnL);
+    private sealed class BrokerPositionVm
+    {
+        public string Symbol { get; set; } = string.Empty;
+        public decimal Quantity { get; set; }
+        public decimal AvgPrice { get; set; }
+        public decimal LTP { get; set; }
+        public decimal PnL { get; set; }
+        public string? ChannelName { get; set; }
+        public decimal StopLoss { get; set; }
+        public decimal Target1 { get; set; }
+    }
 
     /// <summary>
     /// Open positions from the broker position book, refreshed every 1s from the
@@ -746,6 +792,80 @@
     /// local DB position are shown (de-duplicated).
     /// </summary>
     private List<BrokerPositionVm> _brokerPositions = new();
+
+    private List<NexusApp.Models.Position> _cachedScopedPositions = new();
+    private List<BrokerPositionVm> _cachedBrokerOnlyPositions = new();
+    private List<object> _cachedCombinedPositions = new();
+    private int _openPositionsCount;
+
+    private void RebuildPositionViews()
+    {
+        _cachedScopedPositions = _pnlMode switch
+        {
+            PnlMode.Live => _positions.Where(BookScope.IsLive).ToList(),
+            PnlMode.Paper => _positions.Where(IsPaperPosition).ToList(),
+            _ => _positions.ToList()
+        };
+
+        if (_pnlMode == PnlMode.Paper)
+        {
+            _cachedBrokerOnlyPositions = [];
+        }
+        else
+        {
+            var openSymbols = _positions
+                .Where(p => p.ClosedAt == null)
+                .Select(p => p.Symbol)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            _cachedBrokerOnlyPositions = _brokerPositions
+                .Where(bp => !openSymbols.Contains(bp.Symbol))
+                .ToList();
+        }
+
+        var displayLocal = _cachedScopedPositions.Take(DisplayPositionLimit).Cast<object>();
+        _cachedCombinedPositions = displayLocal.Concat(_cachedBrokerOnlyPositions.Cast<object>()).ToList();
+        _openPositionsCount = _cachedScopedPositions.Count + _cachedBrokerOnlyPositions.Count;
+    }
+
+    private DateTime _lastTickRenderUtc = DateTime.MinValue;
+    private bool _renderPending;
+    private readonly Lock _renderGate = new();
+
+    /// <summary>
+    /// Throttles StateHasChanged dispatches from high-frequency tick streams (CmpTick,
+    /// BrokerPnlTick) to ~350ms so Blazor Server and the browser UI thread stay silky
+    /// smooth without lag or frame drops.
+    /// </summary>
+    private void RequestThrottledRender(int minIntervalMs = 350)
+    {
+        lock (_renderGate)
+        {
+            var elapsed = (DateTime.UtcNow - _lastTickRenderUtc).TotalMilliseconds;
+            if (elapsed >= minIntervalMs)
+            {
+                _lastTickRenderUtc = DateTime.UtcNow;
+                _renderPending = false;
+                _ = InvokeAsync(StateHasChanged);
+            }
+            else if (!_renderPending)
+            {
+                _renderPending = true;
+                var delay = Math.Max(50, minIntervalMs - (int)elapsed);
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(delay);
+                    if (_disposed) return;
+                    lock (_renderGate)
+                    {
+                        _lastTickRenderUtc = DateTime.UtcNow;
+                        _renderPending = false;
+                    }
+                    await InvokeAsync(StateHasChanged);
+                });
+            }
+        }
+    }
 
     private TradingSignal? FindMatchingSignal(string symbol)
     {
@@ -756,32 +876,20 @@
 
     private static bool IsPaperPosition(NexusApp.Models.Position p) => BookScope.IsPaper(p);
 
-    private IEnumerable<NexusApp.Models.Position> ScopedPositions => _pnlMode switch
-    {
-        PnlMode.Live => _positions.Where(BookScope.IsLive),
-        PnlMode.Paper => _positions.Where(IsPaperPosition),
-        _ => _positions
-    };
+    private IEnumerable<NexusApp.Models.Position> ScopedPositions => _cachedScopedPositions;
 
     /// <summary>
     /// Broker-only positions that have no matching local DB row. Paper mode
     /// never shows broker positions; Live and All modes do.
     /// </summary>
-    private IEnumerable<BrokerPositionVm> BrokerOnlyPositions => _pnlMode switch
-    {
-        PnlMode.Paper => Enumerable.Empty<BrokerPositionVm>(),
-        _ => _brokerPositions.Where(bp =>
-            !_positions.Any(p => p.ClosedAt == null &&
-                string.Equals(p.Symbol, bp.Symbol, StringComparison.OrdinalIgnoreCase)))
-    };
+    private IEnumerable<BrokerPositionVm> BrokerOnlyPositions => _cachedBrokerOnlyPositions;
 
     private IEnumerable<NexusApp.Models.Position> DisplayPositions =>
-        ScopedPositions.Take(DisplayPositionLimit);
+        _cachedScopedPositions.Take(DisplayPositionLimit);
 
-    private IEnumerable<object> CombinedPositions =>
-        DisplayPositions.Cast<object>().Concat(BrokerOnlyPositions.Cast<object>());
+    private IEnumerable<object> CombinedPositions => _cachedCombinedPositions;
 
-    private int _openPositions => ScopedPositions.Count() + BrokerOnlyPositions.Count();
+    private int _openPositions => _openPositionsCount;
 
     private int _executedToday => _pnlMode switch
     {
@@ -863,6 +971,7 @@
     private void OnPnlModeChanged(PnlMode mode)
     {
         _pnlMode = mode;
+        RebuildPositionViews();
         StateHasChanged();
     }
     // Default lots loaded from global settings (Settings page → "Default Lots per Order")
@@ -870,6 +979,11 @@
     // Pending order auto-cancel timeout (Settings page), used to project a
     // remaining-window staleness hint on still-actionable Live Signal rows.
     private int _pendingOrderTimeoutMinutes = 5;
+
+    // Price-offset fields loaded from Settings – only applied when > 0.
+    private decimal _entryPriceOffset = 0m;
+    private decimal _targetPriceOffset = 0m;
+    private decimal _stopLossBuffer = 0m;
 
     protected override async Task OnInitializedAsync()
     {
@@ -880,10 +994,22 @@
         if (!RendererInfo.IsInteractive)
             return;
 
+        var liveExp = await SettingsService.GetSettingAsync<bool?>("Dashboard.Grid.LiveSignals.Expanded");
+        if (liveExp.HasValue) _isLiveSignalsExpanded = liveExp.Value;
+        var watchExp = await SettingsService.GetSettingAsync<bool?>("Dashboard.Grid.Watchlist.Expanded");
+        if (watchExp.HasValue) _isWatchlistExpanded = watchExp.Value;
+        var posExp = await SettingsService.GetSettingAsync<bool?>("Dashboard.Grid.Positions.Expanded");
+        if (posExp.HasValue) _isPositionsExpanded = posExp.Value;
+
         var saved = await SettingsService.GetSettingAsync<int?>("DefaultQuantity");
         if (saved.HasValue && saved.Value > 0)
             _defaultLots = saved.Value;
         _pendingOrderTimeoutMinutes = await SettingsService.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
+
+        _entryPriceOffset  = await SettingsService.GetSettingAsync<decimal?>("EntryPriceOffset") ?? 0m;
+        _targetPriceOffset = await SettingsService.GetSettingAsync<decimal?>("TargetPriceOffset") ?? 0m;
+        _stopLossBuffer    = await SettingsService.GetSettingAsync<decimal?>("StopLossBuffer") ?? 0m;
+
         await LoadHiddenWatchlistIdsAsync();
 
         // Seed the live cards from the last broadcast health figures so the book
@@ -893,6 +1019,78 @@
 
         await RefreshAsync();
         await ConnectHubAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            try
+            {
+                var lsLive = await JS.InvokeAsync<string?>("localStorage.getItem", "Dashboard.Grid.LiveSignals.Expanded");
+                var lsWatch = await JS.InvokeAsync<string?>("localStorage.getItem", "Dashboard.Grid.Watchlist.Expanded");
+                var lsPos = await JS.InvokeAsync<string?>("localStorage.getItem", "Dashboard.Grid.Positions.Expanded");
+
+                bool changed = false;
+                if (bool.TryParse(lsLive, out var bLive) && bLive != _isLiveSignalsExpanded)
+                {
+                    _isLiveSignalsExpanded = bLive;
+                    changed = true;
+                }
+                if (bool.TryParse(lsWatch, out var bWatch) && bWatch != _isWatchlistExpanded)
+                {
+                    _isWatchlistExpanded = bWatch;
+                    changed = true;
+                }
+                if (bool.TryParse(lsPos, out var bPos) && bPos != _isPositionsExpanded)
+                {
+                    _isPositionsExpanded = bPos;
+                    changed = true;
+                }
+
+                if (changed)
+                {
+                    StateHasChanged();
+                }
+            }
+            catch
+            {
+                // Ignore JS interop errors if browser or circuit is disconnected
+            }
+        }
+    }
+
+    private async Task ToggleLiveSignalsExpandedAsync()
+    {
+        _isLiveSignalsExpanded = !_isLiveSignalsExpanded;
+        await SettingsService.SetSettingAsync("Dashboard.Grid.LiveSignals.Expanded", _isLiveSignalsExpanded);
+        try
+        {
+            await JS.InvokeVoidAsync("localStorage.setItem", "Dashboard.Grid.LiveSignals.Expanded", _isLiveSignalsExpanded ? "true" : "false");
+        }
+        catch { }
+    }
+
+    private async Task ToggleWatchlistExpandedAsync()
+    {
+        _isWatchlistExpanded = !_isWatchlistExpanded;
+        await SettingsService.SetSettingAsync("Dashboard.Grid.Watchlist.Expanded", _isWatchlistExpanded);
+        try
+        {
+            await JS.InvokeVoidAsync("localStorage.setItem", "Dashboard.Grid.Watchlist.Expanded", _isWatchlistExpanded ? "true" : "false");
+        }
+        catch { }
+    }
+
+    private async Task TogglePositionsExpandedAsync()
+    {
+        _isPositionsExpanded = !_isPositionsExpanded;
+        await SettingsService.SetSettingAsync("Dashboard.Grid.Positions.Expanded", _isPositionsExpanded);
+        try
+        {
+            await JS.InvokeVoidAsync("localStorage.setItem", "Dashboard.Grid.Positions.Expanded", _isPositionsExpanded ? "true" : "false");
+        }
+        catch { }
     }
 
     private void ApplyHealthSnapshot(NexusApp.Services.HealthSnapshot? snapshot)
@@ -920,8 +1118,23 @@
         if (snapshot.BrokerPositions is { Count: > 0 })
         {
             _brokerPositions = snapshot.BrokerPositions
-                .Select(bp => new BrokerPositionVm(bp.Symbol, bp.Quantity, bp.AveragePrice, bp.CurrentPrice, bp.UnrealizedPnL))
+                .Select(bp =>
+                {
+                    var matched = FindMatchingSignal(bp.Symbol);
+                    return new BrokerPositionVm
+                    {
+                        Symbol = bp.Symbol,
+                        Quantity = bp.Quantity,
+                        AvgPrice = bp.AveragePrice,
+                        LTP = bp.CurrentPrice,
+                        PnL = bp.UnrealizedPnL,
+                        ChannelName = matched?.ChannelName,
+                        StopLoss = matched?.StopLoss ?? 0m,
+                        Target1 = matched?.Targets.Count > 0 ? matched.Targets[0] : 0m
+                    };
+                })
                 .ToList();
+            RebuildPositionViews();
         }
 
         _mtmAtIst = snapshot.TimestampUtc.ToIst();
@@ -933,23 +1146,12 @@
         {
             _hub = HubFactory.Create(Nav);
 
-            _hub.On<JsonElement>("SignalReceived", async payload =>
+            _hub.On<JsonElement>("SignalReceived", async _ =>
             {
                 if (_disposed)
                     return;
 
-                await InvokeAsync(async () =>
-                {
-                    await RefreshAsync();
-
-                    var requiresManual = payload.ValueKind == JsonValueKind.Object &&
-                        TryGetProp(payload, out var requiresManualProp, "RequiresManualAction", "requiresManualAction") &&
-                        requiresManualProp.ValueKind == JsonValueKind.True;
-
-                    Snackbar.Add(requiresManual ? "New signal received — action required" : "New signal received (auto)", Severity.Info);
-                    await JS.InvokeVoidAsync("NexusApp.notify", "Trading Signal", "A new signal was parsed");
-                    await JS.InvokeVoidAsync("NexusApp.playSound", requiresManual ? "signal-manual" : "signal-auto");
-                });
+                await InvokeAsync(RefreshAsync);
             });
 
             _hub.On<JsonElement>("SignalStatusChanged", async _ =>
@@ -1016,6 +1218,7 @@
                         _liveUnrealizedTick = 0m;
                         _liveRealizedTick = 0m;
                         _brokerPositions = new();
+                        RebuildPositionViews();
                     }
 
                     // Read as DateTimeOffset: System.Text.Json returns Kind=Local for a
@@ -1058,7 +1261,7 @@
                         tsProp.TryGetDateTimeOffset(out var tsOffset))
                         _mtmAtIst = tsOffset.UtcDateTime.ToIst();
 
-                    StateHasChanged();
+                    RequestThrottledRender();
                 });
             });
 
@@ -1070,6 +1273,7 @@
                         return;
 
                     var changed = false;
+                    var now = DateTime.UtcNow;
                     foreach (var item in payload.EnumerateArray())
                     {
                         if (!TryGetProp(item, out var idProp, "SignalId", "signalId") ||
@@ -1090,8 +1294,11 @@
 
                         if (_cmpBySignal.TryGetValue(signalId, out var previous) && previous > 0 && previous != cmp)
                         {
-                            _cmpTickDirBySignal[signalId] = cmp > previous ? 1 : -1;
-                            _cmpTickAtBySignal[signalId] = DateTime.UtcNow;
+                            if (!_cmpTickAtBySignal.TryGetValue(signalId, out var lastBlinkAt) || (now - lastBlinkAt).TotalMilliseconds >= 700)
+                            {
+                                _cmpTickDirBySignal[signalId] = cmp > previous ? 1 : -1;
+                                _cmpTickAtBySignal[signalId] = now;
+                            }
                         }
 
                         _cmpBySignal[signalId] = cmp;
@@ -1106,12 +1313,16 @@
                                      p.ClosedAt == null &&
                                      string.Equals(p.Symbol, symbol, StringComparison.OrdinalIgnoreCase)))
                         {
-                            position.CurrentPrice = cmp;
-                            position.UnrealizedPnL = PnlCalculator.UnrealizedPnl(
-                                position.EntryPrice, cmp, position.Quantity);
-                            position.UnrealizedPnLPercentage = position.EntryPrice > 0
-                                ? position.UnrealizedPnL / (position.EntryPrice * position.Quantity) * 100m
-                                : 0m;
+                            if (position.CurrentPrice != cmp)
+                            {
+                                position.CurrentPrice = cmp;
+                                position.UnrealizedPnL = PnlCalculator.UnrealizedPnl(
+                                    position.EntryPrice, cmp, position.Quantity);
+                                position.UnrealizedPnLPercentage = position.EntryPrice > 0
+                                    ? position.UnrealizedPnL / (position.EntryPrice * position.Quantity) * 100m
+                                    : 0m;
+                                changed = true;
+                            }
                         }
 
                         changed = true;
@@ -1126,7 +1337,7 @@
                         if (_mtmAtIst.HasValue)
                             _mtmAtIst = DateTime.UtcNow.ToIst();
 
-                        StateHasChanged();
+                        RequestThrottledRender();
                     }
                 });
             });
@@ -1237,101 +1448,66 @@
 
         try
         {
-            var allRecent = await SignalService.GetRecentSignalsAsync(50);
             var todayIst = DateTime.UtcNow.ToIst().Date;
+            var todayStart = todayIst.IstToUtc();
+            var tomorrowStart = todayIst.AddDays(1).IstToUtc();
+
+            // ── Phase 1: fire independent queries in parallel ─────────────
+            // Each helper creates its own DbContext because EF contexts are not
+            // thread-safe. All queries are read-only so SQLite WAL mode allows
+            // full concurrency across readers.
+            var signalsTask   = SignalService.GetRecentSignalsAsync(50);
+            var positionsTask = QueryOpenPositionsAsync();
+            var watchTask     = QueryWatchlistSignalsAsync();
+            var realizedTask  = QueryRealizedPnLAsync(todayStart, tomorrowStart);
+            var executedTask  = QueryExecutedCountsAsync(todayStart, tomorrowStart);
+
+            await Task.WhenAll(signalsTask, positionsTask, watchTask, realizedTask, executedTask);
+
+            // ── Process Phase 1 results ───────────────────────────────────
+            var allRecent = await signalsTask;
             _signals = allRecent
                 .Where(s => s.ReceivedTimestamp.ToIst().Date == todayIst &&
                             s.Status != SignalStatus.Executed)
                 .Take(30)
                 .ToList();
-
             _todaySignals = allRecent.Count(s => s.ReceivedTimestamp.ToIst().Date == todayIst);
 
-            using var db = await DbFactory.CreateDbContextAsync();
-            // Load every open position, not a page of them: these rows are the single
-            // source of truth for the Open Positions and Unrealised P&L cards, and a
-            // capped list silently under-reported both. Only the table is paged.
-            _positions = await db.Positions.AsNoTracking()
-                .Include(p => p.Signal)
-                .Include(p => p.TradingAccount)
-                .Where(p => p.ClosedAt == null)
-                .OrderByDescending(p => p.OpenedAt)
-                .ToListAsync();
-            var watch = await db.TradingSignals.AsNoTracking()
-                .Where(s => s.Status == SignalStatus.Pending || s.Status == SignalStatus.Executed)
-                .OrderByDescending(s => s.ProcessedTimestamp)
-                .Take(20)
-                .ToListAsync();
+            _positions = await positionsTask;
+
+            var watch = await watchTask;
             _watchlist = watch
                 .Where(s => !_hiddenWatchlistSignalIds.Contains(s.Id))
                 .ToList();
 
-            var watchSignalIds = _watchlist.Select(s => s.Id).ToList();
-            _exitBySignal.Clear();
-            if (watchSignalIds.Count > 0)
-            {
-                var closedPositions = await db.Positions.AsNoTracking()
-                    .Where(p => watchSignalIds.Contains(p.SignalId) && p.ClosedAt != null && p.ClosingPrice != null)
-                    .OrderByDescending(p => p.ClosedAt)
-                    .ToListAsync();
+            var (realizedPaper, realizedLive) = await realizedTask;
+            _realizedPaper = realizedPaper;
+            _realizedLive  = realizedLive;
 
-                foreach (var position in closedPositions)
-                    _exitBySignal.TryAdd(position.SignalId, position.ClosingPrice!.Value);
-            }
+            var (exPaper, exLive, exAll) = await executedTask;
+            _executedPaper = exPaper;
+            _executedLive  = exLive;
+            _executedAll   = exAll;
 
-            // A signal only records that it failed, never why: the broker/engine message
-            // lives on the order it produced. Pull the newest error text per signal so the
-            // status chip can explain the failure in a tooltip.
+            // ── Phase 2: dependent queries in parallel ────────────────────
+            var watchSignalIds  = _watchlist.Select(s => s.Id).ToList();
             var statusSignalIds = _signals.Select(s => s.Id).Concat(watchSignalIds).Distinct().ToList();
+
+            var exitTask    = QueryExitPricesAsync(watchSignalIds);
+            var failureTask = QueryFailureReasonsAsync(statusSignalIds);
+
+            await Task.WhenAll(exitTask, failureTask);
+
+            _exitBySignal.Clear();
+            foreach (var (signalId, price) in await exitTask)
+                _exitBySignal.TryAdd(signalId, price);
+
             _failureReasonBySignal.Clear();
-            if (statusSignalIds.Count > 0)
-            {
-                var failedOrders = await db.Orders.AsNoTracking()
-                    .Where(o => statusSignalIds.Contains(o.SignalId) &&
-                                (o.Status == OrderStatus.Failed || o.Status == OrderStatus.Rejected) &&
-                                o.ErrorMessage != null && o.ErrorMessage != "")
-                    .OrderByDescending(o => o.CreatedAt)
-                    .Select(o => new { o.SignalId, o.ErrorMessage })
-                    .ToListAsync();
-
-                foreach (var order in failedOrders)
-                    _failureReasonBySignal.TryAdd(order.SignalId, order.ErrorMessage!);
-            }
-
-            // Realised P&L is reported for the IST trading day, so the window is the
-            // IST midnight boundary expressed in UTC (the storage timezone).
-            var todayStart = todayIst.IstToUtc();
-            var tomorrowStart = todayIst.AddDays(1).IstToUtc();
-            var realizedByBook = await db.Positions
-                .Where(p => p.ClosedAt >= todayStart && p.ClosedAt < tomorrowStart)
-                .GroupBy(p => EF.Functions.Like(p.TradingAccount.ClientId, BookScope.PaperClientId))
-                .Select(g => new { IsPaper = g.Key, Total = g.Sum(p => p.RealizedPnL ?? 0m) })
-                .ToListAsync();
-            _realizedPaper = realizedByBook.Where(r => r.IsPaper).Sum(r => r.Total);
-            _realizedLive = realizedByBook.Where(r => !r.IsPaper).Sum(r => r.Total);
-
-            // "Executed today" counts distinct signals that actually traded, not order
-            // fills: one signal produces an entry order and an exit order, which would
-            // otherwise double the figure. Order is also the only entity that identifies
-            // which book it traded on.
-            var executedSignals = await db.Orders
-                .Where(o => o.Status == OrderStatus.Executed &&
-                            o.ExecutedAt >= todayStart && o.ExecutedAt < tomorrowStart)
-                .Select(o => new
-                {
-                    IsPaper = EF.Functions.Like(o.TradingAccount.ClientId, BookScope.PaperClientId),
-                    o.SignalId
-                })
-                .Distinct()
-                .ToListAsync();
-
-            _executedPaper = executedSignals.Count(x => x.IsPaper);
-            _executedLive = executedSignals.Count(x => !x.IsPaper);
-            // A signal traded on both books yields one row per book above, so the combined
-            // figure must be a distinct count rather than live + paper.
-            _executedAll = executedSignals.Select(x => x.SignalId).Distinct().Count();
+            foreach (var (signalId, message) in await failureTask)
+                _failureReasonBySignal.TryAdd(signalId, message);
 
             SyncEdits();
+            RebuildPositionViews();
             _refreshError = null;
             StateHasChanged();
         }
@@ -1350,6 +1526,108 @@
             StateHasChanged();
         }
     }
+
+    // ── RefreshAsync helper queries ───────────────────────────────────────
+    // Each creates its own DbContext so they can execute concurrently.
+
+    private async Task<List<NexusApp.Models.Position>> QueryOpenPositionsAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        return await db.Positions.AsNoTracking()
+            .Include(p => p.Signal)
+            .Include(p => p.TradingAccount)
+            .Where(p => p.ClosedAt == null)
+            .OrderByDescending(p => p.OpenedAt)
+            .ToListAsync();
+    }
+
+    private async Task<List<TradingSignal>> QueryWatchlistSignalsAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        return await db.TradingSignals.AsNoTracking()
+            .Where(s => s.Status == SignalStatus.Pending || s.Status == SignalStatus.Executed)
+            .OrderByDescending(s => s.ProcessedTimestamp)
+            .Take(20)
+            .ToListAsync();
+    }
+
+    private async Task<(decimal Paper, decimal Live)> QueryRealizedPnLAsync(
+        DateTime todayStart, DateTime tomorrowStart)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var realizedByBook = await db.Positions
+            .Where(p => p.ClosedAt >= todayStart && p.ClosedAt < tomorrowStart)
+            .GroupBy(p => EF.Functions.Like(p.TradingAccount.ClientId, BookScope.PaperClientId))
+            .Select(g => new { IsPaper = g.Key, Total = g.Sum(p => p.RealizedPnL ?? 0m) })
+            .ToListAsync();
+        return (realizedByBook.Where(r => r.IsPaper).Sum(r => r.Total),
+                realizedByBook.Where(r => !r.IsPaper).Sum(r => r.Total));
+    }
+
+    private async Task<(int Paper, int Live, int All)> QueryExecutedCountsAsync(
+        DateTime todayStart, DateTime tomorrowStart)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var executedSignals = await db.Orders
+            .Where(o => o.Status == OrderStatus.Executed &&
+                        o.ExecutedAt >= todayStart && o.ExecutedAt < tomorrowStart)
+            .Select(o => new
+            {
+                IsPaper = EF.Functions.Like(o.TradingAccount.ClientId, BookScope.PaperClientId),
+                o.SignalId
+            })
+            .Distinct()
+            .ToListAsync();
+        return (executedSignals.Count(x => x.IsPaper),
+                executedSignals.Count(x => !x.IsPaper),
+                executedSignals.Select(x => x.SignalId).Distinct().Count());
+    }
+
+    private async Task<List<(int SignalId, decimal Price)>> QueryExitPricesAsync(List<int> watchSignalIds)
+    {
+        if (watchSignalIds.Count == 0)
+            return [];
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var closedPositions = await db.Positions.AsNoTracking()
+            .Where(p => watchSignalIds.Contains(p.SignalId) && p.ClosedAt != null && p.ClosingPrice != null)
+            .OrderByDescending(p => p.ClosedAt)
+            .ToListAsync();
+
+        var result = new List<(int, decimal)>();
+        var seen = new HashSet<int>();
+        foreach (var p in closedPositions)
+        {
+            if (seen.Add(p.SignalId))
+                result.Add((p.SignalId, p.ClosingPrice!.Value));
+        }
+        return result;
+    }
+
+    private async Task<List<(int SignalId, string Message)>> QueryFailureReasonsAsync(List<int> statusSignalIds)
+    {
+        if (statusSignalIds.Count == 0)
+            return [];
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var failedOrders = await db.Orders.AsNoTracking()
+            .Where(o => statusSignalIds.Contains(o.SignalId) &&
+                        (o.Status == OrderStatus.Failed || o.Status == OrderStatus.Rejected) &&
+                        o.ErrorMessage != null && o.ErrorMessage != "")
+            .OrderByDescending(o => o.CreatedAt)
+            .Select(o => new { o.SignalId, o.ErrorMessage })
+            .ToListAsync();
+
+        var result = new List<(int, string)>();
+        var seen = new HashSet<int>();
+        foreach (var order in failedOrders)
+        {
+            if (seen.Add(order.SignalId))
+                result.Add((order.SignalId, order.ErrorMessage!));
+        }
+        return result;
+    }
+
 
     private Color StatusColor(SignalStatus s) => s switch
     {
@@ -1549,7 +1827,9 @@
             arr.ValueKind != JsonValueKind.Array)
             return;
 
-        var list = new List<BrokerPositionVm>();
+        var changed = false;
+        var incomingSymbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var item in arr.EnumerateArray())
         {
             if (!TryGetProp(item, out var symProp, "Symbol", "symbol") ||
@@ -1560,15 +1840,50 @@
             if (string.IsNullOrWhiteSpace(symbol))
                 continue;
 
+            incomingSymbols.Add(symbol);
             TryGetDecimal(TryGetPropValue(item, "Quantity", "quantity"), out var qty);
             TryGetDecimal(TryGetPropValue(item, "AvgPrice", "avgPrice"), out var avgPrice);
             TryGetDecimal(TryGetPropValue(item, "LTP", "ltp"), out var ltp);
             TryGetDecimal(TryGetPropValue(item, "PnL", "pnL", "pnl"), out var pnl);
 
-            list.Add(new BrokerPositionVm(symbol, qty, avgPrice, ltp, pnl));
+            var existing = _brokerPositions.FirstOrDefault(bp => string.Equals(bp.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+            {
+                var matched = FindMatchingSignal(symbol);
+                _brokerPositions.Add(new BrokerPositionVm
+                {
+                    Symbol = symbol,
+                    Quantity = qty,
+                    AvgPrice = avgPrice,
+                    LTP = ltp,
+                    PnL = pnl,
+                    ChannelName = matched?.ChannelName,
+                    StopLoss = matched?.StopLoss ?? 0m,
+                    Target1 = matched?.Targets.Count > 0 ? matched.Targets[0] : 0m
+                });
+                changed = true;
+            }
+            else
+            {
+                if (existing.Quantity != qty || existing.AvgPrice != avgPrice || existing.LTP != ltp || existing.PnL != pnl)
+                {
+                    existing.Quantity = qty;
+                    existing.AvgPrice = avgPrice;
+                    existing.LTP = ltp;
+                    existing.PnL = pnl;
+                    changed = true;
+                }
+            }
         }
 
-        _brokerPositions = list;
+        var removed = _brokerPositions.RemoveAll(bp => !incomingSymbols.Contains(bp.Symbol));
+        if (removed > 0)
+            changed = true;
+
+        if (changed)
+        {
+            RebuildPositionViews();
+        }
     }
 
     /// <summary>
@@ -1603,8 +1918,12 @@
         {
             edit = new SignalEditModel
             {
-                EntryPrice  = Math.Max(0, signal.EntryPrice - 10),
-                StopLoss    = Math.Max(0, signal.StopLoss - 50),
+                EntryPrice  = _entryPriceOffset > 0 && signal.Action == SignalAction.Buy
+                                  ? Math.Max(0.05m, signal.EntryPrice - _entryPriceOffset)
+                                  : signal.EntryPrice,
+                StopLoss    = _stopLossBuffer > 0 && signal.StopLoss > 0
+                                  ? Math.Max(0.05m, signal.StopLoss - _stopLossBuffer)
+                                  : signal.StopLoss,
                 TargetsText = BuildDefaultTargetText(signal),
                 Lots        = _defaultLots
             };
@@ -1804,10 +2123,12 @@
     private static (string Text, Color Color)? ToTuple(SignalStalenessInfo? info) =>
         info is { } i ? (i.Text, i.Color) : null;
 
-    private static string BuildDefaultTargetText(TradingSignal signal)
+    private string BuildDefaultTargetText(TradingSignal signal)
     {
         var firstTarget = signal.Targets.Count > 0 ? signal.Targets[0] : signal.EntryPrice;
-        var adjusted = Math.Max(0, firstTarget - 10);
+        var adjusted = _targetPriceOffset > 0
+            ? Math.Max(0.05m, firstTarget - _targetPriceOffset)
+            : firstTarget;
         return adjusted.ToString("0.##", CultureInfo.InvariantCulture);
     }
 
@@ -1864,7 +2185,7 @@
             return string.Empty;
         if (!_cmpTickAtBySignal.TryGetValue(signal.Id, out var at))
             return string.Empty;
-        if ((DateTime.UtcNow - at) > TimeSpan.FromSeconds(2))
+        if ((DateTime.UtcNow - at).TotalMilliseconds > 1200)
             return string.Empty;
         return dir > 0 ? "cmp-blink-up" : "cmp-blink-down";
     }

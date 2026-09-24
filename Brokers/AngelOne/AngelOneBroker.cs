@@ -24,6 +24,8 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
     private readonly AngelOneWebSocketClient? _webSocket = webSocket;
     private bool _isConnected = false;
     private readonly ConcurrentDictionary<string, CachedInstrument> _instrumentCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTime> _notFoundCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan NotFoundCooldown = TimeSpan.FromMinutes(10);
 
     public string BrokerName => "AngelOne";
     
@@ -84,6 +86,22 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
 
     public async Task<BrokerInstrument?> SearchInstrumentAsync(string symbol)
     {
+        if (string.IsNullOrWhiteSpace(symbol))
+            return null;
+
+        // 1. Check if contract is an expired option — don't hit the broker for past contracts.
+        if (ContractExpiryHelper.IsExpiredOptionSymbol(symbol))
+        {
+            _logger.LogDebug("Skipping SearchScrip for {Symbol} because the option contract has expired", symbol);
+            return null;
+        }
+
+        // 2. Negative cache cooldown: do not hammer /searchScrip if this symbol was recently not found.
+        if (_notFoundCache.TryGetValue(symbol, out var cooldownUntil) && DateTime.UtcNow < cooldownUntil)
+        {
+            return null;
+        }
+
         try
         {
             // The exchange must be derived from the symbol, not hard-coded: searching an
@@ -95,7 +113,10 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             // Angel One SearchScrip: exchange + searchscrip
             var result = await _apiClient.SearchScripAsync(searchExchange, symbol);
             if (result == null)
+            {
+                _notFoundCache[symbol] = DateTime.UtcNow.Add(NotFoundCooldown);
                 return null;
+            }
 
             var instrument = new BrokerInstrument
             {
@@ -153,12 +174,17 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
                     _instrumentCache[symbol] = cached;
                     _instrumentCache[NormalizeKey(instrument.Symbol)] = cached;
                     _instrumentCache[NormalizeKey(symbol)] = cached;
+                    _notFoundCache.TryRemove(symbol, out _);
+                    _notFoundCache.TryRemove(instrument.Symbol, out _);
                 }
             }
 
             if (string.IsNullOrWhiteSpace(instrument.SymbolToken))
             {
-                _logger.LogWarning("SearchScrip returned without symbol token for {Symbol}", symbol);
+                _notFoundCache[symbol] = DateTime.UtcNow.Add(NotFoundCooldown);
+                _notFoundCache[NormalizeKey(symbol)] = DateTime.UtcNow.Add(NotFoundCooldown);
+                _logger.LogWarning("SearchScrip returned without symbol token for {Symbol}; cooled down for {Minutes}m",
+                    symbol, NotFoundCooldown.TotalMinutes);
                 return null;
             }
 
@@ -167,6 +193,7 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
         }
         catch (Exception ex)
         {
+            _notFoundCache[symbol] = DateTime.UtcNow.Add(NotFoundCooldown);
             _logger.LogError(ex, "Error searching instrument: {Symbol}", symbol);
             return null;
         }
@@ -214,7 +241,9 @@ public class AngelOneBroker(AngelOneApiClient apiClient, ILogger<AngelOneBroker>
             }
 
             // 3. Last resort: hit /searchScrip once (may 403 — swallow silently).
-            if (string.IsNullOrWhiteSpace(token))
+            if (string.IsNullOrWhiteSpace(token) &&
+                !ContractExpiryHelper.IsExpiredOptionSymbol(symbol) &&
+                (!_notFoundCache.TryGetValue(symbol, out var cd) || DateTime.UtcNow >= cd))
             {
                 try
                 {

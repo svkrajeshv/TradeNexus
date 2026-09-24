@@ -418,6 +418,9 @@ public sealed class CmpStreamingService(
     // state on restart fails safe (the signal simply does not fire).
     private readonly ConcurrentDictionary<int, byte> _entryArmedSignals = new();
 
+    // Throttles BrokerPnlTick broadcasts to 1s intervals instead of the 250ms WS cadence.
+    private DateTime _lastBrokerPnlBroadcastUtc = DateTime.MinValue;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("CMP streaming service started (Angel SmartStream WS, cadence {Seconds}s)", Cadence.TotalSeconds);
@@ -588,31 +591,35 @@ public sealed class CmpStreamingService(
                     await _hub.Clients.All.SendAsync("CmpTick", ticks, stoppingToken);
                 }
 
-                // Push live broker P&L and open positions on every 1s CMP tick so the
-                // Dashboard stat cards and Open Positions grid update continuously,
-                // without waiting for the 10s HealthTick cadence.
-                var livePnl = brokerPnlTracker.TryGetLivePnl();
-                if (livePnl is { } pnl)
+                // Push live broker P&L and open positions at 1s cadence so the
+                // Dashboard stat cards and Open Positions grid update smoothly,
+                // without flooding clients on every 250ms WS tick.
+                if (nowUtc - _lastBrokerPnlBroadcastUtc >= TimeSpan.FromSeconds(1))
                 {
-                    var brokerOpenPositions = brokerPnlTracker.GetOpenPositions()
-                        .Select(p => new
-                        {
-                            p.Symbol,
-                            p.Quantity,
-                            AvgPrice = p.AveragePrice,
-                            LTP = p.CurrentPrice,
-                            PnL = p.UnrealizedPnL
-                        })
-                        .ToList();
-
-                    await _hub.Clients.All.SendAsync("BrokerPnlTick", new
+                    _lastBrokerPnlBroadcastUtc = nowUtc;
+                    var livePnl = brokerPnlTracker.TryGetLivePnl();
+                    if (livePnl is { } pnl)
                     {
-                        LiveUnrealized = pnl.Unrealized,
-                        LiveRealized = pnl.Realized,
-                        OpenCount = pnl.OpenCount,
-                        Positions = brokerOpenPositions,
-                        Timestamp = DateTime.UtcNow
-                    }, stoppingToken);
+                        var brokerOpenPositions = brokerPnlTracker.GetOpenPositions()
+                            .Select(p => new
+                            {
+                                p.Symbol,
+                                p.Quantity,
+                                AvgPrice = p.AveragePrice,
+                                LTP = p.CurrentPrice,
+                                PnL = p.UnrealizedPnL
+                            })
+                            .ToList();
+
+                        await _hub.Clients.All.SendAsync("BrokerPnlTick", new
+                        {
+                            LiveUnrealized = pnl.Unrealized,
+                            LiveRealized = pnl.Realized,
+                            OpenCount = pnl.OpenCount,
+                            Positions = brokerOpenPositions,
+                            Timestamp = nowUtc
+                        }, stoppingToken);
+                    }
                 }
 
                 // --- Entry Price Crossing Trigger ---

@@ -23,18 +23,50 @@
     /* Book differentiation, matching the Dashboard's Open Positions accent so Live
        (real money) vs Paper (simulated) is instantly recognizable across screens. */
     .book-badge {
-        font-size: 0.62rem !important;
-        height: 20px !important;
+        font-size: 0.6rem !important;
+        height: 18px !important;
         font-weight: 700 !important;
         letter-spacing: 0.3px;
+        padding: 0 4px !important;
     }
     .position-row--live {
-        border-left: 4px solid var(--mud-palette-success);
+        border-left: 3px solid var(--mud-palette-success);
         background-color: rgba(76, 175, 80, 0.05);
     }
     .position-row--paper {
-        border-left: 4px solid var(--mud-palette-tertiary, #9c27b0);
+        border-left: 3px solid var(--mud-palette-tertiary, #9c27b0);
         background-color: rgba(156, 39, 176, 0.04);
+    }
+
+    /* Ultra-compact positions grid styles */
+    .positions-compact-table th,
+    .positions-compact-table td {
+        padding: 4px 6px !important;
+        font-size: 0.8rem !important;
+    }
+    .positions-compact-table th {
+        font-size: 0.72rem !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.3px;
+        color: var(--mud-palette-text-secondary);
+    }
+    .positions-compact-table .mud-table-sort-label {
+        font-size: 0.72rem !important;
+        font-weight: 700 !important;
+    }
+    .positions-compact-table .mud-table-cell-checkbox {
+        padding: 2px 2px !important;
+        width: 32px !important;
+    }
+    .positions-compact-table .mud-checkbox {
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    .channel-monogram {
+        width: 22px !important;
+        height: 22px !important;
+        font-size: 0.62rem !important;
+        font-weight: 700 !important;
     }
 </style>
 
@@ -91,52 +123,52 @@
     <MudTable Items="FilteredPositions" MultiSelection="true" @bind-SelectedItems="_selectedPositions"
               HorizontalScrollbar="true" Dense="true" Hover="true" Striped="true"
               GroupBy="_groupDefinition" GroupHeaderStyle="background-color:var(--mud-palette-background-grey)"
-              RowClassFunc="@GetPositionRowClass">
+              RowClassFunc="@GetPositionRowClass"
+              Class="positions-compact-table">
         <ColGroup>
-            <col style="width:40px;" />
+            <col style="width:32px;" />
+            <col style="width:96px;" />
+            <col style="width:96px;" />
+            <col style="width:58px;" />
+            <col style="width:42px;" />
+            <col style="width:150px;" />
+            <col style="width:48px;" />
+            <col style="width:60px;" />
+            <col style="width:70px;" />
+            <col style="width:74px;" />
+            <col style="width:58px;" />
+            <col style="width:64px;" />
         </ColGroup>
         <HeaderContent>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null)">Status</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => BookScope.IsPaper(p))">Book</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel InitialDirection="SortDirection.Descending" SortBy="new Func<NexusApp.Models.Position, object>(p => p.OpenedAt)">Entry Time</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt ?? DateTime.MinValue)">Exit Time</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Signal?.ChannelName ?? string.Empty)">Channel</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Symbol)">Symbol</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Quantity)">Qty</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.EntryPrice)">Entry</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.CurrentPrice : (p.ClosingPrice ?? 0m))">LTP/Exit</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.StopLoss ?? 0m)">SL</MudTableSortLabel></MudTh>
-            <MudTh>Targets</MudTh>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.UnrealizedPnL : (p.RealizedPnL ?? 0m))">P&amp;L</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.UnrealizedPnLPercentage : 0m)">P&amp;L %</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;"><MudTableSortLabel InitialDirection="SortDirection.Descending" SortBy="new Func<NexusApp.Models.Position, object>(p => p.OpenedAt)">Entry Time</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;"><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt ?? DateTime.MinValue)">Exit Time</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;"><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => BookScope.IsPaper(p))">Book</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;"><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Signal?.ChannelName ?? string.Empty)">Channel</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;"><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Symbol)">Symbol</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;"><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.Quantity)">Qty</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;"><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.EntryPrice)">Entry</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;"><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.CurrentPrice : (p.ClosingPrice ?? 0m))">LTP/Exit</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;"><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.ClosedAt == null ? p.UnrealizedPnL : (p.RealizedPnL ?? 0m))">P&amp;L</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;"><MudTableSortLabel SortBy="new Func<NexusApp.Models.Position, object>(p => p.StopLoss ?? 0m)">SL</MudTableSortLabel></MudTh>
+            <MudTh Style="white-space:nowrap;">Targets</MudTh>
         </HeaderContent>
         <GroupHeaderTemplate>
-            <MudTh Class="mud-table-cell-custom-group" colspan="13">
+            <MudTh Class="mud-table-cell-custom-group" colspan="12">
                 <MudText Typo="Typo.subtitle2"><b>@context.Key</b> (@context.Items.Count())</MudText>
             </MudTh>
         </GroupHeaderTemplate>
         <RowTemplate>
-            <MudTd DataLabel="Status">
-                @if (context.ClosedAt == null)
-                {
-                    <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Filled">Open</MudChip>
-                }
-                else
-                {
-                    <MudChip T="string" Size="Size.Small" Color="Color.Default" Variant="Variant.Outlined">Closed</MudChip>
-                }
+            <MudTd DataLabel="Entry Time" Style="white-space:nowrap;">
+                @context.OpenedAt.ToIstString("hh:mm:ss tt")
+            </MudTd>
+            <MudTd DataLabel="Exit Time" Style="white-space:nowrap;">
+                @(context.ClosedAt.HasValue ? context.ClosedAt.Value.ToIstString("hh:mm:ss tt") : "-")
             </MudTd>
             <MudTd DataLabel="Book">
                 <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Class="book-badge"
                          Color="@(BookScope.IsPaper(context) ? Color.Tertiary : Color.Success)">
                     @(BookScope.IsPaper(context) ? "PAPER" : "LIVE")
                 </MudChip>
-            </MudTd>
-            <MudTd DataLabel="Entry Time">
-                @context.OpenedAt.ToIstString("hh:mm:ss tt")
-            </MudTd>
-            <MudTd DataLabel="Exit Time">
-                @(context.ClosedAt.HasValue ? context.ClosedAt.Value.ToIstString("hh:mm:ss tt") : "-")
             </MudTd>
             <MudTd DataLabel="Channel">
                 @if (!string.IsNullOrWhiteSpace(context.Signal?.ChannelName))
@@ -152,23 +184,20 @@
                     <MudText Typo="Typo.caption" Color="Color.Secondary">-</MudText>
                 }
             </MudTd>
-            <MudTd DataLabel="Symbol">@context.Symbol</MudTd>
+            <MudTd DataLabel="Symbol" Style="white-space:nowrap; font-weight:500;">@context.Symbol</MudTd>
             <MudTd DataLabel="Qty">@context.Quantity</MudTd>
             <MudTd DataLabel="Entry">@context.EntryPrice</MudTd>
             <MudTd DataLabel="LTP/Exit">
                 @(context.ClosedAt == null ? context.CurrentPrice.ToString("N2") : (context.ClosingPrice?.ToString("N2") ?? "-"))
             </MudTd>
-            <MudTd DataLabel="SL">@(context.StopLoss?.ToString() ?? "-")</MudTd>
-            <MudTd DataLabel="Targets">@(context.Targets.Count > 0 ? context.Targets[0].ToString() : "-")</MudTd>
-            <MudTd DataLabel="P&L">
+            <MudTd DataLabel="P&L" Style="white-space:nowrap;">
                 @{
                     var pnl = context.ClosedAt == null ? context.UnrealizedPnL : (context.RealizedPnL ?? 0);
                 }
-                <MudText Color="@(pnl >= 0 ? Color.Success : Color.Error)">@pnl.ToString("N2")</MudText>
+                <MudText Color="@(pnl >= 0 ? Color.Success : Color.Error)" Style="font-weight:600;">@pnl.ToString("N2")</MudText>
             </MudTd>
-            <MudTd DataLabel="P&L %">
-                @(context.ClosedAt == null ? context.UnrealizedPnLPercentage.ToString("N2") + "%" : "-")
-            </MudTd>
+            <MudTd DataLabel="SL">@(context.StopLoss?.ToString() ?? "-")</MudTd>
+            <MudTd DataLabel="Targets">@(context.Targets.Count > 0 ? context.Targets[0].ToString() : "-")</MudTd>
         </RowTemplate>
     </MudTable>
 </MudPaper>

@@ -443,6 +443,23 @@ public sealed class OrderSyncService(
 
                     using var scope = _services.CreateScope();
                     var riskProfileService = scope.ServiceProvider.GetService<IIndexRiskProfileService>();
+                    var overrideSlPts = riskProfileService != null
+                        ? await riskProfileService.GetOverrideSlPointsAsync(signal?.Index)
+                        : 0m;
+
+                    if (overrideSlPts > 0 && fillPrice > 0)
+                    {
+                        var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                        slValue = isBuy ? Math.Max(0.05m, fillPrice - overrideSlPts) : fillPrice + overrideSlPts;
+                    }
+                    else if ((slValue is null || slValue <= 0) && fillPrice > 0)
+                    {
+                        var profile = riskProfileService != null ? await riskProfileService.GetProfileAsync(signal?.Index) : null;
+                        var defSlPts = profile is { DefaultSlPoints: > 0 } ? profile.DefaultSlPoints : 50m;
+                        var isBuy = signal is null || signal.Action == SignalAction.Buy;
+                        slValue = isBuy ? Math.Max(0.05m, fillPrice - defSlPts) : fillPrice + defSlPts;
+                    }
+
                     var overridePts = riskProfileService != null
                         ? await riskProfileService.GetOverrideTargetPointsAsync(signal?.Index)
                         : 0m;

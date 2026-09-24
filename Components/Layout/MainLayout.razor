@@ -155,9 +155,78 @@
                 try { await JS.InvokeVoidAsync("NexusApp.playSound", sound); } catch { }
             });
 
+            // New trading signal parsed & received from Telegram
+            _hub.On<JsonElement>("SignalReceived", async payload =>
+            {
+                var (requiresManual, channel, description) = ParseSignalReceived(payload);
+
+                var channelBadge = !string.IsNullOrWhiteSpace(channel) ? $"[{channel}] " : "";
+                var alertText = requiresManual
+                    ? $"{channelBadge}{description} — action required"
+                    : $"{channelBadge}{description} (auto)";
+
+                await InvokeAsync(() =>
+                {
+                    Snackbar.Add(alertText, Severity.Info);
+                });
+
+                var notifTitle = !string.IsNullOrWhiteSpace(channel)
+                    ? $"Signal: {channel}"
+                    : "Trading Signal";
+
+                try { await JS.InvokeVoidAsync("NexusApp.notify", notifTitle, $"{description} ({(requiresManual ? "action required" : "auto")})"); } catch { }
+                try { await JS.InvokeVoidAsync("NexusApp.playSound", requiresManual ? "signal-manual" : "signal-auto"); } catch { }
+            });
+
             await _hub.StartAsync();
         }
         catch { /* hub is best-effort */ }
+    }
+
+    private static (bool RequiresManual, string Channel, string Description) ParseSignalReceived(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object)
+            return (false, string.Empty, "New signal received");
+
+        string Get(string name1, string name2)
+        {
+            if (payload.TryGetProperty(name1, out var v) || payload.TryGetProperty(name2, out v))
+            {
+                return v.ValueKind switch
+                {
+                    JsonValueKind.String => v.GetString() ?? string.Empty,
+                    JsonValueKind.Number => v.ToString(),
+                    _ => v.ToString()
+                };
+            }
+            return string.Empty;
+        }
+
+        var requiresManual = false;
+        if (payload.TryGetProperty("RequiresManualAction", out var rm) || payload.TryGetProperty("requiresManualAction", out rm))
+        {
+            requiresManual = rm.ValueKind == JsonValueKind.True;
+        }
+
+        var channel = Get("ChannelName", "channelName");
+        var actionRaw = Get("Action", "action");
+        var index = Get("Index", "index");
+        var strike = Get("Strike", "strike");
+        var optType = Get("OptionType", "optionType");
+        var entry = Get("EntryPrice", "entryPrice");
+
+        var action = actionRaw switch
+        {
+            "0" => "BUY",
+            "1" => "SELL",
+            _ => actionRaw.ToUpperInvariant()
+        };
+
+        var desc = !string.IsNullOrWhiteSpace(index)
+            ? $"{action} {index} {strike} {optType} @ {entry}".Trim()
+            : "New signal received";
+
+        return (requiresManual, channel, desc);
     }
 
     private static (string Kind, string Title, string Body) ParseNotification(JsonElement payload)
