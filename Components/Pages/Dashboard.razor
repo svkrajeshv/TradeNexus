@@ -980,6 +980,11 @@
     // remaining-window staleness hint on still-actionable Live Signal rows.
     private int _pendingOrderTimeoutMinutes = 5;
 
+    // Price-offset fields loaded from Settings – only applied when > 0.
+    private decimal _entryPriceOffset = 0m;
+    private decimal _targetPriceOffset = 0m;
+    private decimal _stopLossBuffer = 0m;
+
     protected override async Task OnInitializedAsync()
     {
         // Only run for the interactive pass. With prerender enabled this component is
@@ -1000,6 +1005,11 @@
         if (saved.HasValue && saved.Value > 0)
             _defaultLots = saved.Value;
         _pendingOrderTimeoutMinutes = await SettingsService.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
+
+        _entryPriceOffset  = await SettingsService.GetSettingAsync<decimal?>("EntryPriceOffset") ?? 0m;
+        _targetPriceOffset = await SettingsService.GetSettingAsync<decimal?>("TargetPriceOffset") ?? 0m;
+        _stopLossBuffer    = await SettingsService.GetSettingAsync<decimal?>("StopLossBuffer") ?? 0m;
+
         await LoadHiddenWatchlistIdsAsync();
 
         // Seed the live cards from the last broadcast health figures so the book
@@ -1842,8 +1852,12 @@
         {
             edit = new SignalEditModel
             {
-                EntryPrice  = Math.Max(0, signal.EntryPrice - 10),
-                StopLoss    = Math.Max(0, signal.StopLoss - 50),
+                EntryPrice  = _entryPriceOffset > 0 && signal.Action == SignalAction.Buy
+                                  ? Math.Max(0.05m, signal.EntryPrice - _entryPriceOffset)
+                                  : signal.EntryPrice,
+                StopLoss    = _stopLossBuffer > 0 && signal.StopLoss > 0
+                                  ? Math.Max(0.05m, signal.StopLoss - _stopLossBuffer)
+                                  : signal.StopLoss,
                 TargetsText = BuildDefaultTargetText(signal),
                 Lots        = _defaultLots
             };
@@ -2043,10 +2057,12 @@
     private static (string Text, Color Color)? ToTuple(SignalStalenessInfo? info) =>
         info is { } i ? (i.Text, i.Color) : null;
 
-    private static string BuildDefaultTargetText(TradingSignal signal)
+    private string BuildDefaultTargetText(TradingSignal signal)
     {
         var firstTarget = signal.Targets.Count > 0 ? signal.Targets[0] : signal.EntryPrice;
-        var adjusted = Math.Max(0, firstTarget - 10);
+        var adjusted = _targetPriceOffset > 0
+            ? Math.Max(0.05m, firstTarget - _targetPriceOffset)
+            : firstTarget;
         return adjusted.ToString("0.##", CultureInfo.InvariantCulture);
     }
 
