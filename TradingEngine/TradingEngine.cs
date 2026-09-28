@@ -544,6 +544,7 @@ public class TradingEngine(
                 OrderType = entryOrderType,
                 ProductType = productType,
                 Status = OrderStatus.Pending,
+                ErrorMessage = isRobo ? "Robo Bracket Entry" : (isMarket ? "Signal Entry (Market)" : "Signal Entry (Limit)"),
                 CreatedAt = DateTime.UtcNow
             };
 
@@ -1082,6 +1083,28 @@ public class TradingEngine(
                 // Still open at the broker - track it so it shows up in the Open
                 // Positions grid and continues to be reconciled by the loop above on
                 // subsequent ticks.
+                var sl = signal.StopLoss > 0 ? signal.StopLoss : (decimal?)null;
+                var targets = signal.Targets?.ToList() ?? [];
+
+                if ((sl is null || sl <= 0 || targets.Count == 0) && bp.AveragePrice > 0)
+                {
+                    var riskProfileService = _serviceProvider.GetService<IIndexRiskProfileService>();
+                    if (riskProfileService != null)
+                    {
+                        var profile = await riskProfileService.GetProfileAsync(signal.Index);
+                        if (sl is null || sl <= 0)
+                        {
+                            var defSlPts = profile is { DefaultSlPoints: > 0 } ? profile.DefaultSlPoints : 50m;
+                            sl = Math.Max(0.05m, bp.AveragePrice - defSlPts);
+                        }
+                        if (targets.Count == 0)
+                        {
+                            var defTgtPts = profile is { DefaultTargetPoints: > 0 } ? profile.DefaultTargetPoints : 20m;
+                            targets = [bp.AveragePrice + defTgtPts];
+                        }
+                    }
+                }
+
                 _context.Positions.Add(new Position
                 {
                     TradingAccountId = liveAccountId.Value,
@@ -1090,12 +1113,14 @@ public class TradingEngine(
                     Quantity = Math.Abs(bp.Quantity),
                     EntryPrice = bp.AveragePrice,
                     CurrentPrice = bp.CurrentPrice > 0m ? bp.CurrentPrice : bp.AveragePrice,
+                    StopLoss = sl,
+                    Targets = targets,
                     OpenedAt = DateTime.UtcNow,
                     UnrealizedPnL = bp.UnrealizedPnL,
                     UnrealizedPnLPercentage = bp.AveragePrice > 0
                         ? (bp.UnrealizedPnL / (bp.AveragePrice * Math.Abs(bp.Quantity))) * 100m
                         : 0m,
-                    ManagedLocally = false
+                    ManagedLocally = sl.HasValue || targets.Count > 0
                 });
 
                 _logger.LogInformation(
@@ -1357,7 +1382,8 @@ public class TradingEngine(
                     CreatedAt = DateTime.UtcNow,
                     ExecutedAt = DateTime.UtcNow,
                     ExecutedPrice = ltp,
-                    FilledQuantity = position.Quantity
+                    FilledQuantity = position.Quantity,
+                    ErrorMessage = reason
                 };
                 _context.Orders.Add(order);
 
@@ -1470,7 +1496,7 @@ public class TradingEngine(
                     ProductType = ProductType.Mis,
                     Status = response.Success ? OrderStatus.Accepted : OrderStatus.Failed,
                     BrokerId = response.OrderId,
-                    ErrorMessage = response.ErrorMessage,
+                    ErrorMessage = response.Success ? reason : response.ErrorMessage,
                     CreatedAt = DateTime.UtcNow,
                     ExecutedAt = null,
                     ExecutedPrice = null,
@@ -1558,6 +1584,7 @@ public class TradingEngine(
             ProductType = ProductType.Mos,
             Status = OrderStatus.Accepted,
             BrokerId = bracketEntry.BrokerId,
+            ErrorMessage = reason,
             CreatedAt = DateTime.UtcNow
         };
         _context.Orders.Add(exitOrder);

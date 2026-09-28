@@ -752,8 +752,8 @@
     private decimal _realizedPaper;
 
     // "Executed today" is per book, so it is counted from the Orders table (the only
-    // entity that carries a TradingAccount link). TradingSignal has no account, which
-    // is why the old signal-based count could never respond to the Live/Paper toggle.
+    // entity that carries a TradingAccount link). Only entry (Buy) orders are counted
+    // so a completed Buy-Sell cycle is treated as one trade.
     private int _executedLive;
     private int _executedPaper;
     private int _executedAll;
@@ -1452,20 +1452,11 @@
             var todayStart = todayIst.IstToUtc();
             var tomorrowStart = todayIst.AddDays(1).IstToUtc();
 
-            // ── Phase 1: fire independent queries in parallel ─────────────
-            // Each helper creates its own DbContext because EF contexts are not
-            // thread-safe. All queries are read-only so SQLite WAL mode allows
-            // full concurrency across readers.
-            var signalsTask   = SignalService.GetRecentSignalsAsync(50);
-            var positionsTask = QueryOpenPositionsAsync();
-            var watchTask     = QueryWatchlistSignalsAsync();
-            var realizedTask  = QueryRealizedPnLAsync(todayStart, tomorrowStart);
-            var executedTask  = QueryExecutedCountsAsync(todayStart, tomorrowStart);
-
-            await Task.WhenAll(signalsTask, positionsTask, watchTask, realizedTask, executedTask);
-
-            // ── Process Phase 1 results ───────────────────────────────────
-            var allRecent = await signalsTask;
+            // Queries run sequentially on purpose. On Azure App Service the SQLite
+            // file sits on network storage where WAL/shared-memory locking is not
+            // reliable, so parallel connections contend for the lock and each can
+            // block for the full busy_timeout, hanging the circuit.
+            var allRecent = await SignalService.GetRecentSignalsAsync(50);
             _signals = allRecent
                 .Where(s => s.ReceivedTimestamp.ToIst().Date == todayIst &&
                             s.Status != SignalStatus.Executed)
@@ -1473,37 +1464,34 @@
                 .ToList();
             _todaySignals = allRecent.Count(s => s.ReceivedTimestamp.ToIst().Date == todayIst);
 
-            _positions = await positionsTask;
+            _positions = await QueryOpenPositionsAsync();
 
-            var watch = await watchTask;
+            var watch = await QueryWatchlistSignalsAsync();
             _watchlist = watch
                 .Where(s => !_hiddenWatchlistSignalIds.Contains(s.Id))
                 .ToList();
 
-            var (realizedPaper, realizedLive) = await realizedTask;
+            var (realizedPaper, realizedLive) = await QueryRealizedPnLAsync(todayStart, tomorrowStart);
             _realizedPaper = realizedPaper;
             _realizedLive  = realizedLive;
 
-            var (exPaper, exLive, exAll) = await executedTask;
+            var (exPaper, exLive, exAll) = await QueryExecutedCountsAsync(todayStart, tomorrowStart);
             _executedPaper = exPaper;
             _executedLive  = exLive;
             _executedAll   = exAll;
 
-            // ── Phase 2: dependent queries in parallel ────────────────────
             var watchSignalIds  = _watchlist.Select(s => s.Id).ToList();
             var statusSignalIds = _signals.Select(s => s.Id).Concat(watchSignalIds).Distinct().ToList();
 
-            var exitTask    = QueryExitPricesAsync(watchSignalIds);
-            var failureTask = QueryFailureReasonsAsync(statusSignalIds);
-
-            await Task.WhenAll(exitTask, failureTask);
+            var exitPrices     = await QueryExitPricesAsync(watchSignalIds);
+            var failureReasons = await QueryFailureReasonsAsync(statusSignalIds);
 
             _exitBySignal.Clear();
-            foreach (var (signalId, price) in await exitTask)
+            foreach (var (signalId, price) in exitPrices)
                 _exitBySignal.TryAdd(signalId, price);
 
             _failureReasonBySignal.Clear();
-            foreach (var (signalId, message) in await failureTask)
+            foreach (var (signalId, message) in failureReasons)
                 _failureReasonBySignal.TryAdd(signalId, message);
 
             SyncEdits();
@@ -1568,19 +1556,19 @@
         DateTime todayStart, DateTime tomorrowStart)
     {
         await using var db = await DbFactory.CreateDbContextAsync();
-        var executedSignals = await db.Orders
+        var executedEntries = await db.Orders
             .Where(o => o.Status == OrderStatus.Executed &&
+                        o.Side == OrderSide.Buy &&
                         o.ExecutedAt >= todayStart && o.ExecutedAt < tomorrowStart)
             .Select(o => new
             {
-                IsPaper = EF.Functions.Like(o.TradingAccount.ClientId, BookScope.PaperClientId),
-                o.SignalId
+                IsPaper = EF.Functions.Like(o.TradingAccount.ClientId, BookScope.PaperClientId)
             })
-            .Distinct()
             .ToListAsync();
-        return (executedSignals.Count(x => x.IsPaper),
-                executedSignals.Count(x => !x.IsPaper),
-                executedSignals.Select(x => x.SignalId).Distinct().Count());
+
+        var paper = executedEntries.Count(x => x.IsPaper);
+        var live = executedEntries.Count(x => !x.IsPaper);
+        return (paper, live, paper + live);
     }
 
     private async Task<List<(int SignalId, decimal Price)>> QueryExitPricesAsync(List<int> watchSignalIds)

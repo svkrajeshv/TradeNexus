@@ -1,0 +1,69 @@
+@using MudBlazor
+@using NexusApp.Models
+
+@if (Alerts.Count > 0)
+{
+    var visibleAlerts = (IsTopBanner ? Alerts.Where(a => !_dismissedKeys.Contains(a.Key)) : Alerts)
+        .DistinctBy(a => a.Key)
+        .ToList();
+    @if (visibleAlerts.Count > 0)
+    {
+        <div class="risk-banner @(IsTopBanner ? "mb-3" : "mb-4")">
+            @foreach (var alert in visibleAlerts)
+            {
+                <MudAlert Severity="@(alert.IsProfitTarget ? Severity.Success : Severity.Error)"
+                          Variant="Variant.Filled"
+                          Elevation="3"
+                          Class="mb-2 rounded-lg risk-banner-alert"
+                          ShowCloseIcon="@IsTopBanner"
+                          CloseIconClicked="@(() => Dismiss(alert.Key))">
+                    <div class="risk-banner-body d-flex align-center justify-space-between flex-wrap gap-2">
+                        <div class="risk-banner-text d-flex align-center gap-2">
+                            <MudIcon Class="risk-banner-icon" Icon="@(alert.IsProfitTarget ? Icons.Material.Filled.EmojiEvents : Icons.Material.Filled.GppBad)" Size="Size.Medium" />
+                            <div class="risk-banner-copy">
+                                <MudText Typo="Typo.subtitle2" Style="font-weight: 700; letter-spacing: 0.3px;">
+                                    @alert.Title
+                                </MudText>
+                                <MudText Typo="Typo.body2" Class="mud-text-secondary" Style="color: rgba(255, 255, 255, 0.9) !important;">
+                                    @alert.Message
+                                </MudText>
+                            </div>
+                        </div>
+                        <div class="risk-banner-chips d-flex align-center gap-2">
+                            <MudChip T="string"
+                                     Size="Size.Small"
+                                     Variant="Variant.Outlined"
+                                     Color="Color.Surface"
+                                     Style="font-weight: 700;">
+                                P&amp;L: ₹@alert.CurrentPnL.ToString("N2") / Limit: ₹@alert.Limit.ToString("N2")
+                            </MudChip>
+                            <MudChip T="string"
+                                     Size="Size.Small"
+                                     Color="@(alert.IsProfitTarget ? Color.Success : Color.Error)"
+                                     Variant="Variant.Filled"
+                                     Style="font-weight: 700; text-transform: uppercase;">
+                                @(alert.IsProfitTarget ? "Target Hit" : "SL Hit")
+                            </MudChip>
+                        </div>
+                    </div>
+                </MudAlert>
+            }
+        </div>
+    }
+}
+
+@code {
+    [Parameter]
+    public List<RiskAlertInfo> Alerts { get; set; } = [];
+
+    [Parameter]
+    public bool IsTopBanner { get; set; } = true;
+
+    private static readonly HashSet<string> _dismissedKeys = new(StringComparer.OrdinalIgnoreCase);
+
+    private void Dismiss(string key)
+    {
+        _dismissedKeys.Add(key);
+        StateHasChanged();
+    }
+}

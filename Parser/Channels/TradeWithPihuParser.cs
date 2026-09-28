@@ -1,4 +1,4 @@
-using NexusApp.Interfaces;
+﻿using NexusApp.Interfaces;
 using System.Text.RegularExpressions;
 
 namespace NexusApp.Parser.Channels;
@@ -16,7 +16,7 @@ namespace NexusApp.Parser.Channels;
 /// (DefaultTargetPoints, default 20; DefaultStopLossPoints, default 50) instead of
 /// failing to parse the signal.
 /// </summary>
-public partial class TradeWithPihuParser(ILogger<TradeWithPihuParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
+public partial class TradeWithPihuParser(ILogger<TradeWithPihuParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory), IChannelSignalParser
 {
     // Handles "Buy near 83", "Buy around 83", "Buy @ 83" — the base only handles
     // the "ABOVE" keyword and the plain "BUY NNN" form.
@@ -27,6 +27,15 @@ public partial class TradeWithPihuParser(ILogger<TradeWithPihuParser> logger, IS
 
     // No activation message on this channel — execute via CMP crossing directly.
     public override bool RequiresActivation => false;
+
+    /// <summary>
+    /// Same entry rule as Vip Group: enter only when live CMP crosses the entry or the
+    /// channel tags the call with exactly the entry price (e.g. "83❤️").
+    /// </summary>
+    public bool AlwaysAwaitEntry => true;
+
+    public bool TryParsePriceTag(string? message, out decimal price) =>
+        VipGroupParser.TryParseBarePrice(message, out price);
 
     /// <summary>Matches the "TRADE WITH PIHU" channel (or names containing "pihu").</summary>
     public override bool CanHandle(string? channelName)

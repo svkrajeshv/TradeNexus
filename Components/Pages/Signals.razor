@@ -148,7 +148,7 @@
         {
             if (_selectedDate is null)
             {
-                _signals = await SignalService.GetRecentSignalsAsync(100);
+                _signals = await SignalService.GetRecentSignalsAsync(100, includeOrders: true);
             }
             else
             {

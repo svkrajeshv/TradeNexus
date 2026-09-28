@@ -95,20 +95,16 @@
             <MudTd>@context.Price</MudTd>
             <MudTd>@(context.ExecutedPrice?.ToString() ?? "-")</MudTd>
             <MudTd Style="min-width:200px; max-width:260px;">
-                @if (string.IsNullOrWhiteSpace(context.ErrorMessage))
-                {
-                    <MudText Typo="Typo.body2" Color="Color.Secondary">-</MudText>
+                @{
+                    var remark = GetOrderRemark(context);
                 }
-                else
-                {
-                    <MudTooltip Text="@context.ErrorMessage">
-                        <MudText Typo="Typo.body2"
-                                 Class="remarks-cell"
-                                 Color="@(IsFailureStatus(context.Status) ? Color.Error : Color.Default)">
-                            @context.ErrorMessage
-                        </MudText>
-                    </MudTooltip>
-                }
+                <MudTooltip Text="@remark">
+                    <MudText Typo="Typo.body2"
+                             Class="remarks-cell"
+                             Color="@(IsFailureStatus(context.Status) ? Color.Error : Color.Default)">
+                        @remark
+                    </MudText>
+                </MudTooltip>
             </MudTd>
             <MudTd>
                 <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.Status)">@context.Status</MudChip>
@@ -348,7 +344,7 @@
                 Csv(o.Price),
                 Csv(o.ExecutedPrice),
                 Csv(o.FilledQuantity),
-                Csv(o.ErrorMessage),
+                Csv(GetOrderRemark(o)),
 
                 Csv(o.SignalId),
                 Csv(signal?.ChannelName),
@@ -504,5 +500,26 @@
         if (brokerId.StartsWith("PAPER-", StringComparison.OrdinalIgnoreCase) || brokerId.Equals("Paper Account", StringComparison.OrdinalIgnoreCase))
             return "Paper Account";
         return brokerId;
+    }
+
+    private static string GetOrderRemark(Order o)
+    {
+        if (!string.IsNullOrWhiteSpace(o.ErrorMessage))
+            return o.ErrorMessage;
+
+        if (o.Side == OrderSide.Buy)
+        {
+            if (o.ProductType == ProductType.Mos)
+                return "Robo Bracket Entry";
+            return o.OrderType == OrderType.Market ? "Signal Entry (Market)" : "Signal Entry (Limit)";
+        }
+        else
+        {
+            if (o.OrderType == OrderType.Limit)
+                return o.Price > 0 ? $"Resting Target Limit @ ₹{o.Price:0.##}" : "Resting Target Limit";
+            if (o.OrderType == OrderType.StopLoss || o.OrderType == OrderType.StopLossLimit)
+                return o.Price > 0 ? $"Stop Loss Trigger @ ₹{o.Price:0.##}" : "Stop Loss Exit";
+            return "Square Off / Exit";
+        }
     }
 }

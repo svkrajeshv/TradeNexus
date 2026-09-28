@@ -52,9 +52,9 @@
     }
     else
     {
-        <MudTooltip Text="@StatusReason" Placement="Placement.Top" Arrow="true">
-            <MudChip T="string" Size="Size.Small" Color="@StatusColor" Style="cursor:help;">@Signal.Status</MudChip>
-        </MudTooltip>
+        <span title="@StatusReason" style="cursor:help;display:inline-block;">
+            <MudChip T="string" Size="Size.Small" Color="@StatusColor" Style="cursor:help;pointer-events:none;">@Signal.Status</MudChip>
+        </span>
     }
 </MudTd>
 <MudTd DataLabel="Actions">

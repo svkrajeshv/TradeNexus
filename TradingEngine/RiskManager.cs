@@ -11,13 +11,18 @@ namespace NexusApp.TradingEngine;
 /// <summary>
 /// Risk management engine for validating trading limits
 /// </summary>
-public class RiskManager(TradingDbContext context, ISettingsService settings, ILogger<RiskManager> logger)
+public class RiskManager(
+    TradingDbContext context,
+    ISettingsService settings,
+    ILogger<RiskManager> logger,
+    NexusApp.Services.HealthSnapshotCache? healthSnapshots = null)
 {
     private const string AccountReasonLogTemplate = "Account {Name}: {Reason}";
 
     private readonly TradingDbContext _context = context;
     private readonly ISettingsService _settings = settings;
     private readonly ILogger<RiskManager> _logger = logger;
+    private readonly NexusApp.Services.HealthSnapshotCache? _healthSnapshots = healthSnapshots;
 
     /// <summary>
     /// Validates if account meets all risk criteria (both global portfolio limits and account-specific limits)
@@ -60,6 +65,13 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
 
             decimal realizedPnL = closedPositionsToday.Sum(p => p.RealizedPnL ?? 0m);
             decimal unrealizedPnL = openPositionsList.Sum(p => p.UnrealizedPnL);
+
+            if (account.ClientId != "PAPER" && _healthSnapshots?.Latest is { BrokerConnected: true, BrokerPnlAvailable: true } snapshot)
+            {
+                realizedPnL = snapshot.LiveRealized;
+                unrealizedPnL = snapshot.LiveUnrealized;
+            }
+
             decimal dailyPnL = realizedPnL + unrealizedPnL;
 
             // Check account daily loss limit
@@ -78,12 +90,13 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
                 return (false, reason);
             }
 
-            // Check max trades per day (executed or accepted orders today in IST)
+            // Check max trades per day (entry BUY orders today in IST; Buy-Sell counts as one trade)
             var todayOrdersCount = await _context.Orders
                 .AsNoTracking()
                 .Where(o => o.TradingAccountId == account.Id
                     && o.CreatedAt >= startOfDayUtc
                     && o.CreatedAt < endOfDayUtc
+                    && o.Side == OrderSide.Buy
                     && (o.Status == OrderStatus.Executed || o.Status == OrderStatus.Accepted))
                 .CountAsync();
 
@@ -228,6 +241,7 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
                 .Where(o => o.TradingAccountId == accountId
                     && o.CreatedAt >= startOfDayUtc
                     && o.CreatedAt < endOfDayUtc
+                    && o.Side == OrderSide.Buy
                     && (o.Status == OrderStatus.Executed || o.Status == OrderStatus.Accepted))
                 .CountAsync();
 
@@ -244,6 +258,13 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
 
             decimal realizedPnL = closedPositionsToday.Sum(p => p.RealizedPnL ?? 0m);
             decimal unrealizedPnL = openPositionsList.Sum(p => p.UnrealizedPnL);
+
+            if (account.ClientId != "PAPER" && _healthSnapshots?.Latest is { BrokerConnected: true, BrokerPnlAvailable: true } snapshot)
+            {
+                realizedPnL = snapshot.LiveRealized;
+                unrealizedPnL = snapshot.LiveUnrealized;
+            }
+
             decimal dailyPnL = realizedPnL + unrealizedPnL;
 
             return new RiskMetrics
@@ -322,7 +343,28 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
                 .Where(p => p.ClosedAt == null)
                 .SumAsync(p => p.UnrealizedPnL);
 
-            var combinedPnL = closedRealized + openUnrealized;
+            decimal combinedPnL;
+            if (_healthSnapshots?.Latest is { BrokerConnected: true, BrokerPnlAvailable: true } snapshot)
+            {
+                var paperClosed = await _context.Positions
+                    .AsNoTracking()
+                    .Where(p => p.TradingAccount.ClientId == "PAPER"
+                        && p.ClosedAt.HasValue
+                        && p.ClosedAt.Value >= startOfDayUtc
+                        && p.ClosedAt.Value < endOfDayUtc)
+                    .SumAsync(p => p.RealizedPnL ?? 0m);
+
+                var paperOpen = await _context.Positions
+                    .AsNoTracking()
+                    .Where(p => p.TradingAccount.ClientId == "PAPER" && p.ClosedAt == null)
+                    .SumAsync(p => p.UnrealizedPnL);
+
+                combinedPnL = (snapshot.LiveRealized + snapshot.LiveUnrealized) + (paperClosed + paperOpen);
+            }
+            else
+            {
+                combinedPnL = closedRealized + openUnrealized;
+            }
 
             var openPositionsCount = await _context.Positions
                 .AsNoTracking()
@@ -342,6 +384,97 @@ public class RiskManager(TradingDbContext context, ISettingsService settings, IL
             _logger.LogError(ex, "Error computing global portfolio risk metrics");
             return new();
         }
+    }
+
+    /// <summary>
+    /// Evaluates both Global Portfolio and individual Accounts to find any that have reached
+    /// their Daily Max Profit Target or Daily Max Loss Limit today (IST).
+    /// </summary>
+    public async Task<List<RiskAlertInfo>> GetActiveRiskAlertsAsync()
+    {
+        var alerts = new List<RiskAlertInfo>();
+        try
+        {
+            var todayIst = DateTime.UtcNow.ToIst().Date;
+
+            // 1. Check Global Portfolio Limits
+            var globalMetrics = await GetGlobalPortfolioRiskMetricsAsync();
+            if (globalMetrics.DailyMaxProfit > 0 && globalMetrics.DailyPnL >= globalMetrics.DailyMaxProfit)
+            {
+                alerts.Add(new RiskAlertInfo
+                {
+                    Key = $"global_profit_{todayIst:yyyyMMdd}",
+                    IsGlobal = true,
+                    AccountName = "Global Portfolio",
+                    IsProfitTarget = true,
+                    CurrentPnL = globalMetrics.DailyPnL,
+                    Limit = globalMetrics.DailyMaxProfit,
+                    Title = "Global Portfolio Daily Profit Target Reached",
+                    Message = $"Combined P&L reached ₹{globalMetrics.DailyPnL:N2} (Target: ₹{globalMetrics.DailyMaxProfit:N2}). Daily profit achieved; new orders blocked for today."
+                });
+            }
+            else if (globalMetrics.DailyMaxLoss > 0 && globalMetrics.DailyPnL <= -globalMetrics.DailyMaxLoss)
+            {
+                alerts.Add(new RiskAlertInfo
+                {
+                    Key = $"global_loss_{todayIst:yyyyMMdd}",
+                    IsGlobal = true,
+                    AccountName = "Global Portfolio",
+                    IsProfitTarget = false,
+                    CurrentPnL = globalMetrics.DailyPnL,
+                    Limit = globalMetrics.DailyMaxLoss,
+                    Title = "Global Portfolio Daily Max Loss Limit Reached",
+                    Message = $"Combined P&L dropped to ₹{globalMetrics.DailyPnL:N2} (Limit: ₹{globalMetrics.DailyMaxLoss:N2}). Max loss breached; new orders blocked for today."
+                });
+            }
+
+            // 2. Check Individual Account Limits
+            var enabledAccounts = await _context.TradingAccounts
+                .AsNoTracking()
+                .Where(a => a.IsEnabled)
+                .ToListAsync();
+
+            foreach (var account in enabledAccounts)
+            {
+                var metrics = await GetRiskMetricsAsync(account.Id);
+                if (metrics.DailyMaxProfit > 0 && metrics.DailyPnL >= metrics.DailyMaxProfit)
+                {
+                    alerts.Add(new RiskAlertInfo
+                    {
+                        Key = $"acc_{account.Id}_profit_{todayIst:yyyyMMdd}",
+                        IsGlobal = false,
+                        AccountId = account.Id,
+                        AccountName = account.Name,
+                        IsProfitTarget = true,
+                        CurrentPnL = metrics.DailyPnL,
+                        Limit = metrics.DailyMaxProfit,
+                        Title = $"Daily Profit Target Reached: {account.Name}",
+                        Message = $"Account P&L reached ₹{metrics.DailyPnL:N2} (Target: ₹{metrics.DailyMaxProfit:N2}). Daily profit achieved; new orders blocked for today."
+                    });
+                }
+                else if (metrics.DailyMaxLoss > 0 && metrics.DailyPnL <= -metrics.DailyMaxLoss)
+                {
+                    alerts.Add(new RiskAlertInfo
+                    {
+                        Key = $"acc_{account.Id}_loss_{todayIst:yyyyMMdd}",
+                        IsGlobal = false,
+                        AccountId = account.Id,
+                        AccountName = account.Name,
+                        IsProfitTarget = false,
+                        CurrentPnL = metrics.DailyPnL,
+                        Limit = metrics.DailyMaxLoss,
+                        Title = $"Daily Max Loss Limit Reached: {account.Name}",
+                        Message = $"Account P&L dropped to ₹{metrics.DailyPnL:N2} (Limit: ₹{metrics.DailyMaxLoss:N2}). Max loss breached; new orders blocked for today."
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error computing active risk alerts");
+        }
+
+        return alerts.DistinctBy(a => a.Key).ToList();
     }
 }
 

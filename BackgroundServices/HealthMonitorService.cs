@@ -6,6 +6,7 @@ using NexusApp.Helpers;
 using NexusApp.Hubs;
 using NexusApp.Interfaces;
 using NexusApp.Models;
+using NexusApp.Parser;
 using NexusApp.TradingEngine;
 using System.Collections.Concurrent;
 using System.Globalization;
@@ -471,7 +472,16 @@ public sealed class CmpStreamingService(
                     .Take(30)
                     .ToListAsync(stoppingToken);
 
-                if (liveSignals.Count == 0)
+                // Open positions must keep receiving quotes even after their originating
+                // signal drops out of the recent-signals window, otherwise LTP/P&L freeze
+                // and paper SL/target exits are never evaluated.
+                var openPositionSymbols = await db.Positions
+                    .AsNoTracking()
+                    .Where(p => p.ClosedAt == null)
+                    .Select(p => new { p.Symbol, p.SignalId })
+                    .ToListAsync(stoppingToken);
+
+                if (liveSignals.Count == 0 && openPositionSymbols.Count == 0)
                 {
                     await Task.Delay(Cadence, stoppingToken);
                     continue;
@@ -488,6 +498,15 @@ public sealed class CmpStreamingService(
                     if (!symbolMap.TryGetValue(key, out var list))
                         symbolMap[key] = list = [];
                     list.Add(s.Id);
+                }
+
+                foreach (var p in openPositionSymbols)
+                {
+                    if (string.IsNullOrWhiteSpace(p.Symbol)) continue;
+                    if (!symbolMap.TryGetValue(p.Symbol, out var list))
+                        symbolMap[p.Symbol] = list = [];
+                    if (p.SignalId is int sid && sid > 0 && !list.Contains(sid))
+                        list.Add(sid);
                 }
 
                 // Resolve tokens for all symbols via instrument master
@@ -565,6 +584,19 @@ public sealed class CmpStreamingService(
                     // it survives UI refresh/navigation).
                     var high = _highBySymbol.AddOrUpdate(symbol, quote, (_, existing) => quote > existing ? quote : existing);
                     var low = _lowBySymbol.AddOrUpdate(symbol, quote, (_, existing) => quote < existing ? quote : existing);
+
+                    if (kv.Value.Count == 0)
+                    {
+                        ticks.Add(new
+                        {
+                            SignalId = 0,
+                            Cmp = quote,
+                            High = high,
+                            Low = low,
+                            Symbol = symbol,
+                            Timestamp = nowUtc
+                        });
+                    }
 
                     foreach (var signalId in kv.Value)
                     {
@@ -651,9 +683,10 @@ public sealed class CmpStreamingService(
                         _entryArmedSignals.TryRemove(armedId, out _);
                     }
 
+                    var parserResolver = scope.ServiceProvider.GetRequiredService<SignalParserResolver>();
                     foreach (var sig in awaitingSignals)
                     {
-                        if (!crossingEnabled)
+                        if (!crossingEnabled && !parserResolver.Resolve(sig.ChannelName).AlwaysAwaitEntry)
                             continue;
 
                         // Resolve the trading symbol for this signal

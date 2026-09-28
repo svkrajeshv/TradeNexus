@@ -84,13 +84,17 @@ public class TradingSignalService
     /// <summary>
     /// Gets recent signals (last N)
     /// </summary>
-    public async Task<List<TradingSignal>> GetRecentSignalsAsync(int count = 50)
+    public async Task<List<TradingSignal>> GetRecentSignalsAsync(int count = 50, bool includeOrders = false)
     {
         try
         {
-            return await _context.TradingSignals
-                .AsNoTracking()
-                .Include(s => s.Orders)
+            var query = _context.TradingSignals.AsNoTracking();
+            if (includeOrders)
+            {
+                query = query.Include(s => s.Orders);
+            }
+
+            return await query
                 .OrderByDescending(s => s.ReceivedTimestamp)
                 .Take(count)
                 .ToListAsync();

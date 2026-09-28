@@ -37,6 +37,17 @@ public sealed class LivePositionMonitorService(
     // Tracks the IST trading date when global portfolio risk square-off was triggered.
     private DateTime? _lastGlobalRiskTriggeredDate;
 
+    // Once a daily risk limit is hit, every open position in scope keeps being squared off
+    // for the rest of the day (failed exits and positions opened afterwards). Attempts per
+    // position are throttled so an in-flight broker exit is not duplicated.
+    private static readonly TimeSpan RiskSquareOffRetryInterval = TimeSpan.FromSeconds(30);
+    private readonly Dictionary<int, DateTime> _riskSquareOffAttemptUtc = [];
+
+    // Track risk limit notifications sent today (IST) to avoid spamming Telegram on every 2-second tick.
+    // Keys: "global_profit", "global_loss", $"account_{accId}_profit", $"account_{accId}_loss"
+    private readonly HashSet<string> _sentRiskNotificationsToday = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _lastRiskNotificationDateIst = DateTime.MinValue;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Live position monitor started (cadence {Seconds}s)", Cadence.TotalSeconds);
@@ -160,6 +171,29 @@ public sealed class LivePositionMonitorService(
                         await db.SaveChangesAsync(ct);
                     }
 
+                    // Self-healing: if an open position has null SL or empty Targets, backfill from linked Signal
+                    if ((position.StopLoss == null || position.Targets.Count == 0) && position.Signal != null)
+                    {
+                        var healed = false;
+                        if (position.StopLoss == null && position.Signal.StopLoss > 0)
+                        {
+                            position.StopLoss = position.Signal.StopLoss;
+                            healed = true;
+                        }
+                        if (position.Targets.Count == 0 && position.Signal.Targets.Count > 0)
+                        {
+                            position.Targets = position.Signal.Targets.ToList();
+                            healed = true;
+                        }
+                        if (healed)
+                        {
+                            position.ManagedLocally = true;
+                            await db.SaveChangesAsync(ct);
+                            _logger.LogInformation("Self-healed missing SL/Targets for live position {Symbol} from Signal: SL={SL}, Targets={Targets}",
+                                position.Symbol, position.StopLoss, string.Join("/", position.Targets));
+                        }
+                    }
+
                     // Broker-managed brackets are only marked, never exited locally.
                     if (!position.ManagedLocally)
                         continue;
@@ -202,32 +236,47 @@ public sealed class LivePositionMonitorService(
         }
 
         // 2. Risk Limits Evaluation:
-        // Evaluates Daily Max Profit and Daily Max Loss for each account with open positions
-        // (both LIVE and PAPER accounts) as well as Global Portfolio limits.
+        // Evaluates Daily Max Profit and Daily Max Loss for each enabled account
+        // (both LIVE and PAPER accounts) as well as Global Portfolio limits,
+        // and sends Telegram notifications whenever Day Target or Day SL is reached.
         var remainingOpenPositions = await db.Positions
             .Include(p => p.TradingAccount)
             .Where(p => p.ClosedAt == null)
             .ToListAsync(ct);
 
-        if (remainingOpenPositions.Count > 0)
-        {
-            var allAccountIds = remainingOpenPositions.Select(p => p.TradingAccountId).Distinct().ToList();
-            var allAccounts = await db.TradingAccounts.AsNoTracking()
-                .Where(a => allAccountIds.Contains(a.Id))
-                .ToDictionaryAsync(a => a.Id, ct);
+        var allEnabledAccounts = await db.TradingAccounts.AsNoTracking()
+            .Where(a => a.IsEnabled)
+            .ToDictionaryAsync(a => a.Id, ct);
 
-            await CheckRiskLimitsAsync(scope.ServiceProvider, db, remainingOpenPositions, allAccounts, ct);
-        }
+        await CheckRiskLimitsAsync(scope.ServiceProvider, db, remainingOpenPositions, allEnabledAccounts, ct);
     }
 
     /// <summary>
-    /// Checks both tiers of risk limits:
+    /// Checks both tiers of risk limits and sends Telegram notifications:
     /// 1. Global Portfolio Limits: combined P&L across all accounts (live + paper).
-    ///    If hit, all open positions across all accounts are squared off.
-    /// 2. Per-Account Limits: evaluated for each account individually.
-    ///    If hit, only that specific account's open positions are squared off.
-    /// Both gated by <c>RiskAutoSquareOffEnabled</c> and tracked per IST trading day.
+    ///    If hit, sends Telegram notification and auto squares off positions if enabled.
+    /// 2. Per-Account Limits: evaluated for all enabled accounts individually.
+    ///    If hit, sends Telegram notification and auto squares off positions if enabled.
+    /// Both tracked per IST trading day to prevent duplicate notifications.
     /// </summary>
+    /// <summary>
+    /// Returns the positions whose last risk square-off attempt is older than
+    /// <see cref="RiskSquareOffRetryInterval"/> and stamps them as attempted now.
+    /// </summary>
+    private List<int> DuePositions(IEnumerable<int> positionIds)
+    {
+        var now = DateTime.UtcNow;
+        var due = new List<int>();
+        foreach (var id in positionIds)
+        {
+            if (_riskSquareOffAttemptUtc.TryGetValue(id, out var last) && now - last < RiskSquareOffRetryInterval)
+                continue;
+            _riskSquareOffAttemptUtc[id] = now;
+            due.Add(id);
+        }
+        return due;
+    }
+
     private async Task CheckRiskLimitsAsync(
         IServiceProvider scopedServices,
         TradingDbContext db,
@@ -236,113 +285,145 @@ public sealed class LivePositionMonitorService(
         CancellationToken ct)
     {
         var settings = scopedServices.GetRequiredService<ISettingsService>();
-        var enabled = await settings.GetSettingAsync<bool?>("RiskAutoSquareOffEnabled") ?? true;
-        if (!enabled)
-            return;
-
         var todayIst = DateTime.UtcNow.ToIst().Date;
+
+        if (todayIst != _lastRiskNotificationDateIst)
+        {
+            _sentRiskNotificationsToday.Clear();
+            _lastRiskNotificationDateIst = todayIst;
+        }
+
         var riskManager = scopedServices.GetRequiredService<TradingEngine.RiskManager>();
         var engine = scopedServices.GetRequiredService<ITradingEngine>();
         var notifications = scopedServices.GetService<INotificationService>();
+        var autoSquareOffEnabled = await settings.GetSettingAsync<bool?>("RiskAutoSquareOffEnabled") ?? true;
 
         // -------------------------------------------------------------
         // TIER 2: GLOBAL PORTFOLIO CHECK (LIVE + PAPER COMBINED)
         // -------------------------------------------------------------
-        if (_lastGlobalRiskTriggeredDate != todayIst)
+        try
         {
-            try
+            var globalMetrics = await riskManager.GetGlobalPortfolioRiskMetricsAsync();
+
+            bool globalProfitHit = globalMetrics.DailyMaxProfit > 0 && globalMetrics.DailyPnL >= globalMetrics.DailyMaxProfit;
+            bool globalLossHit = globalMetrics.DailyMaxLoss > 0 && globalMetrics.DailyPnL <= -globalMetrics.DailyMaxLoss;
+
+            if (todayIst != _lastRiskNotificationDateIst)
             {
-                var globalMetrics = await riskManager.GetGlobalPortfolioRiskMetricsAsync();
+                _riskSquareOffAttemptUtc.Clear();
+            }
 
-                string? globalReason = null;
-                if (globalMetrics.DailyMaxLoss > 0 && globalMetrics.DailyPnL <= -globalMetrics.DailyMaxLoss)
-                    globalReason = $"Global Portfolio Daily Max Loss Hit (Combined P&L: ₹{globalMetrics.DailyPnL:N2}, Limit: ₹{globalMetrics.DailyMaxLoss:N2})";
-                else if (globalMetrics.DailyMaxProfit > 0 && globalMetrics.DailyPnL >= globalMetrics.DailyMaxProfit)
-                    globalReason = $"Global Portfolio Daily Max Profit Hit (Combined P&L: ₹{globalMetrics.DailyPnL:N2}, Limit: ₹{globalMetrics.DailyMaxProfit:N2})";
+            var globalLatched = _lastGlobalRiskTriggeredDate == todayIst;
+            if (globalProfitHit || globalLossHit || globalLatched)
+            {
+                var isProfit = globalProfitHit || (!globalLossHit && globalMetrics.DailyPnL >= 0);
+                var notifKey = isProfit ? "global_profit" : "global_loss";
+                var limit = isProfit ? globalMetrics.DailyMaxProfit : globalMetrics.DailyMaxLoss;
+                var reason = isProfit
+                    ? $"Global Portfolio Daily Max Profit Target Reached (Combined P&L: ₹{globalMetrics.DailyPnL:N2}, Target: ₹{limit:N2})"
+                    : $"Global Portfolio Daily Max Loss Limit Reached (Combined P&L: ₹{globalMetrics.DailyPnL:N2}, Limit: ₹{limit:N2})";
 
-                if (globalReason is not null)
+                // Fetch ALL open positions across all accounts (live AND paper)
+                var allOpenPositionIds = await db.Positions
+                    .AsNoTracking()
+                    .Where(p => p.ClosedAt == null)
+                    .Select(p => p.Id)
+                    .ToListAsync(ct);
+
+                int closed = 0;
+                int failed = 0;
+
+                if (autoSquareOffEnabled && allOpenPositionIds.Count > 0)
                 {
-                    // Fetch ALL open positions across all accounts (live AND paper)
-                    var allOpenPositionIds = await db.Positions
-                        .AsNoTracking()
-                        .Where(p => p.ClosedAt == null)
-                        .Select(p => p.Id)
-                        .ToListAsync(ct);
-
-                    if (allOpenPositionIds.Count > 0)
-                    {
+                    var due = DuePositions(allOpenPositionIds);
+                    if (due.Count > 0)
                         _logger.LogWarning(
                             "PORTFOLIO RISK HIT: {Reason} — auto squaring off {Count} open position(s) across ALL accounts",
-                            globalReason, allOpenPositionIds.Count);
+                            reason, due.Count);
 
-                        _lastGlobalRiskTriggeredDate = todayIst;
+                    _lastGlobalRiskTriggeredDate = todayIst;
 
-                        var closed = 0;
-                        var failed = 0;
-                        foreach (var posId in allOpenPositionIds)
+                    foreach (var posId in due)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        try
                         {
-                            ct.ThrowIfCancellationRequested();
-                            try
-                            {
-                                if (await engine.SquareOffPositionAsync(posId, globalReason))
-                                    closed++;
-                                else
-                                    failed++;
-                            }
-                            catch (Exception ex)
-                            {
+                            if (await engine.SquareOffPositionAsync(posId, reason))
+                                closed++;
+                            else
                                 failed++;
-                                _logger.LogWarning(ex, "Global risk square-off failed for position {PositionId}", posId);
-                            }
                         }
-
-                        if (notifications is not null)
+                        catch (Exception ex)
                         {
-                            var msg = $"🚨 GLOBAL PORTFOLIO AUTO SQUARE-OFF\n\n"
-                                + $"• {globalReason}\n"
-                                + $"• Closed: {closed} of {allOpenPositionIds.Count} position(s) across ALL accounts (Live + Paper)"
-                                + (failed > 0 ? $"\n• Failed: {failed}" : string.Empty)
-                                + $"\n• Time: {DateTime.UtcNow.ToIstString("hh:mm:ss tt")} IST";
-                            try { await notifications.SendTelegramCustomNotificationAsync(msg); }
-                            catch (Exception ex) { _logger.LogDebug(ex, "Global risk auto square-off Telegram notification failed"); }
+                            failed++;
+                            _logger.LogWarning(ex, "Global risk square-off failed for position {PositionId}", posId);
                         }
+                    }
+                }
 
-                        // All open positions have been handled; return for this tick
-                        return;
+                // Send Telegram Notification once per day
+                if (notifications != null && _sentRiskNotificationsToday.Add(notifKey))
+                {
+                    var icon = isProfit ? "🎯" : "🛑";
+                    var header = isProfit ? "GLOBAL PORTFOLIO DAILY PROFIT TARGET REACHED" : "GLOBAL PORTFOLIO DAILY MAX LOSS LIMIT REACHED";
+                    var statusText = isProfit
+                        ? "Portfolio daily profit target has been achieved."
+                        : "Portfolio daily maximum loss threshold has been breached.";
+
+                    var openText = allOpenPositionIds.Count > 0
+                        ? $"• Square-off: {closed} of {allOpenPositionIds.Count} position(s) squared off" + (failed > 0 ? $", {failed} failed" : string.Empty)
+                        : "• Open Positions: None (all positions closed)";
+
+                    var msg = $"{icon} {header}!\n\n"
+                        + $"• Combined P&L: ₹{globalMetrics.DailyPnL:N2}\n"
+                        + $"• Limit: ₹{limit:N2}\n"
+                        + $"• Status: {statusText}\n"
+                        + openText + "\n"
+                        + $"• New Orders: Blocked for remainder of day\n"
+                        + $"• Time: {DateTime.UtcNow.ToIstString("hh:mm:ss tt")} IST";
+
+                    try { await notifications.SendTelegramCustomNotificationAsync(msg); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Global risk Telegram notification failed"); }
+
+                    var hub = scopedServices.GetService<IHubContext<TradingHub>>();
+                    if (hub != null)
+                    {
+                        await hub.Clients.All.SendAsync("RiskLimitAlert", new { Timestamp = DateTime.UtcNow }, ct);
+                        await hub.Clients.All.SendAsync("PositionChanged", new { Timestamp = DateTime.UtcNow }, ct);
                     }
                 }
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed evaluating global portfolio risk-limit auto square-off");
-            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed evaluating global portfolio risk limits");
         }
 
         // -------------------------------------------------------------
         // TIER 1: PER-ACCOUNT CHECK (INDIVIDUAL ACCOUNT LIMITS)
-        // Evaluates ALL accounts with open positions (Live & Paper)
+        // Evaluates ALL enabled accounts (Live & Paper)
         // -------------------------------------------------------------
-        var accountIdsWithOpenPositions = openPositions.Select(p => p.TradingAccountId).Distinct().ToList();
-
-        foreach (var accountId in accountIdsWithOpenPositions)
+        foreach (var (accountId, account) in accounts)
         {
             ct.ThrowIfCancellationRequested();
-
-            if (!accounts.TryGetValue(accountId, out var account) || !account.IsEnabled)
-                continue;
 
             try
             {
                 var metrics = await riskManager.GetRiskMetricsAsync(accountId);
 
-                string? reason = null;
-                if (metrics.DailyMaxLoss > 0 && metrics.DailyPnL <= -metrics.DailyMaxLoss)
-                    reason = $"Account Daily Max Loss Hit (P&L: ₹{metrics.DailyPnL:N2}, Limit: ₹{metrics.DailyMaxLoss:N2})";
-                else if (metrics.DailyMaxProfit > 0 && metrics.DailyPnL >= metrics.DailyMaxProfit)
-                    reason = $"Account Daily Max Profit Hit (P&L: ₹{metrics.DailyPnL:N2}, Limit: ₹{metrics.DailyMaxProfit:N2})";
+                bool accProfitHit = metrics.DailyMaxProfit > 0 && metrics.DailyPnL >= metrics.DailyMaxProfit;
+                bool accLossHit = metrics.DailyMaxLoss > 0 && metrics.DailyPnL <= -metrics.DailyMaxLoss;
 
-                if (reason is null)
+                var accLatched = _lastRiskTriggeredDateByAccount.GetValueOrDefault(accountId, DateTime.MinValue) == todayIst;
+                if (!accProfitHit && !accLossHit && !accLatched)
                     continue;
+
+                var isProfit = accProfitHit || (!accLossHit && metrics.DailyPnL >= 0);
+                var notifKey = isProfit ? $"account_{accountId}_profit" : $"account_{accountId}_loss";
+                var limit = isProfit ? metrics.DailyMaxProfit : metrics.DailyMaxLoss;
+                var reason = isProfit
+                    ? $"Account Daily Max Profit Target Reached (P&L: ₹{metrics.DailyPnL:N2}, Target: ₹{limit:N2})"
+                    : $"Account Daily Max Loss Limit Reached (P&L: ₹{metrics.DailyPnL:N2}, Limit: ₹{limit:N2})";
 
                 var openPositionIds = await db.Positions
                     .AsNoTracking()
@@ -350,50 +431,73 @@ public sealed class LivePositionMonitorService(
                     .Select(p => p.Id)
                     .ToListAsync(ct);
 
-                if (openPositionIds.Count == 0)
-                    continue;
+                int closed = 0;
+                int failed = 0;
 
-                _logger.LogWarning(
-                    "Account {Name}: {Reason} — auto squaring off {Count} open position(s)",
-                    account.Name, reason, openPositionIds.Count);
-
-                var closed = 0;
-                var failed = 0;
-                foreach (var positionId in openPositionIds)
+                if (autoSquareOffEnabled && openPositionIds.Count > 0)
                 {
-                    ct.ThrowIfCancellationRequested();
-                    try
+                    var due = DuePositions(openPositionIds);
+                    if (due.Count > 0)
+                        _logger.LogWarning(
+                            "Account {Name}: {Reason} — auto squaring off {Count} open position(s)",
+                            account.Name, reason, due.Count);
+
+                    _lastRiskTriggeredDateByAccount[accountId] = todayIst;
+
+                    foreach (var positionId in due)
                     {
-                        if (await engine.SquareOffPositionAsync(positionId, reason))
-                            closed++;
-                        else
+                        ct.ThrowIfCancellationRequested();
+                        try
+                        {
+                            if (await engine.SquareOffPositionAsync(positionId, reason))
+                                closed++;
+                            else
+                                failed++;
+                        }
+                        catch (Exception ex)
+                        {
                             failed++;
-                    }
-                    catch (Exception ex)
-                    {
-                        failed++;
-                        _logger.LogWarning(ex, "Risk-limit square-off failed for position {PositionId}", positionId);
+                            _logger.LogWarning(ex, "Risk-limit square-off failed for position {PositionId}", positionId);
+                        }
                     }
                 }
 
-                _logger.LogInformation(
-                    "Account {Name} risk-limit square-off complete: closed {Closed}, failed {Failed} of {Total}",
-                    account.Name, closed, failed, openPositionIds.Count);
-
-                if (notifications is not null)
+                // Send Telegram Notification once per day
+                if (notifications != null && _sentRiskNotificationsToday.Add(notifKey))
                 {
-                    var msg = $"🔔 ACCOUNT RISK LIMIT AUTO SQUARE-OFF — {account.Name}\n\n"
-                        + $"• {reason}\n"
-                        + $"• Closed: {closed} of {openPositionIds.Count} position(s)"
-                        + (failed > 0 ? $"\n• Failed: {failed}" : string.Empty)
-                        + $"\n• Time: {DateTime.UtcNow.ToIstString("hh:mm:ss tt")} IST";
+                    var icon = isProfit ? "🎯" : "🛑";
+                    var header = isProfit ? $"DAILY PROFIT TARGET REACHED — {account.Name}" : $"DAILY MAX LOSS LIMIT REACHED — {account.Name}";
+                    var statusText = isProfit
+                        ? $"Daily profit target achieved for account '{account.Name}'."
+                        : $"Daily maximum loss limit hit for account '{account.Name}'.";
+
+                    var openText = openPositionIds.Count > 0
+                        ? $"• Square-off: {closed} of {openPositionIds.Count} position(s) squared off" + (failed > 0 ? $", {failed} failed" : string.Empty)
+                        : "• Open Positions: None (all positions closed)";
+
+                    var msg = $"{icon} {header}!\n\n"
+                        + $"• Account: {account.Name} ({account.ClientId})\n"
+                        + $"• Daily P&L: ₹{metrics.DailyPnL:N2}\n"
+                        + $"• Limit: ₹{limit:N2}\n"
+                        + $"• Status: {statusText}\n"
+                        + openText + "\n"
+                        + $"• New Orders: Blocked for this account today\n"
+                        + $"• Time: {DateTime.UtcNow.ToIstString("hh:mm:ss tt")} IST";
+
                     try { await notifications.SendTelegramCustomNotificationAsync(msg); }
-                    catch (Exception ex) { _logger.LogDebug(ex, "Risk-limit auto square-off Telegram notification failed"); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Account risk Telegram notification failed for {Name}", account.Name); }
+
+                    var hub = scopedServices.GetService<IHubContext<TradingHub>>();
+                    if (hub != null)
+                    {
+                        await hub.Clients.All.SendAsync("RiskLimitAlert", new { Timestamp = DateTime.UtcNow }, ct);
+                        await hub.Clients.All.SendAsync("PositionChanged", new { Timestamp = DateTime.UtcNow }, ct);
+                    }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed evaluating risk-limit auto square-off for account {Name}", account.Name);
+                _logger.LogWarning(ex, "Failed evaluating risk limits for account {Name}", account.Name);
             }
         }
     }

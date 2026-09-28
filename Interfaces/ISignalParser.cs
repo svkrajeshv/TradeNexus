@@ -50,6 +50,23 @@ public interface IChannelSignalParser : ISignalParser
     /// <see cref="RequiresActivation"/> is true.
     /// </summary>
     bool IsActivationMessage(string? message);
+
+    /// <summary>
+    /// Returns true when Buy signals from this channel must always wait for the entry
+    /// price (AwaitingEntry) in auto mode, regardless of the global
+    /// "EnableEntryPriceCrossingTrigger" setting.
+    /// </summary>
+    bool AlwaysAwaitEntry => false;
+
+    /// <summary>
+    /// Returns true when the message is a bare running-price tag the channel posts on
+    /// its call (e.g. "310❤️"), yielding the quoted price.
+    /// </summary>
+    bool TryParsePriceTag(string? message, out decimal price)
+    {
+        price = 0m;
+        return false;
+    }
 }
 
 /// <summary>

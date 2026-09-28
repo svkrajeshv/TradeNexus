@@ -295,6 +295,9 @@ public sealed partial class TelegramListenerService(
 
             // Tagged follow-up that only carries Target/SL levels for a previously
             // posted call (e.g. "Vip Group" replies "Target 320/350" to its own signal).
+            if (await TryHandlePriceTagEntryAsync(context, parser, message, scope.ServiceProvider))
+                return;
+
             if (await TryHandleFollowUpUpdateAsync(context, message))
                 return;
 
@@ -661,7 +664,7 @@ public sealed partial class TelegramListenerService(
                 // The CmpStreamingService monitors prices every 1s and will trigger execution
                 // when CMP >= EntryPrice. The 10-minute staleness guard still applies.
                 var crossingEnabled = await settings.GetSettingAsync<bool?>("EnableEntryPriceCrossingTrigger") ?? false;
-                if (crossingEnabled && parsed.Action == SignalAction.Buy)
+                if ((crossingEnabled || parser.AlwaysAwaitEntry) && parsed.Action == SignalAction.Buy)
                 {
                     signal.Status = SignalStatus.AwaitingEntry;
                     await context.SaveChangesAsync();
@@ -788,6 +791,90 @@ public sealed partial class TelegramListenerService(
         var engine = services.GetRequiredService<ITradingEngine>();
         foreach (var position in matchingPositions)
             await engine.SquareOffPositionAsync(position.Id);
+
+        return true;
+    }
+
+    /// <summary>
+    /// For channels
+    /// ("310❤️") on a call that is still AwaitingEntry executes it when the tagged price
+    /// equals the entry exactly. Live CMP crossing (HealthMonitorService) remains the other
+    /// trigger; whichever happens first wins because both require AwaitingEntry.
+    /// Returns true when the message was a price tag (consumed), false otherwise.
+    /// </summary>
+    private async Task<bool> TryHandlePriceTagEntryAsync(
+        TradingDbContext context, IChannelSignalParser parser, TelegramMessage message, IServiceProvider services)
+    {
+        if (!parser.AlwaysAwaitEntry || !parser.TryParsePriceTag(message.Text, out var tagPrice))
+            return false;
+
+        TradingSignal? signal = null;
+        if (message.ReplyToMessageId.HasValue)
+        {
+            signal = await context.TradingSignals.FirstOrDefaultAsync(s =>
+                s.TelegramMessageId == message.ReplyToMessageId.Value &&
+                s.ChannelName == message.SenderName);
+        }
+
+        // The channel often tags its "Target" follow-up rather than the call itself, so
+        // fall back to the latest call from the same channel still waiting for entry.
+        if (signal is null || signal.Status != SignalStatus.AwaitingEntry)
+        {
+            var cutoff = DateTime.UtcNow - FollowUpWindow;
+            signal = await context.TradingSignals
+                .Where(s => s.ChannelName == message.SenderName &&
+                            s.Status == SignalStatus.AwaitingEntry &&
+                            s.ReceivedTimestamp >= cutoff)
+                .OrderByDescending(s => s.ReceivedTimestamp)
+                .FirstOrDefaultAsync();
+        }
+
+        if (signal is null)
+            return true;
+
+        if (tagPrice != signal.EntryPrice)
+        {
+            _logger.LogInformation(
+                "Price tag {Price} from {Channel} on signal {SignalId} does not equal entry {Entry}; not entering.",
+                tagPrice, message.SenderName, signal.Id, signal.EntryPrice);
+            return true;
+        }
+
+        _logger.LogInformation(
+            "Price tag {Price} from {Channel} matched entry of signal {SignalId}; executing.",
+            tagPrice, message.SenderName, signal.Id);
+
+        signal.Status = SignalStatus.Pending;
+        await context.SaveChangesAsync();
+
+        var parsed = new ParsedSignal
+        {
+            Action = signal.Action,
+            Index = signal.Index,
+            Strike = signal.Strike,
+            OptionType = signal.OptionType,
+            EntryPrice = signal.EntryPrice,
+            StopLoss = signal.StopLoss,
+            Targets = [.. signal.Targets],
+            ExpiryDate = signal.ExpiryDate,
+            OriginalMessage = signal.OriginalMessage,
+            SignalTime = signal.TelegramTimestamp,
+            ChannelName = signal.ChannelName,
+            IsValid = true
+        };
+
+        var engine = services.GetRequiredService<ITradingEngine>();
+        var ok = await engine.ExecuteSignalAsync(parsed);
+        await context.Entry(signal).ReloadAsync();
+        if (signal.Status != SignalStatus.Executed)
+            signal.Status = ok ? SignalStatus.Executed : SignalStatus.Failed;
+        await context.SaveChangesAsync();
+
+        await _hub.Clients.All.SendAsync(SignalStatusChangedEvent, new
+        {
+            signal.Id,
+            Status = signal.Status.ToString()
+        });
 
         return true;
     }

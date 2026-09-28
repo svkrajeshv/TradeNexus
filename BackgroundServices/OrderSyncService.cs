@@ -271,8 +271,14 @@ public sealed class OrderSyncService(
 
             if (!string.IsNullOrWhiteSpace(remote.Text) && local.ErrorMessage != remote.Text)
             {
-                local.ErrorMessage = remote.Text;
-                mutated = true;
+                var isGenericStatus = remote.Text.Equals("complete", StringComparison.OrdinalIgnoreCase) ||
+                                      remote.Text.Equals("traded", StringComparison.OrdinalIgnoreCase) ||
+                                      remote.Text.Equals("executed", StringComparison.OrdinalIgnoreCase);
+                if (string.IsNullOrWhiteSpace(local.ErrorMessage) || !isGenericStatus)
+                {
+                    local.ErrorMessage = remote.Text;
+                    mutated = true;
+                }
             }
 
             if (mutated)
@@ -426,13 +432,10 @@ public sealed class OrderSyncService(
                     // SL/target exits stay with the broker.
                     var isBrokerManaged = order.ProductType == ProductType.Mos;
 
-                    var already = await db.Positions.AnyAsync(p =>
+                    var existingPos = await db.Positions.FirstOrDefaultAsync(p =>
                         p.TradingAccountId == order.TradingAccountId &&
                         p.Symbol == order.Symbol &&
                         p.ClosedAt == null, ct);
-
-                    if (already)
-                        continue;
 
                     var signal = await db.TradingSignals.AsNoTracking()
                         .FirstOrDefaultAsync(s => s.Id == order.SignalId, ct);
@@ -476,6 +479,27 @@ public sealed class OrderSyncService(
                         var defPts = profile is { DefaultTargetPoints: > 0 } ? profile.DefaultTargetPoints : 20m;
                         var isBuy = signal is null || signal.Action == SignalAction.Buy;
                         targetList = [isBuy ? fillPrice + defPts : Math.Max(0.05m, fillPrice - defPts)];
+                    }
+
+                    if (existingPos is not null)
+                    {
+                        // Position was already backfilled (e.g. by broker sync tick) before order sync ran.
+                        // Ensure it has SL, Targets, and ManagedLocally populated from this order/signal.
+                        if (existingPos.StopLoss == null || existingPos.Targets.Count == 0)
+                        {
+                            existingPos.StopLoss ??= slValue;
+                            if (existingPos.Targets.Count == 0 && targetList.Count > 0)
+                                existingPos.Targets = targetList;
+                            existingPos.ManagedLocally = !isBrokerManaged;
+                            mutated = true;
+                            _logger.LogInformation(
+                                "Enriched existing position {Symbol} with SL={SL}, Targets={Targets}",
+                                existingPos.Symbol, existingPos.StopLoss, string.Join("/", existingPos.Targets));
+
+                            if (!isBrokerManaged)
+                                await PlaceRestingTargetOrderAsync(db, order, qty, fillPrice, targetList, ct);
+                        }
+                        continue;
                     }
 
                     db.Positions.Add(new Position
@@ -621,7 +645,7 @@ public sealed class OrderSyncService(
                 ProductType = ProductType.Mis,
                 Status = response.Success ? OrderStatus.Accepted : OrderStatus.Failed,
                 BrokerId = response.OrderId,
-                ErrorMessage = response.ErrorMessage,
+                ErrorMessage = response.Success ? $"Resting Target Limit @ ₹{target:0.##}" : response.ErrorMessage,
                 CreatedAt = DateTime.UtcNow
             });
 

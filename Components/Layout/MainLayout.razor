@@ -6,6 +6,9 @@
 @using NexusApp.Telegram
 @using NexusApp.Interfaces
 @using NexusApp.Services
+@using NexusApp.Components.Shared
+@using NexusApp.Models
+@using NexusApp.TradingEngine
 @inject TelegramManager TelegramMgr
 @inject IBroker Broker
 @inject DataCleanupService Cleanup
@@ -13,6 +16,7 @@
 @inject IJSRuntime JS
 @inject NavigationManager Nav
 @inject HubConnectionFactory HubFactory
+@inject IServiceProvider ServiceProvider
 @implements IAsyncDisposable
 
 <MudThemeProvider Theme="_theme" IsDarkMode="_isDarkMode" />
@@ -69,6 +73,7 @@
        error that silently drops the whole declaration. *@
     <MudMainContent Class="px-3 px-sm-5 pb-3 pb-sm-5"
                     Style="padding-top: calc(var(--mud-appbar-height) + 16px);">
+        <RiskAlertBanner Alerts="_riskAlerts" IsTopBanner="true" />
         @Body
     </MudMainContent>
 </MudLayout>
@@ -87,12 +92,16 @@
     private TelegramConnectionState _telegramState = TelegramConnectionState.Disconnected;
     private System.Threading.Timer? _pollTimer;
     private HubConnection? _hub;
+    private List<RiskAlertInfo> _riskAlerts = [];
 
     protected override void OnInitialized()
     {
         _telegramState = TelegramMgr.State;
         _brokerConnected = Broker.IsConnected;
         TelegramMgr.StateChanged += OnTelegramStateChanged;
+
+        // Load active risk alerts in background without blocking initial layout render or navigation
+        _ = LoadRiskAlertsAsync();
 
         // Broker doesn't emit events yet; poll quickly so header reflects login promptly.
         _pollTimer = new System.Threading.Timer(_ =>
@@ -178,9 +187,34 @@
                 try { await JS.InvokeVoidAsync("NexusApp.playSound", requiresManual ? "signal-manual" : "signal-auto"); } catch { }
             });
 
+            _hub.On("RiskLimitAlert", async () =>
+            {
+                await LoadRiskAlertsAsync();
+            });
+
             await _hub.StartAsync();
         }
         catch { /* hub is best-effort */ }
+    }
+
+    private async Task LoadRiskAlertsAsync()
+    {
+        try
+        {
+            var alerts = await Task.Run(async () =>
+            {
+                using var scope = ServiceProvider.CreateScope();
+                var riskManager = scope.ServiceProvider.GetRequiredService<RiskManager>();
+                return await riskManager.GetActiveRiskAlertsAsync();
+            });
+
+            await InvokeAsync(() =>
+            {
+                _riskAlerts = alerts.DistinctBy(a => a.Key).ToList();
+                StateHasChanged();
+            });
+        }
+        catch { /* best effort */ }
     }
 
     private static (bool RequiresManual, string Channel, string Description) ParseSignalReceived(JsonElement payload)
