@@ -601,8 +601,8 @@ public class PaperTradingEngine(
                 var overrideSlPts = await _riskProfiles.GetOverrideSlPointsAsync(signal?.Index);
                 if (overrideSlPts > 0 && currentPrice > 0)
                 {
-                    var isBuy = signal is null || signal.Action == SignalAction.Buy;
-                    stopLoss = isBuy ? Math.Max(0.05m, currentPrice - overrideSlPts) : currentPrice + overrideSlPts;
+                    stopLoss = OverrideRiskLevels.ResolveStopLoss(
+                        OverrideRiskLevels.IsBuy(signal?.Action), signal?.EntryPrice ?? 0m, stopLoss, currentPrice, overrideSlPts);
                 }
                 else if ((stopLoss is null || stopLoss <= 0) && currentPrice > 0)
                 {
@@ -615,9 +615,8 @@ public class PaperTradingEngine(
                 var overridePts = await _riskProfiles.GetOverrideTargetPointsAsync(signal?.Index);
                 if (overridePts > 0 && currentPrice > 0)
                 {
-                    var isBuy = signal is null || signal.Action == SignalAction.Buy;
-                    var tgt = isBuy ? currentPrice + overridePts : Math.Max(0.05m, currentPrice - overridePts);
-                    targets = [tgt];
+                    targets = OverrideRiskLevels.ResolveTargets(
+                        OverrideRiskLevels.IsBuy(signal?.Action), signal?.EntryPrice ?? 0m, targets, currentPrice, overridePts);
                 }
                 else if (targets.Count == 0 && currentPrice > 0)
                 {

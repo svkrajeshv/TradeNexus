@@ -14,11 +14,20 @@ namespace NexusApp.Parser.Channels;
 /// "BUY ABOVE - NNN" entry, "TGT - a/b/c+" targets, "SL -NNN" stop-loss and the
 /// "#27Aug Expiry" date. No activation message is required.
 /// </summary>
-public class GujaratiTraderParser(ILogger<GujaratiTraderParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
+public class GujaratiTraderParser(ILogger<GujaratiTraderParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory), NexusApp.Interfaces.IChannelSignalParser
 {
     public override int Priority => 10;
 
     public override bool RequiresActivation => false;
+
+    /// <summary>
+    /// Calls are entered only when the channel posts the entry price as a tagged or
+    /// follow-up message (e.g. "250❤️").
+    /// </summary>
+    public bool AlwaysAwaitEntry => true;
+
+    public bool TryParsePriceTag(string? message, out decimal price) =>
+        VipGroupParser.TryParseBarePrice(message, out price);
 
     /// <summary>
     /// Matches the "GUJARATI TRADER" channel.

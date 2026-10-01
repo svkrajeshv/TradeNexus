@@ -123,6 +123,23 @@
             NSE/BSE index options (NFO &amp; BFO). Market hours 09:15-15:30 IST.
         </MudText>
     </MudPaper>
+    <MudPaper Class="pa-4 mb-3 settings-card-blue" Elevation="2">
+        <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3">
+            <MudIcon Icon="@Icons.Material.Filled.AccessTime" Color="Color.Primary" />
+            <MudText Typo="Typo.h6">Equity Timings</MudText>
+        </MudStack>
+        <MudGrid Spacing="2">
+            <MudItem xs="12" md="4">
+                <MudTextField T="string" @bind-Value="_autoSquareOffTime" Label="Auto Square-Off Time (24h IST, e.g. 15:10)" Variant="Variant.Outlined" HelperText="Open NSE/BSE positions are closed at this IST time" Disabled="!_autoSquareOffEnabled" />
+            </MudItem>
+            <MudItem xs="12" md="4">
+                <MudTextField T="string" @bind-Value="_signalTimeWindowStart" Label="Signal Start Time (24h IST, e.g. 09:15)" Variant="Variant.Outlined" HelperText="Equity signals before this IST time are skipped" Disabled="!_signalTimeWindowEnabled" />
+            </MudItem>
+            <MudItem xs="12" md="4">
+                <MudTextField T="string" @bind-Value="_signalTimeWindowEnd" Label="Signal End Time (24h IST, e.g. 15:00)" Variant="Variant.Outlined" HelperText="Equity signals after this IST time are skipped" Disabled="!_signalTimeWindowEnabled" />
+            </MudItem>
+        </MudGrid>
+    </MudPaper>
     <SegmentSettingsPanel Segment="MarketSegment.Equity" Lots="_lotConfigs" Profiles="_indexProfiles" />
 </MudTabPanel>
 
@@ -136,6 +153,23 @@
             Master switch. When off, MCX signals are neither parsed nor executed and commodity market hours are ignored by the pollers.
         </MudText>
         <MudSwitch T="bool" @bind-Value="_mcxEnabled" Color="Color.Warning" Label="Enable commodity (MCX) trading" />
+    </MudPaper>
+    <MudPaper Class="pa-4 mb-3 settings-card-blue" Elevation="2">
+        <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3">
+            <MudIcon Icon="@Icons.Material.Filled.AccessTime" Color="Color.Primary" />
+            <MudText Typo="Typo.h6">MCX Timings</MudText>
+        </MudStack>
+        <MudGrid Spacing="2">
+            <MudItem xs="12" md="4">
+                <MudTextField T="string" @bind-Value="_mcxAutoSquareOffTime" Label="Auto Square-Off Time (24h IST, e.g. 23:00)" Variant="Variant.Outlined" HelperText="Open MCX positions are closed at this IST time" Disabled="!_autoSquareOffEnabled" />
+            </MudItem>
+            <MudItem xs="12" md="4">
+                <MudTextField T="string" @bind-Value="_mcxSignalTimeWindowStart" Label="Signal Start Time (24h IST, e.g. 09:00)" Variant="Variant.Outlined" HelperText="MCX signals before this IST time are skipped" Disabled="!_signalTimeWindowEnabled" />
+            </MudItem>
+            <MudItem xs="12" md="4">
+                <MudTextField T="string" @bind-Value="_mcxSignalTimeWindowEnd" Label="Signal End Time (24h IST, e.g. 23:00)" Variant="Variant.Outlined" HelperText="MCX signals after this IST time are skipped" Disabled="!_signalTimeWindowEnabled" />
+            </MudItem>
+        </MudGrid>
     </MudPaper>
     <SegmentSettingsPanel Segment="MarketSegment.Commodity" Lots="_lotConfigs" Profiles="_indexProfiles" Enabled="_mcxEnabled" />
 </MudTabPanel>
@@ -181,12 +215,11 @@
                 <MudDivider Class="my-3" />
                 <MudText Typo="Typo.subtitle2" Class="mb-2 font-weight-bold">Auto Square-Off</MudText>
                 <MudSwitch T="bool" @bind-Value="_autoSquareOffEnabled" Color="Color.Error" Label="Enable Auto Square-Off" Class="mb-2" />
-                <MudTextField T="string" @bind-Value="_autoSquareOffTime" Label="Auto Square-Off Time (24h IST, e.g. 15:10)" Variant="Variant.Outlined" HelperText="All open positions are closed automatically at this IST time each day" />
+                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block">Square-off time is configured per segment in the Equity and MCX tabs.</MudText>
                 <MudDivider Class="my-3" />
                 <MudText Typo="Typo.subtitle2" Class="mb-2 font-weight-bold">Signals by Time</MudText>
                 <MudSwitch T="bool" @bind-Value="_signalTimeWindowEnabled" Color="Color.Primary" Label="Only execute signals within trading window" Class="mb-2" />
-                <MudTextField T="string" @bind-Value="_signalTimeWindowStart" Label="Signal Start Time (24h IST, e.g. 09:15)" Variant="Variant.Outlined" Class="mb-3" HelperText="Signals received before this IST time are skipped" />
-                <MudTextField T="string" @bind-Value="_signalTimeWindowEnd" Label="Signal End Time (24h IST, e.g. 15:00)" Variant="Variant.Outlined" HelperText="Signals received after this IST time are skipped" />
+                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block">Signal start/end times are configured per segment in the Equity and MCX tabs.</MudText>
                 <MudDivider Class="my-3" />
                 <MudText Typo="Typo.subtitle2" Class="mb-2 font-weight-bold">Slippage Guard</MudText>
                 <MudSwitch T="bool" @bind-Value="_slippageGuardEnabled" Color="Color.Warning" Label="Reject orders on excessive slippage (Live + Paper)" Class="mb-2" />
@@ -343,6 +376,9 @@
     private bool _signalTimeWindowEnabled = false;
     private string _signalTimeWindowStart = "09:15";
     private string _signalTimeWindowEnd = "15:00";
+    private string _mcxAutoSquareOffTime = "23:00";
+    private string _mcxSignalTimeWindowStart = "09:00";
+    private string _mcxSignalTimeWindowEnd = "23:00";
     private bool _slippageGuardEnabled = false;
     private decimal _maxSlippagePercent = 1.0m;
     private bool _enableEntryCrossingTrigger = true;
@@ -416,6 +452,9 @@
             if (stwe.HasValue) _signalTimeWindowEnabled = stwe.Value;
             _signalTimeWindowStart = await SettingsService.GetSettingAsync<string>("SignalTimeWindowStart") ?? "09:15";
             _signalTimeWindowEnd = await SettingsService.GetSettingAsync<string>("SignalTimeWindowEnd") ?? "15:00";
+            _mcxAutoSquareOffTime = await SettingsService.GetSettingAsync<string>("Mcx.AutoSquareOffTime") ?? "23:00";
+            _mcxSignalTimeWindowStart = await SettingsService.GetSettingAsync<string>("Mcx.SignalTimeWindowStart") ?? "09:00";
+            _mcxSignalTimeWindowEnd = await SettingsService.GetSettingAsync<string>("Mcx.SignalTimeWindowEnd") ?? "23:00";
             var sge = await SettingsService.GetSettingAsync<bool?>("SlippageGuardEnabled");
             if (sge.HasValue) _slippageGuardEnabled = sge.Value;
             var msp = await SettingsService.GetSettingAsync<decimal?>("MaxSlippagePercent");
@@ -500,6 +539,9 @@
             await SettingsService.SetSettingAsync("SignalTimeWindowEnabled", _signalTimeWindowEnabled);
             await SettingsService.SetSettingAsync("SignalTimeWindowStart", _signalTimeWindowStart);
             await SettingsService.SetSettingAsync("SignalTimeWindowEnd", _signalTimeWindowEnd);
+            await SettingsService.SetSettingAsync("Mcx.AutoSquareOffTime", _mcxAutoSquareOffTime);
+            await SettingsService.SetSettingAsync("Mcx.SignalTimeWindowStart", _mcxSignalTimeWindowStart);
+            await SettingsService.SetSettingAsync("Mcx.SignalTimeWindowEnd", _mcxSignalTimeWindowEnd);
             await SettingsService.SetSettingAsync("SlippageGuardEnabled", _slippageGuardEnabled);
             await SettingsService.SetSettingAsync("MaxSlippagePercent", _maxSlippagePercent);
 

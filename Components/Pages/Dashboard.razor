@@ -22,6 +22,7 @@
 @inject NexusApp.Services.HealthSnapshotCache HealthSnapshots
 @inject NexusApp.Services.HubConnectionFactory HubFactory
 @inject ILogger<Dashboard> Logger
+@inject NexusApp.Parser.SignalParserResolver ParserResolver
 @implements IAsyncDisposable
 
 <PageTitle>Trading Dashboard</PageTitle>
@@ -321,9 +322,6 @@
             <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="@(_isLiveSignalsExpanded ? "mb-2" : string.Empty)">
                 <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Style="cursor: pointer;" @onclick="ToggleLiveSignalsExpandedAsync">
                     <MudText Typo="Typo.h6">Live Signals</MudText>
-                    <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Outlined">
-                        Crossed: @GetCrossedCount() / @_signals.Count
-                    </MudChip>
                 </MudStack>
                 <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
                     <MudButton StartIcon="@Icons.Material.Filled.Refresh" OnClick="RefreshAsync" Size="Size.Small">Refresh</MudButton>
@@ -344,7 +342,7 @@
                 else
                 {
                     <div class="table-scroll">
-                    <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" Breakpoint="Breakpoint.Sm" RowStyleFunc="GetSignalRowStyle" FixedHeader="true">
+                    <MudTable Class="live-signals-table" Items="_signals" Dense="true" Hover="true" Bordered="false" Striped="true" Breakpoint="Breakpoint.Sm" FixedHeader="true">
                         <HeaderContent>
                             <MudTh>Time</MudTh>
                             <MudTh>Channel</MudTh>
@@ -358,7 +356,6 @@
                         <RowTemplate>
                             <LiveSignalRow Signal="context"
                                            CmpDisplay="@GetCmpDisplay(context)"
-                                           HasCrossed="@HasCmpCrossedEntry(context)"
                                            BlinkClass="@GetCmpBlinkClass(context)"
                                            DelayText="@FormatDelay(context.SignalDelayMs)"
                                            Staleness="@ToTuple(GetSignalStaleness(context))"
@@ -713,6 +710,10 @@
             </MudCollapse>
         </MudPaper>
     </MudItem>
+
+    <MudItem xs="12">
+        <FailedSignalsGrid Items="_failedRows" Version="_failedVersion" Expanded="_isFailedSignalsExpanded" OnToggle="ToggleFailedSignalsExpandedAsync" />
+    </MudItem>
 </MudGrid>
 
 @code {
@@ -721,7 +722,12 @@
     private bool _isLiveSignalsExpanded = true;
     private bool _isWatchlistExpanded = true;
     private bool _isPositionsExpanded = true;
+    private bool _isFailedSignalsExpanded = true;
     private List<TradingSignal> _signals = new();
+    private List<TradingSignal> _failedSignals = new();
+    private List<FailedSignalsGrid.Row> _failedRows = new();
+    private int _failedVersion;
+    private string _failedKey = string.Empty;
     private List<TradingSignal> _watchlist = new();
     private List<NexusApp.Models.Position> _positions = new();
     private readonly Dictionary<int, SignalEditModel> _edits = new();
@@ -979,6 +985,9 @@
     // Pending order auto-cancel timeout (Settings page), used to project a
     // remaining-window staleness hint on still-actionable Live Signal rows.
     private int _pendingOrderTimeoutMinutes = 5;
+    // Per-segment signal window end (IST); tag-entry calls stay armed until then.
+    private readonly Dictionary<MarketSegment, TimeSpan> _segmentEntryEnd = [];
+    private readonly Dictionary<string, bool> _tagEntryByChannel = new(StringComparer.OrdinalIgnoreCase);
 
     // Price-offset fields loaded from Settings – only applied when > 0.
     private decimal _entryPriceOffset = 0m;
@@ -1000,11 +1009,20 @@
         if (watchExp.HasValue) _isWatchlistExpanded = watchExp.Value;
         var posExp = await SettingsService.GetSettingAsync<bool?>("Dashboard.Grid.Positions.Expanded");
         if (posExp.HasValue) _isPositionsExpanded = posExp.Value;
+        var failedExp = await SettingsService.GetSettingAsync<bool?>("Dashboard.Grid.FailedSignals.Expanded");
+        if (failedExp.HasValue) _isFailedSignalsExpanded = failedExp.Value;
 
         var saved = await SettingsService.GetSettingAsync<int?>("DefaultQuantity");
         if (saved.HasValue && saved.Value > 0)
             _defaultLots = saved.Value;
         _pendingOrderTimeoutMinutes = await SettingsService.GetSettingAsync<int?>("PendingOrderTimeoutMinutes") ?? 5;
+        foreach (var seg in SegmentTimeSettings.All)
+        {
+            var endStr = await SettingsService.GetSettingAsync<string>(SegmentTimeSettings.SignalWindowEndKey(seg))
+                ?? SegmentTimeSettings.DefaultSignalWindowEnd(seg);
+            if (TimeSpan.TryParse(endStr, CultureInfo.InvariantCulture, out var end))
+                _segmentEntryEnd[seg] = end;
+        }
 
         _entryPriceOffset  = await SettingsService.GetSettingAsync<decimal?>("EntryPriceOffset") ?? 0m;
         _targetPriceOffset = await SettingsService.GetSettingAsync<decimal?>("TargetPriceOffset") ?? 0m;
@@ -1030,8 +1048,14 @@
                 var lsLive = await JS.InvokeAsync<string?>("localStorage.getItem", "Dashboard.Grid.LiveSignals.Expanded");
                 var lsWatch = await JS.InvokeAsync<string?>("localStorage.getItem", "Dashboard.Grid.Watchlist.Expanded");
                 var lsPos = await JS.InvokeAsync<string?>("localStorage.getItem", "Dashboard.Grid.Positions.Expanded");
+                var lsFailed = await JS.InvokeAsync<string?>("localStorage.getItem", "Dashboard.Grid.FailedSignals.Expanded");
 
                 bool changed = false;
+                if (bool.TryParse(lsFailed, out var bFailed) && bFailed != _isFailedSignalsExpanded)
+                {
+                    _isFailedSignalsExpanded = bFailed;
+                    changed = true;
+                }
                 if (bool.TryParse(lsLive, out var bLive) && bLive != _isLiveSignalsExpanded)
                 {
                     _isLiveSignalsExpanded = bLive;
@@ -1058,6 +1082,17 @@
                 // Ignore JS interop errors if browser or circuit is disconnected
             }
         }
+    }
+
+    private async Task ToggleFailedSignalsExpandedAsync()
+    {
+        _isFailedSignalsExpanded = !_isFailedSignalsExpanded;
+        await SettingsService.SetSettingAsync("Dashboard.Grid.FailedSignals.Expanded", _isFailedSignalsExpanded);
+        try
+        {
+            await JS.InvokeVoidAsync("localStorage.setItem", "Dashboard.Grid.FailedSignals.Expanded", _isFailedSignalsExpanded ? "true" : "false");
+        }
+        catch { }
     }
 
     private async Task ToggleLiveSignalsExpandedAsync()
@@ -1457,10 +1492,16 @@
             // reliable, so parallel connections contend for the lock and each can
             // block for the full busy_timeout, hanging the circuit.
             var allRecent = await SignalService.GetRecentSignalsAsync(50);
-            _signals = allRecent
+            var todayNotExecuted = allRecent
                 .Where(s => s.ReceivedTimestamp.ToIst().Date == todayIst &&
                             s.Status != SignalStatus.Executed)
+                .ToList();
+            _signals = todayNotExecuted
+                .Where(s => s.Status != SignalStatus.Failed)
                 .Take(30)
+                .ToList();
+            _failedSignals = todayNotExecuted
+                .Where(s => s.Status == SignalStatus.Failed)
                 .ToList();
             _todaySignals = allRecent.Count(s => s.ReceivedTimestamp.ToIst().Date == todayIst);
 
@@ -1481,7 +1522,7 @@
             _executedAll   = exAll;
 
             var watchSignalIds  = _watchlist.Select(s => s.Id).ToList();
-            var statusSignalIds = _signals.Select(s => s.Id).Concat(watchSignalIds).Distinct().ToList();
+            var statusSignalIds = _signals.Select(s => s.Id).Concat(_failedSignals.Select(s => s.Id)).Concat(watchSignalIds).Distinct().ToList();
 
             var exitPrices     = await QueryExitPricesAsync(watchSignalIds);
             var failureReasons = await QueryFailureReasonsAsync(statusSignalIds);
@@ -1493,6 +1534,17 @@
             _failureReasonBySignal.Clear();
             foreach (var (signalId, message) in failureReasons)
                 _failureReasonBySignal.TryAdd(signalId, message);
+
+            var failedRows = _failedSignals
+                .Select(s => new FailedSignalsGrid.Row(s, GetStatusReason(s) ?? string.Empty))
+                .ToList();
+            var failedKey = string.Join("|", failedRows.Select(r => $"{r.Signal.Id}:{r.Reason}"));
+            if (failedKey != _failedKey)
+            {
+                _failedKey = failedKey;
+                _failedRows = failedRows;
+                _failedVersion++;
+            }
 
             SyncEdits();
             RebuildPositionViews();
@@ -2080,6 +2132,18 @@
     /// </summary>
     private SignalStalenessInfo? GetSignalStaleness(TradingSignal signal)
     {
+        // Tag-entry channels stay armed until their segment's signal end time (server rule).
+        if (signal.Status == SignalStatus.AwaitingEntry && IsTagEntryChannel(signal.ChannelName))
+        {
+            var segment = MarketSegments.ForUnderlying(signal.Index);
+            if (!_segmentEntryEnd.TryGetValue(segment, out var endIst))
+                endIst = TimeSpan.Parse(SegmentTimeSettings.DefaultSignalWindowEnd(segment), CultureInfo.InvariantCulture);
+            var untilEnd = endIst - DateTime.UtcNow.ToIst().TimeOfDay;
+            if (untilEnd <= TimeSpan.Zero)
+                return new SignalStalenessInfo("Entry window closed", Color.Error);
+            return new SignalStalenessInfo($"Waiting till {endIst:hh\\:mm}", untilEnd.TotalMinutes < 15 ? Color.Warning : Color.Default);
+        }
+
         if (_pendingOrderTimeoutMinutes <= 0 || !(IsEditable(signal) || IsPendingAutoExecution(signal)))
             return null;
 
@@ -2087,7 +2151,10 @@
         var remaining = TimeSpan.FromMinutes(_pendingOrderTimeoutMinutes) - elapsed;
 
         if (remaining <= TimeSpan.Zero)
-            return new SignalStalenessInfo("Cancelling...", Color.Error);
+            // Parsed/Pending are never auto-expired by the server; they need a manual Buy/Ignore.
+            return IsEditable(signal)
+                ? new SignalStalenessInfo("Stale - action manually", Color.Warning)
+                : new SignalStalenessInfo("Cancelling...", Color.Error);
 
         var totalWindow = TimeSpan.FromMinutes(_pendingOrderTimeoutMinutes);
         var fractionRemaining = remaining.TotalSeconds / totalWindow.TotalSeconds;
@@ -2099,6 +2166,17 @@
         };
 
         return new SignalStalenessInfo($"{FormatCountdown(remaining)} left", color);
+    }
+
+    private bool IsTagEntryChannel(string? channel)
+    {
+        var key = channel ?? string.Empty;
+        if (!_tagEntryByChannel.TryGetValue(key, out var isTag))
+        {
+            isTag = ParserResolver.Resolve(channel).AlwaysAwaitEntry;
+            _tagEntryByChannel[key] = isTag;
+        }
+        return isTag;
     }
 
     private static string FormatCountdown(TimeSpan remaining)
@@ -2144,19 +2222,9 @@
             : PriceComparison.IsLessThanOrEqual(cmp, entry);
     }
 
-    private string GetSignalRowStyle(TradingSignal signal, int rowNumber)
-    {
-        if (!HasCmpCrossedEntry(signal)) return string.Empty;
-        return signal.Action == SignalAction.Buy
-            ? "background-color: rgba(47,158,68,0.18);"
-            : "background-color: rgba(224,49,49,0.18);";
-    }
-
-    private int GetCrossedCount() => _signals.Count(HasCmpCrossedEntry);
-
     /// <summary>
     /// Colors the whole Open Positions row by book (live vs paper) so the two are
-    /// distinguishable at a glance on desktop without reading the Book chip text.
+    /// distinguishable at a glance
     /// </summary>
     private static string GetPositionRowClass(object positionObj, int rowNumber)
     {

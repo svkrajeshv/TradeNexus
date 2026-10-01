@@ -5,6 +5,7 @@ using NexusApp.Helpers;
 using NexusApp.Hubs;
 using NexusApp.Interfaces;
 using NexusApp.Models;
+using NexusApp.TradingEngine;
 using System.Linq;
 
 namespace NexusApp.BackgroundServices;
@@ -452,8 +453,8 @@ public sealed class OrderSyncService(
 
                     if (overrideSlPts > 0 && fillPrice > 0)
                     {
-                        var isBuy = signal is null || signal.Action == SignalAction.Buy;
-                        slValue = isBuy ? Math.Max(0.05m, fillPrice - overrideSlPts) : fillPrice + overrideSlPts;
+                        slValue = OverrideRiskLevels.ResolveStopLoss(
+                            OverrideRiskLevels.IsBuy(signal?.Action), signal?.EntryPrice ?? 0m, slValue, fillPrice, overrideSlPts);
                     }
                     else if ((slValue is null || slValue <= 0) && fillPrice > 0)
                     {
@@ -469,9 +470,8 @@ public sealed class OrderSyncService(
 
                     if (overridePts > 0 && fillPrice > 0)
                     {
-                        var isBuy = signal is null || signal.Action == SignalAction.Buy;
-                        var tgt = isBuy ? fillPrice + overridePts : Math.Max(0.05m, fillPrice - overridePts);
-                        targetList = [tgt];
+                        targetList = OverrideRiskLevels.ResolveTargets(
+                            OverrideRiskLevels.IsBuy(signal?.Action), signal?.EntryPrice ?? 0m, targetList, fillPrice, overridePts);
                     }
                     else if (targetList.Count == 0 && fillPrice > 0)
                     {

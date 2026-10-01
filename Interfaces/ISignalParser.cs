@@ -91,4 +91,9 @@ public class ParsedSignal
     /// Manual lot override from the UI. 0 = use account's DefaultQuantity.
     /// </summary>
     public decimal Lots { get; set; }
+    /// <summary>
+    /// Id of the persisted TradingSignal this parse came from, when known. Lets the engine
+    /// update that row instead of matching by contract within a short time window.
+    /// </summary>
+    public int? SignalId { get; set; }
 }

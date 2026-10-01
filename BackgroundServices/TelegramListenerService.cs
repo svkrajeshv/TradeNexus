@@ -53,7 +53,7 @@ public sealed partial class TelegramListenerService(
     /// Group") post the entry, the targets and the stop-loss as three consecutive messages
     /// without replying to the first one, all within a minute or two.
     /// </summary>
-    private static readonly TimeSpan FollowUpWindow = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan FollowUpWindow = NexusApp.Parser.TagEntryPolicy.Window;
 
     private DateTime _serviceStartTime = DateTime.UtcNow;
 
@@ -412,6 +412,7 @@ public sealed partial class TelegramListenerService(
                     {
                         parsedSignal.SignalTime = targetSignal.TelegramTimestamp;
                         parsedSignal.ChannelName = targetSignal.ChannelName;
+                        parsedSignal.SignalId = targetSignal.Id;
 
                         var crossingEnabled = await settings.GetSettingAsync<bool?>("EnableEntryPriceCrossingTrigger") ?? false;
 
@@ -666,7 +667,10 @@ public sealed partial class TelegramListenerService(
                 var crossingEnabled = await settings.GetSettingAsync<bool?>("EnableEntryPriceCrossingTrigger") ?? false;
                 if ((crossingEnabled || parser.AlwaysAwaitEntry) && parsed.Action == SignalAction.Buy)
                 {
-                    signal.Status = SignalStatus.AwaitingEntry;
+					if (parser.AlwaysAwaitEntry)
+						await SupersedeOlderAwaitingCallsAsync(context, signal);
+
+					signal.Status = SignalStatus.AwaitingEntry;
                     await context.SaveChangesAsync();
                     _logger.LogInformation(
                         "Signal {SignalId} set to AwaitingEntry — will execute when CMP crosses entry price {Entry}",
@@ -681,6 +685,7 @@ public sealed partial class TelegramListenerService(
                 }
 
                 var engine = scope.ServiceProvider.GetRequiredService<ITradingEngine>();
+                parsed.SignalId = signal.Id;
                 var ok = await engine.ExecuteSignalAsync(parsed);
                 var fresh = await context.TradingSignals.FindAsync(signal.Id);
                 if (fresh != null)
@@ -832,10 +837,16 @@ public sealed partial class TelegramListenerService(
         if (signal is null)
             return true;
 
-        if (tagPrice != signal.EntryPrice)
+        // Enter when the tag is at or just above entry (channels often post 37, 38... after entry 36).
+        // Band comes from the Slippage Guard: entry .. entry + MaxSlippagePercent% (exact match when the guard is off).
+        var settingsSvc = services.GetRequiredService<ISettingsService>();
+        var guardOn = await settingsSvc.GetSettingAsync<bool?>("SlippageGuardEnabled") ?? false;
+        var slipPct = await settingsSvc.GetSettingAsync<decimal?>("MaxSlippagePercent") ?? 1.0m;
+        var tolerance = guardOn ? signal.EntryPrice * Math.Max(0m, slipPct) / 100m : 0m;
+        if (tagPrice < signal.EntryPrice || tagPrice > signal.EntryPrice + Math.Max(0m, tolerance))
         {
             _logger.LogInformation(
-                "Price tag {Price} from {Channel} on signal {SignalId} does not equal entry {Entry}; not entering.",
+                "Price tag {Price} from {Channel} on signal {SignalId} is outside entry {Entry} + tolerance; not entering.",
                 tagPrice, message.SenderName, signal.Id, signal.EntryPrice);
             return true;
         }
@@ -860,6 +871,7 @@ public sealed partial class TelegramListenerService(
             OriginalMessage = signal.OriginalMessage,
             SignalTime = signal.TelegramTimestamp,
             ChannelName = signal.ChannelName,
+            SignalId = signal.Id,
             IsValid = true
         };
 
@@ -977,7 +989,61 @@ public sealed partial class TelegramListenerService(
     /// and has not already been closed out. Returns null when no such call exists, in which
     /// case the message falls through to the normal parsing pipeline.
     /// </summary>
-    private static async Task<TradingSignal?> FindRecentSignalForFollowUpAsync(
+	/// <summary>
+	/// Tag-entry channels run one live call at a time: a new call supersedes any older call
+	/// from the same channel still waiting for its entry.
+	/// </summary>
+	private async Task SupersedeOlderAwaitingCallsAsync(TradingDbContext context, TradingSignal current)
+	{
+		var older = await context.TradingSignals
+			.Where(s => s.ChannelName == current.ChannelName &&
+						s.Id != current.Id &&
+						s.Status == SignalStatus.AwaitingEntry &&
+						s.Index == current.Index &&
+						s.Strike == current.Strike &&
+						s.OptionType == current.OptionType)
+			.ToListAsync();
+
+		if (older.Count == 0) return;
+
+		var defaultAccId = await context.TradingAccounts
+			.AsNoTracking()
+			.Where(a => a.IsEnabled)
+			.OrderByDescending(a => a.IsDefault)
+			.Select(a => a.Id)
+			.FirstOrDefaultAsync();
+
+		foreach (var s in older)
+		{
+			s.Status = SignalStatus.Failed;
+			if (defaultAccId > 0)
+			{
+				context.Orders.Add(new Order
+				{
+					SignalId = s.Id,
+					TradingAccountId = defaultAccId,
+					Symbol = s.Symbol ?? s.Index,
+					Quantity = 0,
+					Price = s.EntryPrice,
+					Side = s.Action == SignalAction.Buy ? OrderSide.Buy : OrderSide.Sell,
+					OrderType = OrderType.Limit,
+					ProductType = ProductType.Nrml,
+					Status = OrderStatus.Rejected,
+					ErrorMessage = $"Superseded: newer call from {current.ChannelName} ({current.Index} {current.Strike} {current.OptionType}) arrived before the entry was tagged.",
+					CreatedAt = DateTime.UtcNow
+				});
+			}
+			_logger.LogInformation(
+				"Signal {OldId} ({Index} {Strike}{Type}) superseded by newer call from {Channel}; expired without entry.",
+				s.Id, s.Index, s.Strike, s.OptionType, current.ChannelName);
+		}
+
+		await context.SaveChangesAsync();
+		foreach (var s in older)
+			await _hub.Clients.All.SendAsync(SignalStatusChangedEvent, new { s.Id, Status = s.Status.ToString() });
+	}
+
+	private static async Task<TradingSignal?> FindRecentSignalForFollowUpAsync(
         TradingDbContext context, TelegramMessage message)
     {
         if (string.IsNullOrWhiteSpace(message.SenderName))

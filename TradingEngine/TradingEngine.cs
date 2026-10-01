@@ -111,13 +111,37 @@ public class TradingEngine(
             // Staleness guard: reject any signal older than 10 minutes so we
             // don't chase price that has already moved. SignalTime is populated
             // from the Telegram message timestamp by SignalParser.
-            if (signal.SignalTime != default)
+			// Tag-entry channels wait for the channel's own price post, so they get a longer
+			// window and never open new positions late in the session.
+			var isTagEntry = !string.IsNullOrWhiteSpace(signal.ChannelName) &&
+				(_serviceProvider.GetService<NexusApp.Parser.SignalParserResolver>()?.Resolve(signal.ChannelName).AlwaysAwaitEntry ?? false);
+			var maxAge = isTagEntry ? NexusApp.Parser.TagEntryPolicy.Window : MaxSignalAge;
+
+			var entrySegment = MarketSegments.ForUnderlying(signal.Index);
+			var lastEntryStr = await _settings.GetSettingAsync<string>(SegmentTimeSettings.SignalWindowEndKey(entrySegment))
+				?? SegmentTimeSettings.DefaultSignalWindowEnd(entrySegment);
+			var lastEntryIst = TimeSpan.TryParse(lastEntryStr, CultureInfo.InvariantCulture, out var parsedLastEntry)
+				? parsedLastEntry
+				: NexusApp.Parser.TagEntryPolicy.LastEntryTimeIst;
+
+			if (isTagEntry && DateTime.UtcNow.ToIst().TimeOfDay >= lastEntryIst)
+			{
+				var lateReason = $"Tag-entry match at/after {lastEntryIst:hh\\:mm} IST ({SegmentTimeSettings.Label(entrySegment)} signal end time); no new entries this late in the session.";
+				_logger.LogWarning("Skipping late tag-entry signal for {Index} {Strike} {Type}", signal.Index, signal.Strike, signal.OptionType);
+				await RecordFailureAsync(signal, failureSignalEntity, null, lateReason);
+				return false;
+			}
+
+			if (signal.SignalTime != default)
             {
                 var age = DateTime.UtcNow - signal.SignalTime.EnsureUtc();
-                if (age > MaxSignalAge)
+                var isStale = isTagEntry
+                    ? signal.SignalTime.EnsureUtc().ToIst().Date < DateTime.UtcNow.ToIst().Date
+                    : age > maxAge;
+                if (isStale)
                 {
                     var reason =
-                        $"Signal is {age.TotalMinutes:0.0} min old (> {MaxSignalAge.TotalMinutes:0} min cutoff); refusing to execute stale signal.";
+                        $"Signal is {age.TotalMinutes:0.0} min old (> {maxAge.TotalMinutes:0} min cutoff); refusing to execute stale signal.";
                     _logger.LogWarning(
                         "Skipping stale signal for {Index} {Strike} {Type}: age={AgeMin:0.0} min",
                         signal.Index, signal.Strike, signal.OptionType, age.TotalMinutes);
@@ -132,8 +156,11 @@ public class TradingEngine(
             var timeWindowEnabled = await _settings.GetSettingAsync<bool?>("SignalTimeWindowEnabled") ?? false;
             if (timeWindowEnabled)
             {
-                var startStr = await _settings.GetSettingAsync<string>("SignalTimeWindowStart");
-                var endStr = await _settings.GetSettingAsync<string>("SignalTimeWindowEnd");
+                var windowSegment = MarketSegments.ForUnderlying(signal.Index);
+                var startStr = await _settings.GetSettingAsync<string>(SegmentTimeSettings.SignalWindowStartKey(windowSegment))
+                    ?? SegmentTimeSettings.DefaultSignalWindowStart(windowSegment);
+                var endStr = await _settings.GetSettingAsync<string>(SegmentTimeSettings.SignalWindowEndKey(windowSegment))
+                    ?? SegmentTimeSettings.DefaultSignalWindowEnd(windowSegment);
                 if (TimeSpan.TryParse(startStr, CultureInfo.InvariantCulture, out var windowStart) &&
                     TimeSpan.TryParse(endStr, CultureInfo.InvariantCulture, out var windowEnd) &&
                     windowEnd > windowStart)
@@ -142,7 +169,7 @@ public class TradingEngine(
                     if (nowIst < windowStart || nowIst > windowEnd)
                     {
                         var reason =
-                            $"Signal received at {nowIst:hh\\:mm} IST is outside the allowed trading window ({windowStart:hh\\:mm}–{windowEnd:hh\\:mm} IST); skipping.";
+                            $"Signal received at {nowIst:hh\\:mm} IST is outside the allowed {SegmentTimeSettings.Label(windowSegment)} trading window ({windowStart:hh\\:mm}–{windowEnd:hh\\:mm} IST); skipping.";
                         _logger.LogWarning(
                             "Skipping out-of-window signal for {Index} {Strike} {Type}: now={NowIst:hh\\:mm} IST window={Start:hh\\:mm}-{End:hh\\:mm}",
                             signal.Index, signal.Strike, signal.OptionType, nowIst, windowStart, windowEnd);
@@ -219,7 +246,7 @@ public class TradingEngine(
                     s.ChannelName == signal.ChannelName &&
                     s.ReceivedTimestamp > DateTime.UtcNow.AddMinutes(-10));
 
-            var currentSignalId = existingSignal?.Id ?? 0;
+            var currentSignalId = signal.SignalId ?? existingSignal?.Id ?? 0;
 
             var duplicateCooldownMinutes = await _settings.GetSettingAsync<int?>("DuplicateSignalCooldownMinutes") ?? 2;
             var duplicateOrder = false;
@@ -293,7 +320,10 @@ public class TradingEngine(
             _logger.LogInformation("Order size for account {AccountName}: {Lots} lot(s) × {LotSize} = {Qty} qty for {Index}",
                 account.Name, lots, resolved.LotSize, quantity, signal.Index);
 
-            var signalEntity = await _context.TradingSignals
+            var signalEntity = signal.SignalId is int knownId
+                ? await _context.TradingSignals.FindAsync(knownId)
+                : null;
+            signalEntity ??= await _context.TradingSignals
                 .FirstOrDefaultAsync(s =>
                     s.Index == signal.Index && s.Strike == signal.Strike &&
                     s.OptionType == signal.OptionType && s.Action == signal.Action &&
@@ -408,13 +438,12 @@ public class TradingEngine(
 
             if (overrideSlPts > 0)
             {
-                var overrideSl = signal.Action == SignalAction.Buy
-                    ? Math.Max(0.05m, limitPrice - overrideSlPts)
-                    : limitPrice + overrideSlPts;
+                var overrideSl = OverrideRiskLevels.ResolveStopLoss(
+                    signal.Action == SignalAction.Buy, signal.EntryPrice, signalEntity.StopLoss, limitPrice, overrideSlPts);
+                var slSource = overrideSl == signalEntity.StopLoss ? "signal SL (tighter than override)" : $"Override SL (-{overrideSlPts} pts)";
                 signalEntity.StopLoss = overrideSl;
                 signal.StopLoss = overrideSl;
-                priceAdjustments.Add(
-                    $"Override SL (-{overrideSlPts} pts): [{overrideSl}]");
+                priceAdjustments.Add($"{slSource}: [{overrideSl}]");
                 await _context.SaveChangesAsync();
             }
             else
@@ -451,13 +480,12 @@ public class TradingEngine(
 
             if (overrideTargetPts > 0)
             {
-                var overrideTarget = signal.Action == SignalAction.Buy
-                    ? limitPrice + overrideTargetPts
-                    : Math.Max(0.05m, limitPrice - overrideTargetPts);
-                signalEntity.Targets = [overrideTarget];
-                signal.Targets = [overrideTarget];
-                priceAdjustments.Add(
-                    $"Override target (+{overrideTargetPts} pts): [{overrideTarget}]");
+                var resolvedTargets = OverrideRiskLevels.ResolveTargets(
+                    signal.Action == SignalAction.Buy, signal.EntryPrice, signalEntity.Targets.ToList(), limitPrice, overrideTargetPts);
+                var tgtSource = resolvedTargets.SequenceEqual(signalEntity.Targets) ? "signal target (tighter than override)" : $"Override target (+{overrideTargetPts} pts)";
+                signalEntity.Targets = resolvedTargets;
+                signal.Targets = [.. resolvedTargets];
+                priceAdjustments.Add($"{tgtSource}: [{string.Join(", ", resolvedTargets)}]");
                 await _context.SaveChangesAsync();
             }
             else
@@ -806,6 +834,8 @@ public class TradingEngine(
     {
         try
         {
+            if (signalEntity is null && signal.SignalId is int knownId)
+                signalEntity = await _context.TradingSignals.FindAsync(knownId);
             signalEntity ??= await _context.TradingSignals
                 .OrderByDescending(s => s.ReceivedTimestamp)
                 .FirstOrDefaultAsync(s =>

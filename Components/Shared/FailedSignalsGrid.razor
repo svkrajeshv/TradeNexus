@@ -1,0 +1,83 @@
+@*
+    Dashboard "Failed Signals" grid. Failed signals carry no live data, so this
+    component skips re-rendering on the parent's CmpTick/HealthTick renders and
+    only redraws when the failed set (Version) or the expand state changes.
+*@
+@using NexusApp.Models
+
+<MudPaper Class="pa-4" Elevation="2">
+    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="@(Expanded ? "mb-2" : string.Empty)">
+        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Style="cursor: pointer;" @onclick="Toggle">
+            <MudText Typo="Typo.h6">Failed Signals</MudText>
+            <MudChip T="string" Size="Size.Small" Color="Color.Error" Variant="Variant.Outlined">@Items.Count</MudChip>
+        </MudStack>
+        <MudTooltip Text="@(Expanded ? "Collapse" : "Expand")">
+            <MudIconButton Icon="@(Expanded ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)"
+                           Size="Size.Small"
+                           Color="Color.Default"
+                           OnClick="Toggle"
+                           aria-label="@(Expanded ? "Collapse Failed Signals" : "Expand Failed Signals")" />
+        </MudTooltip>
+    </MudStack>
+    <MudCollapse Expanded="Expanded">
+        @if (Items.Count == 0)
+        {
+            <MudAlert Severity="Severity.Success">No failed signals today.</MudAlert>
+        }
+        else
+        {
+            <div class="table-scroll">
+            <MudTable Items="Items" Dense="true" Hover="true" Bordered="false" Striped="true" Breakpoint="Breakpoint.Sm" FixedHeader="true">
+                <HeaderContent>
+                    <MudTh>Time</MudTh>
+                    <MudTh>Channel</MudTh>
+                    <MudTh>Signal</MudTh>
+                    <MudTh>Signal Values</MudTh>
+                    <MudTh>Reason</MudTh>
+                </HeaderContent>
+                <RowTemplate>
+                    <MudTd DataLabel="Time">@context.Signal.ReceivedTimestamp.ToIstString("hh:mm:ss tt")</MudTd>
+                    <MudTd DataLabel="Channel">
+                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                            @(string.IsNullOrWhiteSpace(context.Signal.ChannelName) ? "-" : context.Signal.ChannelName)
+                        </MudChip>
+                    </MudTd>
+                    <MudTd DataLabel="Signal">@context.Signal.Action @context.Signal.Index @FormatStrike(context.Signal.Strike) @context.Signal.OptionType.ToString().ToUpper()</MudTd>
+                    <MudTd DataLabel="Signal Values">
+                        Entry: @context.Signal.EntryPrice.ToString("0.##") | SL: @context.Signal.StopLoss.ToString("0.##") | T: @string.Join(" / ", context.Signal.Targets.Select(t => t.ToString("0.##")))
+                    </MudTd>
+                    <MudTd DataLabel="Reason">
+                        <MudText Typo="Typo.body2" Color="Color.Error">@context.Reason</MudText>
+                    </MudTd>
+                </RowTemplate>
+            </MudTable>
+            </div>
+        }
+    </MudCollapse>
+</MudPaper>
+
+@code {
+    public sealed record Row(TradingSignal Signal, string Reason);
+
+    [Parameter, EditorRequired] public IReadOnlyList<Row> Items { get; set; } = [];
+    /// <summary>Bumped by the parent only when the failed set or reasons change.</summary>
+    [Parameter] public int Version { get; set; }
+    [Parameter] public bool Expanded { get; set; }
+    [Parameter] public EventCallback OnToggle { get; set; }
+
+    private (int Version, bool Expanded)? _last;
+
+    protected override bool ShouldRender()
+    {
+        var current = (Version, Expanded);
+        if (_last == current)
+            return false;
+        _last = current;
+        return true;
+    }
+
+    private Task Toggle() => OnToggle.InvokeAsync();
+
+    private static string FormatStrike(decimal strike) =>
+        strike.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+}

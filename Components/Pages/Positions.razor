@@ -1,5 +1,7 @@
 @page "/positions"
 @using System.Text.Json
+@using System.Globalization
+@using System.Text
 @using Microsoft.EntityFrameworkCore
 @using MudBlazor
 @using NexusApp.Data
@@ -112,12 +114,22 @@
                 <MudToggleItem Value="BookFilter.Paper">Paper (@_all.Count(BookScope.IsPaper))</MudToggleItem>
             </MudToggleGroup>
         </MudStack>
-        @if (_selectedPositions.Count > 0)
-        {
-            <MudButton Variant="Variant.Filled" Color="Color.Error" StartIcon="@Icons.Material.Filled.Close" OnClick="SquareOffSelectedAsync" Size="Size.Small">
-                Square Off Selected (@_selectedPositions.Count)
+        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Wrap="Wrap.Wrap">
+            <MudButton StartIcon="@Icons.Material.Filled.Download"
+                       OnClick="DownloadPositionsAsync"
+                       Color="Color.Primary"
+                       Variant="Variant.Outlined"
+                       Size="Size.Small"
+                       Disabled="@(_downloading || !FilteredPositions.Any())">
+                @(_downloading ? "Preparing..." : $"Download ({FilteredPositions.Count()})")
             </MudButton>
-        }
+            @if (_selectedPositions.Count > 0)
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Error" StartIcon="@Icons.Material.Filled.Close" OnClick="SquareOffSelectedAsync" Size="Size.Small">
+                    Square Off Selected (@_selectedPositions.Count)
+                </MudButton>
+            }
+        </MudStack>
     </MudStack>
 
     <MudTable Items="FilteredPositions" MultiSelection="true" @bind-SelectedItems="_selectedPositions"
@@ -210,6 +222,85 @@
 
     private enum StatusFilter { All, Open, Closed }
     private enum BookFilter { All, Live, Paper }
+    private bool _downloading;
+
+    /// <summary>
+    /// Exports the currently filtered positions (status + book filters) as a CSV.
+    /// </summary>
+    private async Task DownloadPositionsAsync()
+    {
+        if (_downloading) return;
+        _downloading = true;
+
+        try
+        {
+            var positions = FilteredPositions.OrderByDescending(p => p.OpenedAt).ToList();
+            if (positions.Count == 0)
+            {
+                Snackbar.Add("Nothing to download.", Severity.Info);
+                return;
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine(string.Join(",",
+                "Position Id", "Book", "Status", "Account", "Broker", "Channel", "Signal Id", "Symbol", "Quantity",
+                "Entry Time (IST)", "Entry Price", "Exit Time (IST)", "Exit Price", "LTP",
+                "Stop Loss", "Targets", "Unrealized PnL", "Realized PnL", "PnL"));
+
+            foreach (var p in positions)
+            {
+                var isOpen = p.ClosedAt == null;
+                sb.AppendLine(string.Join(",",
+                    Csv(p.Id),
+                    Csv(BookScope.IsPaper(p) ? "PAPER" : "LIVE"),
+                    Csv(isOpen ? "Open" : "Closed"),
+                    Csv(p.TradingAccount?.Name),
+                    Csv(p.TradingAccount?.BrokerType),
+                    Csv(p.Signal?.ChannelName),
+                    Csv(p.SignalId),
+                    Csv(p.Symbol),
+                    Csv(p.Quantity),
+                    Csv(p.OpenedAt.ToIstString()),
+                    Csv(p.EntryPrice),
+                    Csv(p.ClosedAt.ToIstString()),
+                    Csv(p.ClosingPrice),
+                    Csv(isOpen ? p.CurrentPrice : null),
+                    Csv(p.StopLoss),
+                    Csv(string.Join(" | ", p.Targets)),
+                    Csv(isOpen ? p.UnrealizedPnL : null),
+                    Csv(p.RealizedPnL),
+                    Csv(isOpen ? p.UnrealizedPnL : (p.RealizedPnL ?? 0m))));
+            }
+
+            var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(sb.ToString())).ToArray();
+            var fileName = $"positions-{DateTimeExtensions.IstNow():yyyyMMdd-HHmmss}.csv";
+
+            await JS.InvokeVoidAsync("NexusApp.downloadFile", fileName, "text/csv", Convert.ToBase64String(bytes));
+            Snackbar.Add($"Downloaded {positions.Count} positions.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Download failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _downloading = false;
+        }
+    }
+
+    private static string Csv(object? value)
+    {
+        if (value is null) return string.Empty;
+
+        var text = value is IFormattable formattable
+            ? formattable.ToString(null, CultureInfo.InvariantCulture)
+            : value.ToString() ?? string.Empty;
+
+        if (text.IndexOfAny([',', '"', '\n', '\r']) < 0)
+            return text;
+
+        return $"\"{text.Replace("\"", "\"\"")}\"";
+    }
     private BookFilter _bookFilter = BookFilter.All;
 
     private IEnumerable<NexusApp.Models.Position> FilteredPositions

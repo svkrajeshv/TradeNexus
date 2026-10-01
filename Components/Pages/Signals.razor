@@ -2,6 +2,8 @@
 @using Microsoft.EntityFrameworkCore
 @using MudBlazor
 @using System.Globalization
+@using System.Text
+@inject IJSRuntime JS
 @using NexusApp.Data
 @using NexusApp.Models
 @using NexusApp.Services
@@ -18,6 +20,13 @@
     <MudButton OnClick="LoadAsync" Color="Color.Primary" Variant="Variant.Filled">Load</MudButton>
     <MudSpacer />
     <MudText Typo="Typo.body2">Total: @_signals.Count</MudText>
+    <MudButton StartIcon="@Icons.Material.Filled.Download"
+               OnClick="DownloadSignalsAsync"
+               Color="Color.Primary"
+               Variant="Variant.Outlined"
+               Disabled="_downloading || _signals.Count == 0">
+        @(_downloading ? "Preparing..." : $"Download ({_signals.Count})")
+    </MudButton>
 </MudStack>
 
 <MudPaper Class="pa-2 pa-sm-4" Elevation="2">
@@ -84,6 +93,84 @@
 @code {
     private DateTime? _selectedDate = DateTime.UtcNow.ToIst().Date;
     private List<TradingSignal> _signals = new();
+    private bool _downloading;
+
+    /// <summary>
+    /// Exports the currently loaded signals (in the grid's sort order) as a CSV.
+    /// </summary>
+    private async Task DownloadSignalsAsync()
+    {
+        if (_downloading) return;
+        _downloading = true;
+
+        try
+        {
+            var signals = SortedSignals.ToList();
+            if (signals.Count == 0)
+            {
+                Snackbar.Add("Nothing to download.", Severity.Info);
+                return;
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine(string.Join(",",
+                "Signal Id", "Received (IST)", "Telegram Time (IST)", "Processed (IST)", "Signal Delay (ms)",
+                "Channel", "Action", "Index", "Strike", "Option Type", "Symbol", "Expiry Date",
+                "Entry Price", "Stop Loss", "Targets", "Status", "Error", "Message"));
+
+            foreach (var s in signals)
+            {
+                var error = s.Orders?.FirstOrDefault(o => !string.IsNullOrEmpty(o.ErrorMessage))?.ErrorMessage;
+                sb.AppendLine(string.Join(",",
+                    Csv(s.Id),
+                    Csv(s.ReceivedTimestamp.ToIstString()),
+                    Csv(s.TelegramTimestamp.ToIstString()),
+                    Csv(s.ProcessedTimestamp.ToIstString()),
+                    Csv(s.SignalDelayMs),
+                    Csv(s.ChannelName),
+                    Csv(s.Action),
+                    Csv(s.Index),
+                    Csv(s.Strike),
+                    Csv(s.OptionType),
+                    Csv(s.Symbol),
+                    Csv(s.ExpiryDate.ToIstString("yyyy-MM-dd")),
+                    Csv(s.EntryPrice),
+                    Csv(s.StopLoss),
+                    Csv(string.Join(" | ", s.Targets)),
+                    Csv(s.Status),
+                    Csv(error),
+                    Csv(s.OriginalMessage)));
+            }
+
+            var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(sb.ToString())).ToArray();
+            var fileName = $"signals-{(_selectedDate ?? DateTime.UtcNow.ToIst().Date):yyyyMMdd}-{DateTime.UtcNow.ToIst():HHmmss}.csv";
+
+            await JS.InvokeVoidAsync("NexusApp.downloadFile", fileName, "text/csv", Convert.ToBase64String(bytes));
+            Snackbar.Add($"Downloaded {signals.Count} signals.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Download failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _downloading = false;
+        }
+    }
+
+    private static string Csv(object? value)
+    {
+        if (value is null) return string.Empty;
+
+        var text = value is IFormattable formattable
+            ? formattable.ToString(null, CultureInfo.InvariantCulture)
+            : value.ToString() ?? string.Empty;
+
+        if (text.IndexOfAny([',', '"', '\n', '\r']) < 0)
+            return text;
+
+        return $"\"{text.Replace("\"", "\"\"")}\"";
+    }
 
     private const string _sortColumnTime = "time";
     private const string _sortColumnChannel = "channel";
