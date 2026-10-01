@@ -35,34 +35,30 @@
             <MudText Typo="Typo.h6">Risk Profiles (Target &amp; Stop-Loss)</MudText>
         </MudStack>
         <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mb-3 d-block">
-            Volatility-calibrated default Stop-Loss and Target levels per contract. Set Override Target to 0 to square off at signals or default target points.
+            Volatility-calibrated default Stop-Loss and Target levels per contract. Set Override SL / Override Target to 0 to use signal levels or default points.
         </MudText>
 
         <MudTable Items="SegmentProfiles" Dense="true" Hover="true" Elevation="0">
             <HeaderContent>
                 <MudTh>Contract</MudTh>
                 <MudTh>SL (Pts)</MudTh>
+                <MudTh>Override SL (Pts)</MudTh>
                 <MudTh>Target (Pts)</MudTh>
                 <MudTh>Override Target (Pts)</MudTh>
-                <MudTh>SL (%)</MudTh>
-                <MudTh>Target (%)</MudTh>
             </HeaderContent>
             <RowTemplate>
                 <MudTd DataLabel="Contract"><b>@context.Index</b></MudTd>
                 <MudTd DataLabel="SL (Pts)">
                     <MudNumericField T="decimal" @bind-Value="context.DefaultSlPoints" Min="1m" Variant="Variant.Text" Margin="Margin.Dense" Disabled="@(!Enabled)" />
                 </MudTd>
+                <MudTd DataLabel="Override SL (Pts)">
+                    <MudNumericField T="decimal" @bind-Value="context.OverrideSlPoints" Min="0m" Variant="Variant.Text" Margin="Margin.Dense" Disabled="@(!Enabled)" />
+                </MudTd>
                 <MudTd DataLabel="Target (Pts)">
                     <MudNumericField T="decimal" @bind-Value="context.DefaultTargetPoints" Min="1m" Variant="Variant.Text" Margin="Margin.Dense" Disabled="@(!Enabled)" />
                 </MudTd>
                 <MudTd DataLabel="Override Target (Pts)">
                     <MudNumericField T="decimal" @bind-Value="context.OverrideTargetPoints" Min="0m" Variant="Variant.Text" Margin="Margin.Dense" Disabled="@(!Enabled)" />
-                </MudTd>
-                <MudTd DataLabel="SL (%)">
-                    <MudNumericField T="decimal" @bind-Value="context.SlPercent" Min="1m" Max="100m" Variant="Variant.Text" Margin="Margin.Dense" Disabled="@(!Enabled)" />
-                </MudTd>
-                <MudTd DataLabel="Target (%)">
-                    <MudNumericField T="decimal" @bind-Value="context.TargetPercent" Min="1m" Max="500m" Variant="Variant.Text" Margin="Margin.Dense" Disabled="@(!Enabled)" />
                 </MudTd>
             </RowTemplate>
         </MudTable>

@@ -29,7 +29,8 @@ internal static class WebApplicationExtensions
                     path: "Logs/trading-app-.txt",
                     rollingInterval: RollingInterval.Day,
                     outputTemplate: outputTemplate,
-                    retainedFileCountLimit: 5));
+                    retainedFileCountLimit: 5,
+                    shared: true));
     }
 
     public static WebApplication ConfigurePipeline(this WebApplication app)

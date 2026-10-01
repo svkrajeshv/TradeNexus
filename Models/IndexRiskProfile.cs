@@ -7,6 +7,5 @@ public record IndexRiskProfile(
     string Index,
     decimal DefaultSlPoints,
     decimal DefaultTargetPoints,
-    decimal SlPercent,
-    decimal TargetPercent,
+    decimal OverrideSlPoints = 0m,
     decimal OverrideTargetPoints = 15m);

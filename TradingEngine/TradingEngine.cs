@@ -111,13 +111,37 @@ public class TradingEngine(
             // Staleness guard: reject any signal older than 10 minutes so we
             // don't chase price that has already moved. SignalTime is populated
             // from the Telegram message timestamp by SignalParser.
-            if (signal.SignalTime != default)
+			// Tag-entry channels wait for the channel's own price post, so they get a longer
+			// window and never open new positions late in the session.
+			var isTagEntry = !string.IsNullOrWhiteSpace(signal.ChannelName) &&
+				(_serviceProvider.GetService<NexusApp.Parser.SignalParserResolver>()?.Resolve(signal.ChannelName).AlwaysAwaitEntry ?? false);
+			var maxAge = isTagEntry ? NexusApp.Parser.TagEntryPolicy.Window : MaxSignalAge;
+
+			var entrySegment = MarketSegments.ForUnderlying(signal.Index);
+			var lastEntryStr = await _settings.GetSettingAsync<string>(SegmentTimeSettings.SignalWindowEndKey(entrySegment))
+				?? SegmentTimeSettings.DefaultSignalWindowEnd(entrySegment);
+			var lastEntryIst = TimeSpan.TryParse(lastEntryStr, CultureInfo.InvariantCulture, out var parsedLastEntry)
+				? parsedLastEntry
+				: NexusApp.Parser.TagEntryPolicy.LastEntryTimeIst;
+
+			if (isTagEntry && DateTime.UtcNow.ToIst().TimeOfDay >= lastEntryIst)
+			{
+				var lateReason = $"Tag-entry match at/after {lastEntryIst:hh\\:mm} IST ({SegmentTimeSettings.Label(entrySegment)} signal end time); no new entries this late in the session.";
+				_logger.LogWarning("Skipping late tag-entry signal for {Index} {Strike} {Type}", signal.Index, signal.Strike, signal.OptionType);
+				await RecordFailureAsync(signal, failureSignalEntity, null, lateReason);
+				return false;
+			}
+
+			if (signal.SignalTime != default)
             {
                 var age = DateTime.UtcNow - signal.SignalTime.EnsureUtc();
-                if (age > MaxSignalAge)
+                var isStale = isTagEntry
+                    ? signal.SignalTime.EnsureUtc().ToIst().Date < DateTime.UtcNow.ToIst().Date
+                    : age > maxAge;
+                if (isStale)
                 {
                     var reason =
-                        $"Signal is {age.TotalMinutes:0.0} min old (> {MaxSignalAge.TotalMinutes:0} min cutoff); refusing to execute stale signal.";
+                        $"Signal is {age.TotalMinutes:0.0} min old (> {maxAge.TotalMinutes:0} min cutoff); refusing to execute stale signal.";
                     _logger.LogWarning(
                         "Skipping stale signal for {Index} {Strike} {Type}: age={AgeMin:0.0} min",
                         signal.Index, signal.Strike, signal.OptionType, age.TotalMinutes);
@@ -132,8 +156,11 @@ public class TradingEngine(
             var timeWindowEnabled = await _settings.GetSettingAsync<bool?>("SignalTimeWindowEnabled") ?? false;
             if (timeWindowEnabled)
             {
-                var startStr = await _settings.GetSettingAsync<string>("SignalTimeWindowStart");
-                var endStr = await _settings.GetSettingAsync<string>("SignalTimeWindowEnd");
+                var windowSegment = MarketSegments.ForUnderlying(signal.Index);
+                var startStr = await _settings.GetSettingAsync<string>(SegmentTimeSettings.SignalWindowStartKey(windowSegment))
+                    ?? SegmentTimeSettings.DefaultSignalWindowStart(windowSegment);
+                var endStr = await _settings.GetSettingAsync<string>(SegmentTimeSettings.SignalWindowEndKey(windowSegment))
+                    ?? SegmentTimeSettings.DefaultSignalWindowEnd(windowSegment);
                 if (TimeSpan.TryParse(startStr, CultureInfo.InvariantCulture, out var windowStart) &&
                     TimeSpan.TryParse(endStr, CultureInfo.InvariantCulture, out var windowEnd) &&
                     windowEnd > windowStart)
@@ -142,7 +169,7 @@ public class TradingEngine(
                     if (nowIst < windowStart || nowIst > windowEnd)
                     {
                         var reason =
-                            $"Signal received at {nowIst:hh\\:mm} IST is outside the allowed trading window ({windowStart:hh\\:mm}–{windowEnd:hh\\:mm} IST); skipping.";
+                            $"Signal received at {nowIst:hh\\:mm} IST is outside the allowed {SegmentTimeSettings.Label(windowSegment)} trading window ({windowStart:hh\\:mm}–{windowEnd:hh\\:mm} IST); skipping.";
                         _logger.LogWarning(
                             "Skipping out-of-window signal for {Index} {Strike} {Type}: now={NowIst:hh\\:mm} IST window={Start:hh\\:mm}-{End:hh\\:mm}",
                             signal.Index, signal.Strike, signal.OptionType, nowIst, windowStart, windowEnd);
@@ -219,7 +246,7 @@ public class TradingEngine(
                     s.ChannelName == signal.ChannelName &&
                     s.ReceivedTimestamp > DateTime.UtcNow.AddMinutes(-10));
 
-            var currentSignalId = existingSignal?.Id ?? 0;
+            var currentSignalId = signal.SignalId ?? existingSignal?.Id ?? 0;
 
             var duplicateCooldownMinutes = await _settings.GetSettingAsync<int?>("DuplicateSignalCooldownMinutes") ?? 2;
             var duplicateOrder = false;
@@ -293,7 +320,10 @@ public class TradingEngine(
             _logger.LogInformation("Order size for account {AccountName}: {Lots} lot(s) × {LotSize} = {Qty} qty for {Index}",
                 account.Name, lots, resolved.LotSize, quantity, signal.Index);
 
-            var signalEntity = await _context.TradingSignals
+            var signalEntity = signal.SignalId is int knownId
+                ? await _context.TradingSignals.FindAsync(knownId)
+                : null;
+            signalEntity ??= await _context.TradingSignals
                 .FirstOrDefaultAsync(s =>
                     s.Index == signal.Index && s.Strike == signal.Strike &&
                     s.OptionType == signal.OptionType && s.Action == signal.Action &&
@@ -401,29 +431,61 @@ public class TradingEngine(
                     $"Entry offset (-{entryOffset}): {signal.EntryPrice} → {limitPrice}");
             }
 
-            if (stopLossBuffer > 0 && signalEntity.StopLoss > 0)
+            var riskProfileService = _serviceProvider.GetService<IIndexRiskProfileService>();
+            var overrideSlPts = riskProfileService is not null
+                ? await riskProfileService.GetOverrideSlPointsAsync(signal.Index)
+                : 0m;
+
+            if (overrideSlPts > 0)
             {
-                var bufferedSl = Math.Max(0.05m, signalEntity.StopLoss - stopLossBuffer);
-                priceAdjustments.Add(
-                    $"StopLoss buffer (-{stopLossBuffer}): {signalEntity.StopLoss} → {bufferedSl}");
-                signalEntity.StopLoss = bufferedSl;
+                var overrideSl = OverrideRiskLevels.ResolveStopLoss(
+                    signal.Action == SignalAction.Buy, signal.EntryPrice, signalEntity.StopLoss, limitPrice, overrideSlPts);
+                var slSource = overrideSl == signalEntity.StopLoss ? "signal SL (tighter than override)" : $"Override SL (-{overrideSlPts} pts)";
+                signalEntity.StopLoss = overrideSl;
+                signal.StopLoss = overrideSl;
+                priceAdjustments.Add($"{slSource}: [{overrideSl}]");
                 await _context.SaveChangesAsync();
             }
+            else
+            {
+                // Override SL is 0: use signal SL or default SL points
+                if (signalEntity.StopLoss <= 0)
+                {
+                    var profile = riskProfileService is not null ? await riskProfileService.GetProfileAsync(signal.Index) : null;
+                    var defSlPts = profile is { DefaultSlPoints: > 0 }
+                        ? profile.DefaultSlPoints
+                        : (await _settings.GetSettingAsync<decimal?>("DefaultStopLossPoints") ?? 50m);
+                    var defSl = signal.Action == SignalAction.Buy
+                        ? Math.Max(0.05m, limitPrice - defSlPts)
+                        : limitPrice + defSlPts;
+                    signalEntity.StopLoss = defSl;
+                    signal.StopLoss = defSl;
+                    priceAdjustments.Add($"Default SL (-{defSlPts} pts): [{defSl}]");
+                    await _context.SaveChangesAsync();
+                }
+                else if (stopLossBuffer > 0)
+                {
+                    var bufferedSl = Math.Max(0.05m, signalEntity.StopLoss - stopLossBuffer);
+                    priceAdjustments.Add(
+                        $"StopLoss buffer (-{stopLossBuffer}): {signalEntity.StopLoss} → {bufferedSl}");
+                    signalEntity.StopLoss = bufferedSl;
+                    signal.StopLoss = bufferedSl;
+                    await _context.SaveChangesAsync();
+                }
+            }
 
-            var riskProfileService = _serviceProvider.GetService<IIndexRiskProfileService>();
             var overrideTargetPts = riskProfileService is not null
                 ? await riskProfileService.GetOverrideTargetPointsAsync(signal.Index)
                 : 0m;
 
             if (overrideTargetPts > 0)
             {
-                var overrideTarget = signal.Action == SignalAction.Buy
-                    ? limitPrice + overrideTargetPts
-                    : Math.Max(0.05m, limitPrice - overrideTargetPts);
-                signalEntity.Targets = [overrideTarget];
-                signal.Targets = [overrideTarget];
-                priceAdjustments.Add(
-                    $"Override target (+{overrideTargetPts} pts): [{overrideTarget}]");
+                var resolvedTargets = OverrideRiskLevels.ResolveTargets(
+                    signal.Action == SignalAction.Buy, signal.EntryPrice, signalEntity.Targets.ToList(), limitPrice, overrideTargetPts);
+                var tgtSource = resolvedTargets.SequenceEqual(signalEntity.Targets) ? "signal target (tighter than override)" : $"Override target (+{overrideTargetPts} pts)";
+                signalEntity.Targets = resolvedTargets;
+                signal.Targets = [.. resolvedTargets];
+                priceAdjustments.Add($"{tgtSource}: [{string.Join(", ", resolvedTargets)}]");
                 await _context.SaveChangesAsync();
             }
             else
@@ -510,6 +572,7 @@ public class TradingEngine(
                 OrderType = entryOrderType,
                 ProductType = productType,
                 Status = OrderStatus.Pending,
+                ErrorMessage = isRobo ? "Robo Bracket Entry" : (isMarket ? "Signal Entry (Market)" : "Signal Entry (Limit)"),
                 CreatedAt = DateTime.UtcNow
             };
 
@@ -534,6 +597,69 @@ public class TradingEngine(
 
             var isPaper = account.IsPaperAccount;
 
+            // Slippage guard: before executing an order (live or paper), compare the current
+            // market price (CMP) against the signal entry price. If the market
+            // has moved adversely beyond the configured percentage, reject the
+            // order to avoid a bad fill.
+            var slippageGuardEnabled = await _settings.GetSettingAsync<bool?>("SlippageGuardEnabled") ?? false;
+            decimal slippageCheckedCmp = 0m;
+            if (slippageGuardEnabled && signal.EntryPrice > 0)
+            {
+                var maxSlippagePercent = await _settings.GetSettingAsync<decimal?>("MaxSlippagePercent") ?? 1.0m;
+                if (maxSlippagePercent > 0)
+                {
+                    try
+                    {
+                        IBroker? quoteBroker = null;
+                        if (!string.IsNullOrWhiteSpace(account.BrokerType))
+                        {
+                            quoteBroker = _serviceProvider.GetKeyedService<IBroker>(account.BrokerType);
+                        }
+                        quoteBroker ??= _broker;
+                        if (quoteBroker != null)
+                        {
+                            slippageCheckedCmp = await quoteBroker.GetLiveQuoteAsync(resolved.Symbol);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Slippage guard: failed to fetch CMP for {Symbol}; proceeding without check", resolved.Symbol);
+                    }
+
+                    if (slippageCheckedCmp > 0)
+                    {
+                        // Adverse move: for a Buy, price rising above entry; for a Sell, price falling below entry.
+                        var adverseMove = side == OrderSide.Buy
+                            ? slippageCheckedCmp - signal.EntryPrice
+                            : signal.EntryPrice - slippageCheckedCmp;
+                        var slippagePercent = adverseMove / signal.EntryPrice * 100m;
+                        if (slippagePercent > maxSlippagePercent)
+                        {
+                            var reason =
+                                $"Slippage guard: CMP {slippageCheckedCmp} vs entry {signal.EntryPrice} = {slippagePercent:0.00}% adverse (> {maxSlippagePercent:0.00}% limit); rejecting order.";
+                            _logger.LogWarning(
+                                "Slippage guard rejected {Symbol} on {Broker} (Paper={IsPaper}): CMP={Cmp} entry={Entry} slip={Slip:0.00}% limit={Limit:0.00}%",
+                                resolved.Symbol, account.BrokerType, isPaper, slippageCheckedCmp, signal.EntryPrice, slippagePercent, maxSlippagePercent);
+                            order.Status = OrderStatus.Rejected;
+                            order.ErrorMessage = reason;
+                            _context.Orders.Add(order);
+                            if (signalEntity.Status != SignalStatus.Executed)
+                            {
+                                signalEntity.Status = SignalStatus.Failed;
+                            }
+                            await _context.SaveChangesAsync();
+                            order.BrokerId = $"REJ-{order.Id}";
+                            await _context.SaveChangesAsync();
+                            return false;
+                        }
+
+                        _logger.LogInformation(
+                            "Slippage guard OK for {Symbol} (Paper={IsPaper}): CMP={Cmp} entry={Entry} slip={Slip:0.00}% (limit {Limit:0.00}%)",
+                            resolved.Symbol, isPaper, slippageCheckedCmp, signal.EntryPrice, slippagePercent, maxSlippagePercent);
+                    }
+                }
+            }
+
             if (isPaper)
             {
                 _context.Orders.Add(order);
@@ -548,18 +674,31 @@ public class TradingEngine(
                 var fillPrice = limitPrice;
                 if (isMarket)
                 {
-                    try
+                    if (slippageCheckedCmp > 0)
                     {
-                        var quoteBroker = _serviceProvider.GetRequiredKeyedService<IBroker>(account.BrokerType);
-                        var cmp = await quoteBroker.GetLiveQuoteAsync(resolved.Symbol);
-                        if (cmp > 0)
-                            fillPrice = cmp;
+                        fillPrice = slippageCheckedCmp;
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        _logger.LogWarning(ex,
-                            "Paper market order: failed to fetch CMP for {Symbol}; falling back to signal entry price {Price}",
-                            resolved.Symbol, limitPrice);
+                        try
+                        {
+                            var quoteBroker = !string.IsNullOrWhiteSpace(account.BrokerType)
+                                ? _serviceProvider.GetKeyedService<IBroker>(account.BrokerType)
+                                : null;
+                            quoteBroker ??= _broker;
+                            if (quoteBroker != null)
+                            {
+                                var cmp = await quoteBroker.GetLiveQuoteAsync(resolved.Symbol);
+                                if (cmp > 0)
+                                    fillPrice = cmp;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex,
+                                "Paper market order: failed to fetch CMP for {Symbol}; falling back to signal entry price {Price}",
+                                resolved.Symbol, limitPrice);
+                        }
                     }
                 }
                 _logger.LogInformation(
@@ -611,60 +750,6 @@ public class TradingEngine(
                 "Placing {Variety} order for {Symbol} on {Broker}: entry={Price}, SqOff={SqOff}, SL={SL}",
                 brokerRequest.Variety, resolved.Symbol, account.BrokerType,
                 limitPrice, squareOffPts, stopLossPts);
-
-            // Slippage guard: before sending a live order, compare the current
-            // market price (CMP) against the signal entry price. If the market
-            // has moved adversely beyond the configured percentage, reject the
-            // order to avoid a bad fill.
-            var slippageGuardEnabled = await _settings.GetSettingAsync<bool?>("SlippageGuardEnabled") ?? false;
-            if (slippageGuardEnabled && signal.EntryPrice > 0)
-            {
-                var maxSlippagePercent = await _settings.GetSettingAsync<decimal?>("MaxSlippagePercent") ?? 1.0m;
-                if (maxSlippagePercent > 0)
-                {
-                    decimal cmp = 0m;
-                    try
-                    {
-                        cmp = await accountBroker.GetLiveQuoteAsync(resolved.Symbol);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Slippage guard: failed to fetch CMP for {Symbol}; proceeding without check", resolved.Symbol);
-                    }
-
-                    if (cmp > 0)
-                    {
-                        // Adverse move: for a Buy, price rising above entry; for a Sell, price falling below entry.
-                        var adverseMove = side == OrderSide.Buy
-                            ? cmp - signal.EntryPrice
-                            : signal.EntryPrice - cmp;
-                        var slippagePercent = adverseMove / signal.EntryPrice * 100m;
-                        if (slippagePercent > maxSlippagePercent)
-                        {
-                            var reason =
-                                $"Slippage guard: CMP {cmp} vs entry {signal.EntryPrice} = {slippagePercent:0.00}% adverse (> {maxSlippagePercent:0.00}% limit); rejecting order.";
-                            _logger.LogWarning(
-                                "Slippage guard rejected {Symbol} on {Broker}: CMP={Cmp} entry={Entry} slip={Slip:0.00}% limit={Limit:0.00}%",
-                                resolved.Symbol, account.BrokerType, cmp, signal.EntryPrice, slippagePercent, maxSlippagePercent);
-                            order.Status = OrderStatus.Rejected;
-                            order.ErrorMessage = reason;
-                            _context.Orders.Add(order);
-                            if (signalEntity.Status != SignalStatus.Executed)
-                            {
-                                signalEntity.Status = SignalStatus.Failed;
-                            }
-                            await _context.SaveChangesAsync();
-                            order.BrokerId = $"REJ-{order.Id}";
-                            await _context.SaveChangesAsync();
-                            return false;
-                        }
-
-                        _logger.LogInformation(
-                            "Slippage guard OK for {Symbol}: CMP={Cmp} entry={Entry} slip={Slip:0.00}% (limit {Limit:0.00}%)",
-                            resolved.Symbol, cmp, signal.EntryPrice, slippagePercent, maxSlippagePercent);
-                    }
-                }
-            }
 
             var response = await accountBroker.PlaceOrderAsync(brokerRequest);
 
@@ -749,6 +834,8 @@ public class TradingEngine(
     {
         try
         {
+            if (signalEntity is null && signal.SignalId is int knownId)
+                signalEntity = await _context.TradingSignals.FindAsync(knownId);
             signalEntity ??= await _context.TradingSignals
                 .OrderByDescending(s => s.ReceivedTimestamp)
                 .FirstOrDefaultAsync(s =>
@@ -1026,6 +1113,28 @@ public class TradingEngine(
                 // Still open at the broker - track it so it shows up in the Open
                 // Positions grid and continues to be reconciled by the loop above on
                 // subsequent ticks.
+                var sl = signal.StopLoss > 0 ? signal.StopLoss : (decimal?)null;
+                var targets = signal.Targets?.ToList() ?? [];
+
+                if ((sl is null || sl <= 0 || targets.Count == 0) && bp.AveragePrice > 0)
+                {
+                    var riskProfileService = _serviceProvider.GetService<IIndexRiskProfileService>();
+                    if (riskProfileService != null)
+                    {
+                        var profile = await riskProfileService.GetProfileAsync(signal.Index);
+                        if (sl is null || sl <= 0)
+                        {
+                            var defSlPts = profile is { DefaultSlPoints: > 0 } ? profile.DefaultSlPoints : 50m;
+                            sl = Math.Max(0.05m, bp.AveragePrice - defSlPts);
+                        }
+                        if (targets.Count == 0)
+                        {
+                            var defTgtPts = profile is { DefaultTargetPoints: > 0 } ? profile.DefaultTargetPoints : 20m;
+                            targets = [bp.AveragePrice + defTgtPts];
+                        }
+                    }
+                }
+
                 _context.Positions.Add(new Position
                 {
                     TradingAccountId = liveAccountId.Value,
@@ -1034,12 +1143,14 @@ public class TradingEngine(
                     Quantity = Math.Abs(bp.Quantity),
                     EntryPrice = bp.AveragePrice,
                     CurrentPrice = bp.CurrentPrice > 0m ? bp.CurrentPrice : bp.AveragePrice,
+                    StopLoss = sl,
+                    Targets = targets,
                     OpenedAt = DateTime.UtcNow,
                     UnrealizedPnL = bp.UnrealizedPnL,
                     UnrealizedPnLPercentage = bp.AveragePrice > 0
                         ? (bp.UnrealizedPnL / (bp.AveragePrice * Math.Abs(bp.Quantity))) * 100m
                         : 0m,
-                    ManagedLocally = false
+                    ManagedLocally = sl.HasValue || targets.Count > 0
                 });
 
                 _logger.LogInformation(
@@ -1269,6 +1380,22 @@ public class TradingEngine(
 
             var isPaper = account.IsPaperAccount;
 
+            if (ContractExpiryHelper.IsExpiredOptionSymbol(position.Symbol))
+            {
+                _logger.LogInformation("Position {Symbol} (id {Id}) is an expired option; squaring off locally without routing to broker", position.Symbol, position.Id);
+                position.ClosedAt = DateTime.UtcNow;
+                position.ClosingPrice = ltp;
+                position.RealizedPnL = PnlCalculator.RealizedPnl(position.EntryPrice, ltp, position.Quantity);
+                position.UnrealizedPnL = 0;
+                position.UnrealizedPnLPercentage = 0;
+
+                await _context.SaveChangesAsync();
+                await _notifications.SendTelegramOrderClosedAsync(account.Name, !isPaper, position.Symbol, position.EntryPrice, ltp, position.RealizedPnL.Value, position.Quantity, $"{reason} (Contract Expired)");
+                await _hub.Clients.All.SendAsync(PositionChanged, new { Timestamp = DateTime.UtcNow });
+                await _hub.Clients.All.SendAsync("OrderStatusChanged", new { Timestamp = DateTime.UtcNow });
+                return true;
+            }
+
             if (isPaper)
             {
                 var order = new Order
@@ -1285,7 +1412,8 @@ public class TradingEngine(
                     CreatedAt = DateTime.UtcNow,
                     ExecutedAt = DateTime.UtcNow,
                     ExecutedPrice = ltp,
-                    FilledQuantity = position.Quantity
+                    FilledQuantity = position.Quantity,
+                    ErrorMessage = reason
                 };
                 _context.Orders.Add(order);
 
@@ -1398,7 +1526,7 @@ public class TradingEngine(
                     ProductType = ProductType.Mis,
                     Status = response.Success ? OrderStatus.Accepted : OrderStatus.Failed,
                     BrokerId = response.OrderId,
-                    ErrorMessage = response.ErrorMessage,
+                    ErrorMessage = response.Success ? reason : response.ErrorMessage,
                     CreatedAt = DateTime.UtcNow,
                     ExecutedAt = null,
                     ExecutedPrice = null,
@@ -1486,6 +1614,7 @@ public class TradingEngine(
             ProductType = ProductType.Mos,
             Status = OrderStatus.Accepted,
             BrokerId = bracketEntry.BrokerId,
+            ErrorMessage = reason,
             CreatedAt = DateTime.UtcNow
         };
         _context.Orders.Add(exitOrder);

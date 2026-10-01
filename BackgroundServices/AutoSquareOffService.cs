@@ -19,7 +19,6 @@ public sealed class AutoSquareOffService(
     ILogger<AutoSquareOffService> logger,
     IServiceProvider services) : BackgroundService
 {
-    private static readonly TimeSpan DefaultTimeIst = new(15, 10, 0);
     // How long to wait before re-evaluating when the feature is disabled or the
     // time can't be parsed — keeps the loop responsive to setting changes.
     private static readonly TimeSpan IdlePoll = TimeSpan.FromMinutes(5);
@@ -34,24 +33,28 @@ public sealed class AutoSquareOffService(
         while (!stoppingToken.IsCancellationRequested)
         {
             TimeSpan delay;
+            MarketSegment? segment;
             try
             {
-                delay = await ComputeDelayAsync(stoppingToken);
+                (delay, segment) = await ComputeDelayAsync(stoppingToken);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to compute next auto square-off time; retrying shortly");
-                delay = IdlePoll;
+                (delay, segment) = (IdlePoll, null);
             }
 
             try { await Task.Delay(delay, stoppingToken); }
             catch (OperationCanceledException) { break; }
 
+            if (segment is null)
+                continue;
+
             try
             {
                 // Re-check enablement right before firing (may have changed while waiting).
                 if (await IsEnabledAsync(stoppingToken))
-                    await RunSquareOffAsync(stoppingToken);
+                    await RunSquareOffAsync(segment.Value, stoppingToken);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
@@ -68,27 +71,43 @@ public sealed class AutoSquareOffService(
     /// disabled it returns a short idle poll so the loop keeps checking for the
     /// setting being turned on.
     /// </summary>
-    private async Task<TimeSpan> ComputeDelayAsync(CancellationToken ct)
+    private async Task<(TimeSpan Delay, MarketSegment? Segment)> ComputeDelayAsync(CancellationToken ct)
     {
         using var scope = _services.CreateScope();
         var settings = scope.ServiceProvider.GetRequiredService<ISettingsService>();
 
         var enabled = await settings.GetSettingAsync<bool?>("AutoSquareOffEnabled") ?? false;
         if (!enabled)
-            return IdlePoll;
-
-        var runTime = ParseTimeOrDefault(await settings.GetSettingAsync<string>("AutoSquareOffTime"));
+            return (IdlePoll, null);
 
         var istNow = DateTime.UtcNow.ToIst();
-        var todayRun = istNow.Date.Add(runTime);
-        var next = istNow < todayRun ? todayRun : todayRun.AddDays(1);
-        var delay = next - istNow;
+        DateTime? next = null;
+        MarketSegment? nextSegment = null;
+        foreach (var segment in SegmentTimeSettings.All)
+        {
+            var runTime = ParseTimeOrDefault(
+                await settings.GetSettingAsync<string>(SegmentTimeSettings.AutoSquareOffTimeKey(segment)),
+                segment);
+            var todayRun = istNow.Date.Add(runTime);
+            var candidate = istNow < todayRun ? todayRun : todayRun.AddDays(1);
+            if (next is null || candidate < next)
+            {
+                next = candidate;
+                nextSegment = segment;
+            }
+        }
+
+        var delay = next!.Value - istNow;
 
         _logger.LogInformation(
-            "Next auto square-off scheduled for {Next:yyyy-MM-dd HH:mm} IST (in {Hours:0.0}h)",
-            next, delay.TotalHours);
+            "Next {Segment} auto square-off scheduled for {Next:yyyy-MM-dd HH:mm} IST (in {Hours:0.0}h)",
+            SegmentTimeSettings.Label(nextSegment!.Value), next, delay.TotalHours);
 
-        return delay <= TimeSpan.Zero ? TimeSpan.FromSeconds(1) : delay;
+        // Wake at least every IdlePoll so setting changes are picked up.
+        if (delay > IdlePoll)
+            return (IdlePoll, null);
+
+        return (delay <= TimeSpan.Zero ? TimeSpan.FromSeconds(1) : delay, nextSegment);
     }
 
     private async Task<bool> IsEnabledAsync(CancellationToken ct)
@@ -98,27 +117,32 @@ public sealed class AutoSquareOffService(
         return await settings.GetSettingAsync<bool?>("AutoSquareOffEnabled") ?? false;
     }
 
-    private async Task RunSquareOffAsync(CancellationToken ct)
+    private async Task RunSquareOffAsync(MarketSegment segment, CancellationToken ct)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TradingDbContext>();
         var engine = scope.ServiceProvider.GetRequiredService<ITradingEngine>();
         var notifications = scope.ServiceProvider.GetService<INotificationService>();
+        var segmentLabel = SegmentTimeSettings.Label(segment);
 
-        var openPositionIds = await db.Positions
+        var openPositions = await db.Positions
             .Where(p => p.ClosedAt == null)
-            .Select(p => p.Id)
+            .Select(p => new { p.Id, p.Symbol })
             .ToListAsync(ct);
+        var openPositionIds = openPositions
+            .Where(p => MarketSegments.ForTradingSymbol(p.Symbol) == segment)
+            .Select(p => p.Id)
+            .ToList();
 
         if (openPositionIds.Count == 0)
         {
-            _logger.LogInformation("Auto square-off: no open positions to close");
+            _logger.LogInformation("Auto square-off ({Segment}): no open positions to close", segmentLabel);
             return;
         }
 
         _logger.LogInformation(
-            "Auto square-off triggered at {Now:HH:mm} IST — closing {Count} open position(s)",
-            DateTime.UtcNow.ToIst(), openPositionIds.Count);
+            "Auto square-off ({Segment}) triggered at {Now:HH:mm} IST — closing {Count} open position(s)",
+            segmentLabel, DateTime.UtcNow.ToIst(), openPositionIds.Count);
 
         var closed = 0;
         var failed = 0;
@@ -145,7 +169,7 @@ public sealed class AutoSquareOffService(
 
         if (notifications is not null)
         {
-            var msg = $@"🔔 AUTO SQUARE-OFF
+            var msg = $@"🔔 AUTO SQUARE-OFF ({segmentLabel})
 
 • Closed: {closed} of {openPositionIds.Count} position(s)"
                 + (failed > 0 ? $"\n• Failed: {failed}" : string.Empty)
@@ -155,7 +179,7 @@ public sealed class AutoSquareOffService(
         }
     }
 
-    private static TimeSpan ParseTimeOrDefault(string? value)
+    private static TimeSpan ParseTimeOrDefault(string? value, MarketSegment segment)
     {
         if (!string.IsNullOrWhiteSpace(value) &&
             TimeSpan.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out var parsed) &&
@@ -163,6 +187,6 @@ public sealed class AutoSquareOffService(
         {
             return parsed;
         }
-        return DefaultTimeIst;
+        return TimeSpan.Parse(SegmentTimeSettings.DefaultAutoSquareOffTime(segment), System.Globalization.CultureInfo.InvariantCulture);
     }
 }

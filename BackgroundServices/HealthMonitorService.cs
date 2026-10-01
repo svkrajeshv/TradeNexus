@@ -6,6 +6,7 @@ using NexusApp.Helpers;
 using NexusApp.Hubs;
 using NexusApp.Interfaces;
 using NexusApp.Models;
+using NexusApp.Parser;
 using NexusApp.TradingEngine;
 using System.Collections.Concurrent;
 using System.Globalization;
@@ -31,7 +32,7 @@ public sealed class HealthMonitorService(
     // The health tick itself is otherwise a local DB read + in-memory broadcast, so
     // a tighter cadence only costs a bit more DB/CPU work, not extra broker calls.
     private static readonly TimeSpan Cadence = TimeSpan.FromSeconds(10);
-    private DateTime? _lastSquareOffDateLocal;
+    private readonly Dictionary<MarketSegment, DateTime> _lastSquareOffDateLocal = [];
 
     private readonly ILogger<HealthMonitorService> _logger = logger;
     private readonly IServiceProvider _serviceProvider = serviceProvider;
@@ -57,14 +58,17 @@ public sealed class HealthMonitorService(
             using var scope = _serviceProvider.CreateScope();
             var settings = scope.ServiceProvider.GetRequiredService<ISettingsService>();
             var autoSquareOffEnabled = await settings.GetSettingAsync<bool?>("AutoSquareOffEnabled") ?? false;
-            var autoSquareOffTime = await settings.GetSettingAsync<string>("AutoSquareOffTime") ?? "15:10";
-            if (autoSquareOffEnabled && TimeSpan.TryParse(autoSquareOffTime, CultureInfo.InvariantCulture, out TimeSpan targetTime))
+            foreach (var segment in SegmentTimeSettings.All)
             {
-                var nowIst = DateTime.UtcNow.ToIst();
-                if (nowIst.TimeOfDay >= targetTime)
+                var autoSquareOffTime = await settings.GetSettingAsync<string>(SegmentTimeSettings.AutoSquareOffTimeKey(segment)) ?? SegmentTimeSettings.DefaultAutoSquareOffTime(segment);
+                if (autoSquareOffEnabled && TimeSpan.TryParse(autoSquareOffTime, CultureInfo.InvariantCulture, out TimeSpan targetTime))
                 {
-                    _lastSquareOffDateLocal = nowIst.Date;
-                    _logger.LogInformation("Startup: Current time is past configured Auto Square-Off time ({Configured}). Setting last run date to today.", autoSquareOffTime);
+                    var nowIst = DateTime.UtcNow.ToIst();
+                    if (nowIst.TimeOfDay >= targetTime)
+                    {
+                        _lastSquareOffDateLocal[segment] = nowIst.Date;
+                        _logger.LogInformation("Startup: Current time is past configured {Segment} Auto Square-Off time ({Configured}). Setting last run date to today.", SegmentTimeSettings.Label(segment), autoSquareOffTime);
+                    }
                 }
             }
         }
@@ -165,22 +169,28 @@ public sealed class HealthMonitorService(
                 // Auto Square-Off Check
                 var settings = scope.ServiceProvider.GetRequiredService<ISettingsService>();
                 var autoSquareOffEnabled = await settings.GetSettingAsync<bool?>("AutoSquareOffEnabled") ?? false;
-                var autoSquareOffTime = await settings.GetSettingAsync<string>("AutoSquareOffTime") ?? "15:10";
 
-                if (autoSquareOffEnabled && TimeSpan.TryParse(autoSquareOffTime, CultureInfo.InvariantCulture, out TimeSpan targetTime))
+                foreach (var segment in SegmentTimeSettings.All.Where(_ => autoSquareOffEnabled))
                 {
+                    var autoSquareOffTime = await settings.GetSettingAsync<string>(SegmentTimeSettings.AutoSquareOffTimeKey(segment)) ?? SegmentTimeSettings.DefaultAutoSquareOffTime(segment);
+                    if (!TimeSpan.TryParse(autoSquareOffTime, CultureInfo.InvariantCulture, out TimeSpan targetTime))
+                        continue;
+
                     var nowIst = DateTime.UtcNow.ToIst();
                     var todayLocal = nowIst.Date;
-                    if (nowIst.TimeOfDay >= targetTime && (_lastSquareOffDateLocal == null || _lastSquareOffDateLocal < todayLocal))
+                    var hasLast = _lastSquareOffDateLocal.TryGetValue(segment, out var lastRun);
+                    if (nowIst.TimeOfDay >= targetTime && (!hasLast || lastRun < todayLocal))
                     {
-                        _logger.LogInformation("Auto Square-Off triggered at {Time} IST (configured time: {Configured})", nowIst.ToString("hh:mm:ss tt"), autoSquareOffTime);
-                        _lastSquareOffDateLocal = todayLocal;
+                        _logger.LogInformation("{Segment} Auto Square-Off triggered at {Time} IST (configured time: {Configured})", SegmentTimeSettings.Label(segment), nowIst.ToString("hh:mm:ss tt"), autoSquareOffTime);
+                        _lastSquareOffDateLocal[segment] = todayLocal;
 
                         var db = scope.ServiceProvider.GetRequiredService<TradingDbContext>();
-                        var openPositions = await db.Positions.Where(p => p.ClosedAt == null).ToListAsync(stoppingToken);
+                        var openPositions = (await db.Positions.Where(p => p.ClosedAt == null).ToListAsync(stoppingToken))
+                            .Where(p => MarketSegments.ForTradingSymbol(p.Symbol) == segment)
+                            .ToList();
                         if (openPositions.Count > 0)
                         {
-                            _logger.LogInformation("Auto squaring off {Count} open position(s) at Market price.", openPositions.Count);
+                            _logger.LogInformation("Auto squaring off {Count} open {Segment} position(s) at Market price.", openPositions.Count, SegmentTimeSettings.Label(segment));
                             foreach (var positionId in openPositions.Select(p => p.Id))
                             {
                                 try
@@ -418,6 +428,9 @@ public sealed class CmpStreamingService(
     // state on restart fails safe (the signal simply does not fire).
     private readonly ConcurrentDictionary<int, byte> _entryArmedSignals = new();
 
+    // Throttles BrokerPnlTick broadcasts to 1s intervals instead of the 250ms WS cadence.
+    private DateTime _lastBrokerPnlBroadcastUtc = DateTime.MinValue;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("CMP streaming service started (Angel SmartStream WS, cadence {Seconds}s)", Cadence.TotalSeconds);
@@ -449,6 +462,11 @@ public sealed class CmpStreamingService(
                     scope.ServiceProvider.GetRequiredService<ISettingsService>(),
                     stoppingToken);
 
+                await FinalizeStuckSignalsAsync(
+                    db,
+                    scope.ServiceProvider.GetRequiredService<ISettingsService>(),
+                    stoppingToken);
+
                 if (!broker.IsConnected)
                 {
                     await Task.Delay(Cadence, stoppingToken);
@@ -468,7 +486,16 @@ public sealed class CmpStreamingService(
                     .Take(30)
                     .ToListAsync(stoppingToken);
 
-                if (liveSignals.Count == 0)
+                // Open positions must keep receiving quotes even after their originating
+                // signal drops out of the recent-signals window, otherwise LTP/P&L freeze
+                // and paper SL/target exits are never evaluated.
+                var openPositionSymbols = await db.Positions
+                    .AsNoTracking()
+                    .Where(p => p.ClosedAt == null)
+                    .Select(p => new { p.Symbol, p.SignalId })
+                    .ToListAsync(stoppingToken);
+
+                if (liveSignals.Count == 0 && openPositionSymbols.Count == 0)
                 {
                     await Task.Delay(Cadence, stoppingToken);
                     continue;
@@ -485,6 +512,15 @@ public sealed class CmpStreamingService(
                     if (!symbolMap.TryGetValue(key, out var list))
                         symbolMap[key] = list = [];
                     list.Add(s.Id);
+                }
+
+                foreach (var p in openPositionSymbols)
+                {
+                    if (string.IsNullOrWhiteSpace(p.Symbol)) continue;
+                    if (!symbolMap.TryGetValue(p.Symbol, out var list))
+                        symbolMap[p.Symbol] = list = [];
+                    if (p.SignalId is int sid && sid > 0 && !list.Contains(sid))
+                        list.Add(sid);
                 }
 
                 // Resolve tokens for all symbols via instrument master
@@ -563,6 +599,19 @@ public sealed class CmpStreamingService(
                     var high = _highBySymbol.AddOrUpdate(symbol, quote, (_, existing) => quote > existing ? quote : existing);
                     var low = _lowBySymbol.AddOrUpdate(symbol, quote, (_, existing) => quote < existing ? quote : existing);
 
+                    if (kv.Value.Count == 0)
+                    {
+                        ticks.Add(new
+                        {
+                            SignalId = 0,
+                            Cmp = quote,
+                            High = high,
+                            Low = low,
+                            Symbol = symbol,
+                            Timestamp = nowUtc
+                        });
+                    }
+
                     foreach (var signalId in kv.Value)
                     {
                         ticks.Add(new
@@ -588,31 +637,35 @@ public sealed class CmpStreamingService(
                     await _hub.Clients.All.SendAsync("CmpTick", ticks, stoppingToken);
                 }
 
-                // Push live broker P&L and open positions on every 1s CMP tick so the
-                // Dashboard stat cards and Open Positions grid update continuously,
-                // without waiting for the 10s HealthTick cadence.
-                var livePnl = brokerPnlTracker.TryGetLivePnl();
-                if (livePnl is { } pnl)
+                // Push live broker P&L and open positions at 1s cadence so the
+                // Dashboard stat cards and Open Positions grid update smoothly,
+                // without flooding clients on every 250ms WS tick.
+                if (nowUtc - _lastBrokerPnlBroadcastUtc >= TimeSpan.FromSeconds(1))
                 {
-                    var brokerOpenPositions = brokerPnlTracker.GetOpenPositions()
-                        .Select(p => new
-                        {
-                            p.Symbol,
-                            p.Quantity,
-                            AvgPrice = p.AveragePrice,
-                            LTP = p.CurrentPrice,
-                            PnL = p.UnrealizedPnL
-                        })
-                        .ToList();
-
-                    await _hub.Clients.All.SendAsync("BrokerPnlTick", new
+                    _lastBrokerPnlBroadcastUtc = nowUtc;
+                    var livePnl = brokerPnlTracker.TryGetLivePnl();
+                    if (livePnl is { } pnl)
                     {
-                        LiveUnrealized = pnl.Unrealized,
-                        LiveRealized = pnl.Realized,
-                        OpenCount = pnl.OpenCount,
-                        Positions = brokerOpenPositions,
-                        Timestamp = DateTime.UtcNow
-                    }, stoppingToken);
+                        var brokerOpenPositions = brokerPnlTracker.GetOpenPositions()
+                            .Select(p => new
+                            {
+                                p.Symbol,
+                                p.Quantity,
+                                AvgPrice = p.AveragePrice,
+                                LTP = p.CurrentPrice,
+                                PnL = p.UnrealizedPnL
+                            })
+                            .ToList();
+
+                        await _hub.Clients.All.SendAsync("BrokerPnlTick", new
+                        {
+                            LiveUnrealized = pnl.Unrealized,
+                            LiveRealized = pnl.Realized,
+                            OpenCount = pnl.OpenCount,
+                            Positions = brokerOpenPositions,
+                            Timestamp = nowUtc
+                        }, stoppingToken);
+                    }
                 }
 
                 // --- Entry Price Crossing Trigger ---
@@ -644,9 +697,13 @@ public sealed class CmpStreamingService(
                         _entryArmedSignals.TryRemove(armedId, out _);
                     }
 
+                    var parserResolver = scope.ServiceProvider.GetRequiredService<SignalParserResolver>();
                     foreach (var sig in awaitingSignals)
                     {
-                        if (!crossingEnabled)
+                        // Tag-entry channels (Vip Group, BANKNIFTY EXPRESS, TRADE WITH PIHU, GUJARATI TRADER)
+                        // execute only when the channel posts the entry price as a tagged/follow-up
+                        // message - never on live CMP crossing.
+                        if (!crossingEnabled || parserResolver.Resolve(sig.ChannelName).AlwaysAwaitEntry)
                             continue;
 
                         // Resolve the trading symbol for this signal
@@ -706,6 +763,7 @@ public sealed class CmpStreamingService(
                                 OriginalMessage = sig.OriginalMessage,
                                 SignalTime = sig.TelegramTimestamp,
                                 ChannelName = sig.ChannelName,
+                                SignalId = sig.Id,
                                 IsValid = true
                             };
 
@@ -742,7 +800,7 @@ public sealed class CmpStreamingService(
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "CMP stream tick failed, continuing");
+                _logger.LogError(ex, "CMP stream tick failed, continuing");
             }
 
             try { await Task.Delay(Cadence, stoppingToken); }
@@ -775,10 +833,31 @@ public sealed class CmpStreamingService(
             return;
 
         var cutoff = DateTime.UtcNow - TimeSpan.FromMinutes(stalenessMinutes);
-        var stale = await db.TradingSignals
+        var candidates = await db.TradingSignals
             .Where(s => (s.Status == SignalStatus.AwaitingEntry || s.Status == SignalStatus.AwaitingActivation) &&
                         s.TelegramTimestamp < cutoff)
             .ToListAsync(ct);
+
+        // Tag-entry channels wait for their own price post and use the longer TagEntryPolicy window.
+        using var resolverScope = _serviceProvider.CreateScope();
+        var resolver = resolverScope.ServiceProvider.GetRequiredService<SignalParserResolver>();
+        // They execute on CMP crossing the entry, so they are exempt from staleness and only
+        // expire once the IST trading day has rolled over.
+        var todayIst = DateTime.UtcNow.ToIst().Date;
+        var nowIstTime = DateTime.UtcNow.ToIst().TimeOfDay;
+        var segmentEnd = new Dictionary<MarketSegment, TimeSpan>();
+        foreach (var seg in SegmentTimeSettings.All)
+        {
+            var endStr = await settings.GetSettingAsync<string>(SegmentTimeSettings.SignalWindowEndKey(seg))
+                ?? SegmentTimeSettings.DefaultSignalWindowEnd(seg);
+            segmentEnd[seg] = TimeSpan.TryParse(endStr, System.Globalization.CultureInfo.InvariantCulture, out var e) ? e : TagEntryPolicy.LastEntryTimeIst;
+        }
+        var stale = candidates
+            .Where(s => s.Status != SignalStatus.AwaitingEntry ||
+                        !resolver.Resolve(s.ChannelName).AlwaysAwaitEntry ||
+                        s.TelegramTimestamp.EnsureUtc().ToIst().Date < todayIst ||
+                        nowIstTime >= segmentEnd[MarketSegments.ForUnderlying(s.Index)])
+            .ToList();
 
         if (stale.Count == 0)
             return;
@@ -825,6 +904,119 @@ public sealed class CmpStreamingService(
         await db.SaveChangesAsync(ct);
 
         foreach (var sig in stale)
+        {
+            await _hub.Clients.All.SendAsync("SignalStatusChanged", new
+            {
+                sig.Id,
+                Status = sig.Status.ToString()
+            }, ct);
+        }
+    }
+
+    private static readonly TimeSpan StuckSignalGrace = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan StuckSignalScanInterval = TimeSpan.FromMinutes(1);
+    private DateTime _lastStuckScanUtc = DateTime.MinValue;
+    // First time each Parsed/Pending signal was observed, so a signal that only just moved to
+    // Pending (e.g. after waiting hours for entry) is never finalised mid-execution.
+    private readonly Dictionary<int, DateTime> _stuckFirstSeenUtc = [];
+
+    /// <summary>
+    /// In auto mode a signal should never rest in Parsed/Pending. Rows left there by an app
+    /// restart or a failed final save are reconciled against their orders: an accepted/executed
+    /// order means the trade went through (Executed); otherwise the signal is Failed with a reason.
+    /// </summary>
+    private async Task FinalizeStuckSignalsAsync(TradingDbContext db, ISettingsService settings, CancellationToken ct)
+    {
+        var nowUtc = DateTime.UtcNow;
+        if (nowUtc - _lastStuckScanUtc < StuckSignalScanInterval)
+            return;
+        _lastStuckScanUtc = nowUtc;
+
+        var mode = (await settings.GetSettingAsync<string>("TradingMode") ?? "manual").ToLowerInvariant();
+        if (mode is not ("auto" or "automatic"))
+        {
+            _stuckFirstSeenUtc.Clear();
+            return;
+        }
+
+        var candidates = await db.TradingSignals
+            .Where(s => s.Status == SignalStatus.Parsed || s.Status == SignalStatus.Pending)
+            .ToListAsync(ct);
+
+        var ids = candidates.Select(s => s.Id).ToHashSet();
+        foreach (var gone in _stuckFirstSeenUtc.Keys.Where(id => !ids.Contains(id)).ToList())
+            _stuckFirstSeenUtc.Remove(gone);
+
+        var stuck = new List<TradingSignal>();
+        foreach (var sig in candidates)
+        {
+            if (!_stuckFirstSeenUtc.TryGetValue(sig.Id, out var firstSeen))
+            {
+                _stuckFirstSeenUtc[sig.Id] = nowUtc;
+                continue;
+            }
+            if (nowUtc - firstSeen >= StuckSignalGrace &&
+                nowUtc - sig.ReceivedTimestamp.EnsureUtc() >= StuckSignalGrace)
+                stuck.Add(sig);
+        }
+
+        if (stuck.Count == 0)
+            return;
+
+        var stuckIds = stuck.Select(s => s.Id).ToList();
+        var orders = await db.Orders
+            .AsNoTracking()
+            .Where(o => stuckIds.Contains(o.SignalId))
+            .Select(o => new { o.SignalId, o.Status })
+            .ToListAsync(ct);
+
+        var defaultAccId = await db.TradingAccounts
+            .AsNoTracking()
+            .Where(a => a.IsEnabled)
+            .OrderByDescending(a => a.IsDefault)
+            .Select(a => a.Id)
+            .FirstOrDefaultAsync(ct);
+        // Same fallback as TradingEngine.RecordFailureAsync: any account can carry the reason row.
+        if (defaultAccId == 0)
+            defaultAccId = await db.TradingAccounts.AsNoTracking().Select(a => a.Id).FirstOrDefaultAsync(ct);
+
+        foreach (var sig in stuck)
+        {
+            var sigOrders = orders.Where(o => o.SignalId == sig.Id).ToList();
+            if (sigOrders.Any(o => o.Status is OrderStatus.Accepted or OrderStatus.Executed))
+            {
+                sig.Status = SignalStatus.Executed;
+                _logger.LogWarning("Stuck signal {Id} had an accepted/executed order; marked Executed.", sig.Id);
+            }
+            else
+            {
+                sig.Status = SignalStatus.Failed;
+                var hasReason = sigOrders.Any(o => o.Status is OrderStatus.Rejected or OrderStatus.Failed);
+                if (!hasReason && defaultAccId > 0)
+                {
+                    db.Orders.Add(new Order
+                    {
+                        SignalId = sig.Id,
+                        TradingAccountId = defaultAccId,
+                        Symbol = sig.Symbol ?? sig.Index,
+                        Quantity = 0,
+                        Price = sig.EntryPrice,
+                        Side = sig.Action == SignalAction.Buy ? OrderSide.Buy : OrderSide.Sell,
+                        OrderType = OrderType.Limit,
+                        ProductType = ProductType.Nrml,
+                        Status = OrderStatus.Rejected,
+                        ErrorMessage = "Execution interrupted (app restart or save error) - status was not finalised.",
+                        CreatedAt = nowUtc
+                    });
+                }
+                _logger.LogWarning("Stuck signal {Id} left in {Status}; marked Failed.", sig.Id, "Parsed/Pending");
+            }
+            _stuckFirstSeenUtc.Remove(sig.Id);
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        foreach (var sig in stuck)
         {
             await _hub.Clients.All.SendAsync("SignalStatusChanged", new
             {

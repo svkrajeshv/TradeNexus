@@ -16,7 +16,7 @@ public class LotConfigVm
 /// <summary>
 /// Per-underlying default Stop-Loss / Target levels edited on the Settings page.
 /// Persisted as <c>SL.Points.{Index}</c>, <c>Target.Points.{Index}</c>,
-/// <c>SL.Percent.{Index}</c> and <c>Target.Percent.{Index}</c>.
+/// <c>SL.Override.{Index}</c> and <c>Target.Override.{Index}</c>.
 /// </summary>
 public class IndexRiskProfileVm
 {
@@ -24,7 +24,6 @@ public class IndexRiskProfileVm
     public MarketSegment Segment { get; set; }
     public decimal DefaultSlPoints { get; set; }
     public decimal DefaultTargetPoints { get; set; }
+    public decimal OverrideSlPoints { get; set; } = 0m;
     public decimal OverrideTargetPoints { get; set; } = 15m;
-    public decimal SlPercent { get; set; }
-    public decimal TargetPercent { get; set; }
 }

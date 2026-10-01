@@ -1,4 +1,4 @@
-using NexusApp.Interfaces;
+﻿using NexusApp.Interfaces;
 using NexusApp.Models;
 
 namespace NexusApp.Parser.Channels;
@@ -18,7 +18,7 @@ namespace NexusApp.Parser.Channels;
 /// stop-loss = entry - <see cref="SignalParserBase.DefaultSlPoints"/> (50 pts).
 /// No activation message is required.
 /// </summary>
-public class BankniftyExpressParser(ILogger<BankniftyExpressParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
+public class BankniftyExpressParser(ILogger<BankniftyExpressParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory), IChannelSignalParser
 {
     /// <summary>
     /// Higher than the generic keyword parsers (priority 10). The real channel name is
@@ -30,6 +30,15 @@ public class BankniftyExpressParser(ILogger<BankniftyExpressParser> logger, ISer
     public override int Priority => 20;
 
     public override bool RequiresActivation => false;
+
+    /// <summary>
+    /// Same entry rule as Vip Group: enter only when live CMP crosses the entry or the
+    /// channel tags the call with exactly the entry price (e.g. "CRUDEOIL 335 ❤️❤️").
+    /// </summary>
+    public bool AlwaysAwaitEntry => true;
+
+    public bool TryParsePriceTag(string? message, out decimal price) =>
+        VipGroupParser.TryParseBarePrice(message, out price);
 
     /// <summary>
     /// Matches the "Banknifty Express" / "banknifty_nifty_sensex_express" channel.

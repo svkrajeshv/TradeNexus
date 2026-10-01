@@ -1,4 +1,4 @@
-using NexusApp.Interfaces;
+﻿using NexusApp.Interfaces;
 using NexusApp.Models;
 using System.Globalization;
 using System.Text.RegularExpressions;
@@ -32,7 +32,7 @@ namespace NexusApp.Parser.Channels;
 /// stored signal by <c>TelegramListenerService.TryHandleFollowUpUpdateAsync</c>.
 /// No activation message is required.
 /// </summary>
-public partial class VipGroupParser(ILogger<VipGroupParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory)
+public partial class VipGroupParser(ILogger<VipGroupParser> logger, IServiceScopeFactory scopeFactory) : SignalParserBase(logger, scopeFactory), IChannelSignalParser
 {
     /// <summary>
     /// Matches "NEAR 155-60", "NEAR :- 155 - 160", "NEAR 155–60" (en dash) and the
@@ -49,6 +49,35 @@ public partial class VipGroupParser(ILogger<VipGroupParser> logger, IServiceScop
     public override int Priority => 20;
 
     public override bool RequiresActivation => false;
+
+    /// <summary>
+    /// Vip Group calls ("ABOVE :- 310") are only entered once the price reaches the entry:
+    /// either live CMP crosses it or the channel tags the call with that exact price.
+    /// </summary>
+    public bool AlwaysAwaitEntry => true;
+
+    /// <summary>
+    /// Matches the running-price tags channels reply with: bare numbers ("345❤️❤️", "335"), optionally prefixed by an
+    /// index or MCX commodity ("SENSEX 345 ❤️❤️", "CRUDEOIL 335 ❤️❤️"). Trailing emoji are excluded via
+    /// letter/number categories (not \w, which also matches the U+FE0F variation selector).
+    /// </summary>
+    [GeneratedRegex(@"^\s*(?:(?:NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX|CRUDEOILM?|NATURALGAS|NATGASMINI|NATGAS|GOLDM?|GOLDGUINEA|GOLDPETAL|SILVERM?|SILVERMIC|COPPER|ZINC|LEAD|ALUMINIUM|NICKEL|MENTHAOIL|COTTON)\s+)?(\d+(?:\.\d+)?)[^\p{L}\p{N}]*$", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
+    private static partial Regex PriceTagRegex();
+
+    public bool TryParsePriceTag(string? message, out decimal price) => TryParseBarePrice(message, out price);
+
+    /// <summary>
+    /// Shared bare price-tag parser ("310❤️") for channels that tag their calls with the running price.
+    /// </summary>
+    internal static bool TryParseBarePrice(string? message, out decimal price)
+    {
+        price = 0m;
+        if (string.IsNullOrWhiteSpace(message)) return false;
+        var match = PriceTagRegex().Match(message);
+        return match.Success &&
+               decimal.TryParse(match.Groups[1].Value, NumberStyles.Number, CultureInfo.InvariantCulture, out price) &&
+               price > 0;
+    }
 
     /// <summary>
     /// Matches the "Vip Group" channel (emoji suffixes in the real title are ignored

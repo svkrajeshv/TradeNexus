@@ -29,10 +29,11 @@ public sealed class NotificationService(
     {
         try
         {
+            var channelTag = !string.IsNullOrWhiteSpace(signal.ChannelName) ? $" [{signal.ChannelName}]" : "";
             await _hub.Clients.All.SendAsync("Notification", new
             {
                 Kind = "signal",
-                Title = $"{signal.Action} {signal.Index} {signal.Strike}{signal.OptionType}",
+                Title = $"{signal.Action} {signal.Index} {signal.Strike}{signal.OptionType}{channelTag}",
                 Body = $"Entry {signal.EntryPrice} / SL {signal.StopLoss}",
                 Timestamp = DateTime.UtcNow
             });

@@ -5,6 +5,7 @@ namespace NexusApp.Interfaces;
 public interface IIndexRiskProfileService
 {
     Task<decimal> GetDefaultSlBufferPointsAsync(string? index, decimal entryPrice);
+    Task<decimal> GetOverrideSlPointsAsync(string? index);
     Task<decimal> GetOverrideTargetPointsAsync(string? index);
     Task<IndexRiskProfile> GetProfileAsync(string? index);
 }
